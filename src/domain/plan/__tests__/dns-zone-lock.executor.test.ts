@@ -8,6 +8,7 @@ import { EnvironmentRepository } from '../../../adapters/db/repositories/environ
 import { RunRepository } from '../../../adapters/db/repositories/run.repository.js';
 import { ConvergeExecutor } from '../converge.executor.js';
 import type { DnsZoneIdentity } from '../../ports/dns.port.js';
+import { domainEngineKey } from '../../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 
 const gcpZone: DnsZoneIdentity = { provider: 'gcp', zoneId: 'public-zone', zoneName: 'example.com', scope: { projectId: 'dns-project' } };
 const cfZone: DnsZoneIdentity = { provider: 'cloudflare', zoneId: 'a'.repeat(32), zoneName: 'example.com', scope: { accountId: 'b'.repeat(32) } };
@@ -37,11 +38,11 @@ function plan(label: string, zone: DnsZoneIdentity, arbitraryKeys?: string[]) {
   return { planRunId, address, actionId: action.id };
 }
 
-function infrastructurePlan(label: string, zone: DnsZoneIdentity, mode: 'mapping' | 'forget' | 'service', claims: unknown = { 'app.example.com': { zone } }) {
+function infrastructurePlan(label: string, zone: DnsZoneIdentity, mode: 'mapping' | 'forget' | 'service', claims: unknown = { 'app.example.com': { zone } }, additional = false) {
   const projectId = new ProjectRepository().create({ name: label }).id;
   const environmentId = new EnvironmentRepository().create({ projectId, name: 'fixture' }).id;
   const segment = { id: `segment-${label}`, engine: 'opentofu', planDigest: 'saved-digest', configurationDigest: 'config-digest', engineVersion: '1.13.9', providerVersions: {} };
-  const address = mode === 'service' ? 'google_cloud_run_v2_service.web' : 'google_cloud_run_domain_mapping.app_example_com';
+  const address = mode === 'service' ? 'google_cloud_run_v2_service.web' : `google_cloud_run_domain_mapping.${domainEngineKey('app.example.com', additional)}`;
   const action = { id: mode === 'service' ? 'service:web' : mode === 'forget' ? 'domain-forget:app.example.com' : 'domain:app.example.com',
     type: mode === 'mapping' ? 'destroy' : 'update', resource: { kind: mode === 'service' ? 'service' : 'domain', name: mode === 'service' ? 'web' : 'app.example.com', provider: 'gcp' },
     verified: true, requiresConfirm: true, reason: 'Release only the exact persisted domain claim', metadata: mode === 'forget'
@@ -102,13 +103,22 @@ describe('DNS zone authority is serialized across application projects', () => {
   it.each(['mapping', 'forget'] as const)('holds the DNS zone while GCP %s releases its claim', async mode => {
     await crossScope(infrastructurePlan('release-app', gcpZone, mode), plan('publisher-app', gcpZone));
   });
+  it.each(['gcp-domain', 'gcp-domain-94e85b34a33dab09e6b2'])('executes a saved mapping claim with its reviewed owner %s', async owner => {
+    const selected = infrastructurePlan('owned-mapping', gcpZone, 'mapping', { 'app.example.com': { zone: gcpZone, owner } }, owner !== 'gcp-domain');
+    const segmentHandler = vi.fn(async () => ({ outcomes: { [selected.address]: 'succeeded' as const }, diagnostics: [] }));
+    const result = await new ConvergeExecutor().execute({ planRunId: selected.planRunId, currentSpecRevision: 1,
+      confirmActions: [selected.actionId], handler: vi.fn(), segmentHandler });
+    expect(result).toMatchObject({ success: true });
+    expect(segmentHandler).toHaveBeenCalledOnce();
+  });
   it.each(['mapping', 'forget'] as const)('blocks GCP %s release while a DNS apply owns the zone', async mode => {
     await crossScope(plan('publisher-app', gcpZone), infrastructurePlan('release-app', gcpZone, mode));
   });
   it('does not lock a zone merely because an unrelated hosting plan retains a domain claim', async () => {
     await crossScope(infrastructurePlan('hosting-app', gcpZone, 'service'), plan('publisher-app', gcpZone), false);
   });
-  it.each([undefined, { 'app.example.com': { zone: { ...gcpZone, scope: {} } } },
+  it.each([undefined, { 'app.example.com': { zone: gcpZone, owner: 'gcp-domain-00000000000000000000' } },
+    { 'app.example.com': { zone: { ...gcpZone, scope: {} } } },
     { 'app.example.com': { zone: { ...gcpZone, scope: { projectId: 'dns-project', unexpected: 'untrusted' } } } }])('rejects missing or malformed exact domain-claim zone evidence before reserving or executing', async claims => {
     const selected = infrastructurePlan('release-app', gcpZone, 'mapping', claims === undefined ? {} : claims);
     const handler = vi.fn(); const segmentHandler = vi.fn();

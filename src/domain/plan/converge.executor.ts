@@ -14,11 +14,12 @@ import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import { engineSegmentOf, type EngineActionSegment, type EngineSegmentResult } from '../ports/infrastructure-engine.port.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
-import type { PlanAction } from './plan.types.js';
+import { requiresActionConfirmation, type PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
 import { managedBackupTargetSchema } from '../services/managed-backup-target.service.js';
 import { managedBackupFilePaths, parseBackupRetirementFiles } from '../services/backup-workflow.service.js';
+import { additionalGcpDomainDnsOwner } from '../services/domain-scope.js';
 
 /**
  * Converge executor: applies a previously persisted plan (terraform
@@ -242,6 +243,7 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-credentials',
     'infrastructure-engine',
     'dns-engine',
+    'domain-registration',
   ]).optional(),
   environmentName: z.string().min(1),
   dns: z.object({ descriptor: dnsPlanDescriptorSchema, source: z.record(z.string(), z.unknown()).optional() }).strict().optional(),
@@ -272,6 +274,19 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'domain-registration') {
+    const [action] = document.actions;
+    if (document.actions.length !== 1 || !action || action.resource.kind !== 'domain' || action.resource.provider !== 'cloudflare'
+      || action.metadata?.operation !== 'cloudflareRegistrarRegistration' || typeof action.metadata.accountId !== 'string'
+      || action.id !== `domain:${action.resource.name}:register` || action.verified !== true || engineSegmentOf(action)
+      || !(action.type === 'create' && action.billable === true && action.requiresConfirm === true
+        || action.type === 'update' && !action.billable && !action.requiresConfirm)
+      || document.dns || document.overrides || document.lockEnvironmentIds || document.sourceCommitSha
+      || document.inputRequired?.length || document.observedFingerprint !== null) {
+      ctx.addIssue({ code: 'custom', message: 'Registration plans require one exact account and domain purchase or status check.' });
+    }
+    return;
+  }
   if (document.scope === 'dns-engine') {
     const descriptor = document.dns?.descriptor;
     const reconciliation = descriptor && document.actions.length === 1
@@ -817,7 +832,12 @@ function dnsZoneResourceLocks(document: PlanRunDocument): string[] | undefined {
   }
   if (!domains.size) return undefined;
   const claims = z.object({ domainClaims: z.record(z.string(), z.object({ zone: dnsPlanDescriptorSchema.shape.zone,
-    connectionScope: z.string().min(1).optional() }).strict()) }).passthrough().parse(document.engine).domainClaims;
+    connectionScope: z.string().min(1).optional(), owner: z.string().optional() }).strict()) }).passthrough().parse(document.engine).domainClaims;
+  for (const [domain, claim] of Object.entries(claims)) {
+    if (claim.owner !== undefined && claim.owner !== 'gcp-domain' && claim.owner !== additionalGcpDomainDnsOwner(domain)) {
+      throw new Error('The DNS owner does not belong to the saved hostname.');
+    }
+  }
   return [...new Set([...domains].map(domain => {
     const claim = claims[domain];
     if (!claim) throw new Error('The exact domain claim has no saved native DNS zone.');
@@ -925,11 +945,7 @@ export class ConvergeExecutor {
     const applyRun = reservation.run;
 
     const receipts: ActionReceipt[] = [];
-    const unconfirmed = ordered.find((action) =>
-      action.type !== 'noop'
-      && (action.requiresConfirm === true || action.billable === true || action.dataBearing === true)
-      && !confirmed.has(action.id)
-    );
+    const unconfirmed = ordered.find(action => requiresActionConfirmation(action) && !confirmed.has(action.id));
     if (unconfirmed) {
       const message = `Requires explicit confirmation: pass confirmActions: ["${unconfirmed.id}"]`;
       for (const action of ordered) {

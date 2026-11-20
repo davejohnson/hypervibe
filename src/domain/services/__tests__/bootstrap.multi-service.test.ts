@@ -109,6 +109,7 @@ describe('infra_apply multi-service convergence', () => {
     const serviceRepo = new ServiceRepository();
     const project = projectRepo.create({ name: 'multi-service-project', defaultPlatform: 'railway' });
 
+    const sent: Record<string, unknown> = {};
     const deployCalls: string[] = [];
     const targetCalls: Array<{ region?: string }> = [];
 
@@ -142,7 +143,8 @@ describe('infra_apply multi-service convergence', () => {
           },
         };
       },
-      async deploy(service) {
+      async deploy(service, _environment, vars) {
+        sent[service.name] = vars;
         deployCalls.push(service.name);
         return {
           serviceId: `deploy-${service.name}`,
@@ -178,17 +180,19 @@ describe('infra_apply multi-service convergence', () => {
       adapter: fakeHostingAdapter,
     });
 
-    const payload = await applyInfra({
+    const payload = await executeBootstrap({
       projectName: project.name,
       hostingRegion: 'us-west1',
       environmentName: 'staging',
       services: ['web', 'worker'],
-      setupEmail: false,
-      confirm: true,
+      envVars: { SHARED: 'web-value', BOTH: 'yes' },
+      envVarsByService: { worker: { SHARED: 'provider-override' } },
+      removeEnvVarsByService: { worker: ['SHARED'] },
     });
 
     expect(payload.success).toBe(true);
-    expect(payload.services).toEqual(['web', 'worker']);
+    expect(sent).toMatchObject({ web: { SHARED: 'web-value', BOTH: 'yes' }, worker: { BOTH: 'yes' } });
+    expect(sent.worker).not.toHaveProperty('SHARED');
     expect(databaseAdapterSpy).not.toHaveBeenCalled();
     expect(targetCalls).toEqual([{ region: 'us-west1' }]);
     expect(deployCalls).toEqual(['web', 'worker']);

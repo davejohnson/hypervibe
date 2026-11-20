@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
@@ -73,19 +74,44 @@ export interface AzureEngineBinding {
   /** The read-only login on-demand workers count pending work with exists. */
   wakerLoginAt?: string;
   tornDownAt?: string;
+  /** 2: long names end in a distinguishing mark. Absent on environments made before that. */
+  naming?: 2;
 }
 
 export function azureBinding(environment: Pick<Environment, 'platformBindings'>): AzureEngineBinding {
   return ((environment.platformBindings as { azure?: AzureEngineBinding } | undefined)?.azure) ?? {};
 }
 
-/** Container App names allow 32 characters; the prefix keeps environments apart. */
-export function azurePrefix(project: string, environmentName: string): string {
-  return `hv-${project}-${environmentName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 20).replace(/-+$/, '');
+const azureSlug = (value: string) => value.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
+/** A name that fits `limit`. One that had to be cut ends in a mark of the whole name, so two long names never become one. */
+function azureFitted(full: string, limit: number, legacy: boolean): string {
+  const slug = azureSlug(full);
+  const cut = slug.slice(0, limit).replace(/-+$/, '');
+  if (legacy || slug.length <= limit) return cut;
+  return `${slug.slice(0, limit - 7).replace(/-+$/, '')}-${createHash('sha256').update(full).digest('hex').slice(0, 6)}`;
 }
 
-export function azureResourceName(prefix: string, service: string): string {
-  return `${prefix}-${service}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').slice(0, 32).replace(/-+$/, '');
+/**
+ * Environments made before long names got a distinguishing mark keep their plain cut names: renaming would replace their resources.
+ * A new environment records `naming: 2` with the first thing saved about it.
+ */
+export function azureLegacyNames(environment: Pick<Environment, 'platformBindings'>): boolean {
+  const binding = azureBinding(environment);
+  return Object.keys(binding).length > 0 && binding.naming !== 2;
+}
+
+/** The binding to build a save from; it carries the naming of a new environment. */
+export function azureBindingToSave(environment: Pick<Environment, 'platformBindings'>): AzureEngineBinding {
+  return { ...azureBinding(environment), ...(azureLegacyNames(environment) ? {} : { naming: 2 as const }) };
+}
+
+/** Container App names allow 32 characters; the prefix keeps environments apart. */
+export function azurePrefix(project: string, environmentName: string, legacy = false): string {
+  return azureFitted(`hv-${project}-${environmentName}`, 20, legacy);
+}
+
+export function azureResourceName(prefix: string, service: string, legacy = false): string {
+  return azureFitted(`${prefix}-${service}`, 32, legacy);
 }
 
 export function azureContainerName(storage: string): string {
@@ -118,6 +144,11 @@ export function azureEngineProblems(spec: ProjectSpec, environmentName: string):
       problems.push(`${name}: Container Apps Jobs run schedules in UTC; write the schedule in UTC and remove timeZone.`);
     }
   }
+  for (const setting of ['versioning', 'browserUploads'] as const) {
+    if (new Set(Object.values(environment.storage ?? {}).map(storage => Boolean(storage[setting]))).size > 1) {
+      problems.push(`Azure containers in this environment share one storage account. Choose the same ${setting} setting for each container.`);
+    }
+  }
   for (const [name, storage] of Object.entries(environment.storage ?? {})) {
     if (storage.provider !== 'azureblob') problems.push(`Storage ${name}: the Azure engine manages containers only with provider "azureblob".`);
     if (storage.access === 's3') problems.push(`Storage ${name}: Azure Blob Storage has no S3-compatible API; use the Azure SDK (access "native").`);
@@ -143,6 +174,8 @@ export interface AzureEngineContext {
   tokens: AzureTokens;
   environment: Environment;
   prefix: string;
+  /** Names are cut plainly, as this environment was created with. */
+  legacyNames: boolean;
   state: EngineStateIdentity;
   buildState: EngineStateIdentity;
   shared: { label: string; prefix: string; state: EngineStateIdentity; registryId: string; registryLoginServer: string; appsEnvironmentId: string; serverId: string; serverName: string; databaseHost: string };
@@ -150,14 +183,15 @@ export interface AzureEngineContext {
 }
 
 /** Pure: names, ids and states of one environment and the shared group it belongs to. */
-export function azureEngineLayout(project: Pick<Project, 'id' | 'name'>, environmentName: string, environmentId: string, connection: Pick<AzureEngineCredentials, 'subscriptionId' | 'resourceGroup'>) {
+export function azureEngineLayout(project: Pick<Project, 'id' | 'name'>, environmentName: string, environmentId: string, connection: Pick<AzureEngineCredentials, 'subscriptionId' | 'resourceGroup'>, legacyNames = false) {
   const group = `/subscriptions/${connection.subscriptionId}/resourceGroups/${connection.resourceGroup}`;
   const label = azureProfileFor(environmentName) === 'testing' ? 'testing' : environmentName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-  const sharedPrefix = azurePrefix(project.name, label === 'testing' ? 'shared' : `${environmentName}-own`);
+  // Testing environments share one group, so its name cannot depend on which of them asks.
+  const sharedPrefix = label === 'testing' ? azurePrefix(project.name, 'shared', true) : azurePrefix(project.name, `${environmentName}-own`, legacyNames);
   const names = azureSharedNames({ subscriptionId: connection.subscriptionId, prefix: sharedPrefix, label });
   const vaultName = azureProjectVaultName(connection.subscriptionId, project.name);
   return {
-    prefix: azurePrefix(project.name, environmentName),
+    legacyNames, prefix: azurePrefix(project.name, environmentName, legacyNames),
     state: { provider: 'azure', projectId: project.id, environmentId, partition: 'environment' } as EngineStateIdentity,
     buildState: { provider: 'azure', projectId: project.id, environmentId: `${environmentId}-build`, partition: 'environment' } as EngineStateIdentity,
     shared: {
@@ -178,7 +212,7 @@ export async function resolveAzureEngineContext(ctx: CommandContext, project: Pr
     ?? ctx.repos.environments.create({ projectId: project.id, name: environmentName });
   return {
     project, environmentName, connection: access.connection, auth: azureEngineAuthentication(access.connection), tokens: new AzureTokens(access.connection),
-    environment, ...azureEngineLayout(project, environmentName, environment.id, access.connection),
+    environment, ...azureEngineLayout(project, environmentName, environment.id, access.connection, azureLegacyNames(environment)),
   };
 }
 
@@ -219,7 +253,7 @@ export function buildAzureSharedInput(spec: ProjectSpec, context: Pick<AzureEngi
 }
 
 /** One environment's configuration input. Workloads are created from `image` (the last build, or the commit this apply builds). */
-export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'connection' | 'prefix' | 'shared' | 'vault'> & { environment: Pick<Environment, 'id'> & Partial<Pick<Environment, 'platformBindings'>> },
+export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'connection' | 'prefix' | 'shared' | 'vault'> & Partial<Pick<AzureEngineContext, 'legacyNames'>> & { environment: Pick<Environment, 'id'> & Partial<Pick<Environment, 'platformBindings'>> },
   extra: { secretKeys: string[]; image?: string }): AzureEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   const storageAccount = azureStorageAccountName({ subscriptionId: context.connection.subscriptionId, environmentId: context.environment.id, prefix: context.prefix });
@@ -243,20 +277,22 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer, appsEnvironmentId: context.shared.appsEnvironmentId },
     ...(azureBinding(context.environment as Environment).buildRegistry ? { buildRegistry: azureBinding(context.environment as Environment).buildRegistry! } : {}),
     vault: { id: context.vault.id, uri: context.vault.uri },
-    storage: Object.keys(environmentSpec.storage ?? {}).sort().map((name) => ({ name, container: azureContainerName(name) })),
+    storage: Object.entries(environmentSpec.storage ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, storage]) => ({
+      name, container: azureContainerName(name), ...(storage.versioning ? { versioning: true } : {}), ...(storage.browserUploads ? { browserUploads: true } : {}),
+    })),
     services: services.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => {
       const env = envFor(logicalName);
       const port = Number(env.PORT);
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`Service ${logicalName}: PORT must be a port number.`);
-      return { logicalName, resourceName: azureResourceName(context.prefix, logicalName), initialImage: extra.image!, public: service.public ?? true, targetPort: port, env,
+      return { logicalName, resourceName: azureResourceName(context.prefix, logicalName, context.legacyNames), initialImage: extra.image!, public: service.public ?? true, targetPort: port, env,
         ...command(service.startCommand), ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}) };
     }),
     workers: services.filter(([, service]) => service.workloadKind === 'worker').map(([logicalName, service]) => ({
-      logicalName, resourceName: azureResourceName(context.prefix, logicalName), initialImage: extra.image!, env: envFor(logicalName), ...command(service.startCommand),
+      logicalName, resourceName: azureResourceName(context.prefix, logicalName, context.legacyNames), initialImage: extra.image!, env: envFor(logicalName), ...command(service.startCommand),
       ...(service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
     })),
     jobs: services.filter(([, service]) => service.workloadKind === 'cron').map(([logicalName, service]) => ({
-      logicalName, resourceName: azureResourceName(context.prefix, logicalName), initialImage: extra.image!, env: envFor(logicalName),
+      logicalName, resourceName: azureResourceName(context.prefix, logicalName, context.legacyNames), initialImage: extra.image!, env: envFor(logicalName),
       schedule: service.cronSchedule!, ...command(service.startCommand),
     })),
     secretKeys: extra.secretKeys.filter((key) => !isBuildTokenKey(key)),
@@ -534,7 +570,7 @@ export interface AzureApplyDependencies {
 
 function updateBinding(ctx: CommandContext, context: AzureEngineContext, patch: Partial<AzureEngineBinding>): void {
   const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-  ctx.repos.environments.updatePlatformBindings(current.id, { azure: { ...azureBinding(current), kind: 'opentofu', ...patch } });
+  ctx.repos.environments.updatePlatformBindings(current.id, { azure: { ...azureBindingToSave(current), kind: 'opentofu', ...patch } });
 }
 
 /** Handles one non-engine action of an Azure plan; exported for tests. */
@@ -542,11 +578,8 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
   const metadata = (action.metadata ?? {}) as Record<string, unknown>;
   const store = azureEnvironmentSecretStore(context);
   const sql = (host: string) => (deps.sqlRunner ?? ((c, h) => entraSqlRunner(c.tokens, h, azureDeployAppName(c.project.name))))(context, host);
-  let learned: string | undefined;
   const setupAccess = deps.setupAccess ?? (<T>(c: AzureEngineContext, runner: SqlRunner, work: () => Promise<T>) =>
-    withAzureSetupAccess(c.tokens, c.shared.serverId, () => runner('postgres', async (query) => { await query('SELECT 1'); }), work, { onLearned: (how) => { learned = how; } }));
-  /** Says where the one allowed address came from, so a result shows which path ran. */
-  const addressNote = () => learned ? ` This computer's address came from ${learned}.` : '';
+    withAzureSetupAccess(c.tokens, c.shared.serverId, () => runner('postgres', async (query) => { await query('SELECT 1'); }), work));
   switch (metadata.operation) {
     case AZURE_SECRET_OPERATION: {
       const key = String(metadata.key);
@@ -597,7 +630,7 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
         name: azureDatabaseNames(context.environmentName).database, owner: azureDatabaseNames(context.environmentName).login,
         secretUrl: `${context.vault.uri}secrets/${azureVaultSecretName(context.environmentName, ENGINE_DATABASE_URL_KEY)}`,
       }, databaseLoginAt: now, ...(urls.wakerUrl ? { wakerLoginAt: now } : {}) });
-      return { success: true, message: `Created ${context.environmentName}'s database login and stored ${ENGINE_DATABASE_URL_KEY} in Key Vault.${addressNote()}` };
+      return { success: true, message: `Created ${context.environmentName}'s database login and stored ${ENGINE_DATABASE_URL_KEY} in Key Vault.` };
     }
     case AZURE_STORAGE_EMPTY_OPERATION: {
       const emptied = await emptyContainer(context.tokens, String(metadata.account), String(metadata.container));

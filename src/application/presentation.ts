@@ -216,7 +216,7 @@ function commandPresentation(commandId: string, value: unknown): CommandPresenta
     : '';
   const summary = data ? stringValue(data.message) : undefined;
   const details = data
-    ? genericLines(data, new Set(['project', 'environment', 'service', 'repository', 'provider', 'message']))
+    ? genericLines(data, new Set(['project', 'environment', 'service', 'repository', 'provider', 'message', 'htmlPath']))
     : value === undefined ? [] : formatCommandDataLines(value);
 
   return {
@@ -270,7 +270,7 @@ function planPresentation(data: DataRecord): CommandPresentation {
     sections.push({ title: '🚧  BLOCKED', lines: formatCommandDataLines(blockerData) });
   }
   const details = genericLines(data, new Set([
-    'environment', 'planId', 'pendingActionCount', 'noopActionCount', 'totalActionCount',
+    'environment', 'planId', 'htmlPath', 'pendingActionCount', 'noopActionCount', 'totalActionCount',
     'actions', 'blocked', 'actionScopedBlocked', 'summary',
   ]));
   if (details.length > 0) sections.push({ title: '📎  DETAILS', lines: details });
@@ -778,7 +778,7 @@ function specPresentation(data: DataRecord): CommandPresentation {
       stringValue(project?.name) ?? stringValue(project?.id),
       numberValue(data.revision) !== undefined ? `revision ${data.revision}` : undefined,
     ].filter(Boolean).join(' · '),
-    summary: initialized ? 'Desired state loaded.' : 'No desired state has been defined yet.',
+    summary: data.changed ? 'Desired state saved.' : initialized ? 'Desired state loaded.' : 'No desired state has been defined yet.',
     sections: details.length > 0 ? [{ title: '📎  DETAILS', lines: details }] : [],
   };
 }
@@ -845,6 +845,8 @@ function renderPresentation(presentation: CommandPresentation, envelope: Command
   const lines = [formatHypervibeHeader(presentation.icon, presentation.title)];
   if (presentation.context) lines.push(presentation.context);
   if (presentation.summary) lines.push('', presentation.summary);
+  const reportPath = stringValue(record(envelope.data)?.htmlPath);
+  if (reportPath) lines.push('', 'Open the plan in a browser', reportPath);
 
   for (const section of presentation.sections) {
     if (section.lines.length === 0) continue;
@@ -860,7 +862,10 @@ function renderPresentation(presentation: CommandPresentation, envelope: Command
  * structured envelope is deliberately not modified.
  */
 export function formatCommandResult(commandId: string, envelope: CommandEnvelope): string {
-  if (!envelope.ok) return renderPresentation(errorPresentation(commandId, envelope), envelope);
+  if (!envelope.ok) {
+    const text = renderPresentation(errorPresentation(commandId, envelope), envelope);
+    return envelope.error?.build ? `${text}\nHypervibe ${envelope.error.build.version}` : text;
+  }
   const data = record(envelope.data);
   const presenter = PRESENTERS[commandId];
   return renderPresentation(

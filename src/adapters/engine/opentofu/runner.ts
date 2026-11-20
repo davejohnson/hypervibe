@@ -16,6 +16,7 @@ export type TofuCommand =
   | { kind: 'apply'; planFile: string }
   | { kind: 'show-plan'; planFile: string }
   | { kind: 'show-state' }
+  | { kind: 'untaint'; address: string }
   | { kind: 'output' };
 
 export interface TofuRunOptions {
@@ -66,6 +67,10 @@ export function tofuArguments(command: TofuCommand): string[] {
       return ['show', '-json', '-no-color', command.planFile];
     case 'show-state':
       return ['show', '-json', '-no-color'];
+    case 'untaint':
+      // The setup owner holds its exclusive lock and has checked this exact state.
+      // Fail immediately if a different writer already owns OpenTofu's native lock.
+      return ['untaint', '-no-color', '-lock-timeout=0s', command.address];
     case 'output':
       return ['output', '-json', '-no-color'];
   }

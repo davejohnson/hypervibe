@@ -12,7 +12,7 @@ import { azureCiRegistry, type AzureBuildRegistry } from '../adapters/providers/
 import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import { presentBuildTokenKey } from './engine-secrets.js';
 import { azureBuildTaskName } from '../adapters/providers/azure/azure-build-task.js';
-import { azureEnvironmentSecretStore, azureBinding, azureResourceName, resolveAzureEngineContext, type AzureEngineContext } from './infrastructure-engine-azure.js';
+import { azureEnvironmentSecretStore, azureBinding, azureBindingToSave, azureResourceName, resolveAzureEngineContext, type AzureEngineContext } from './infrastructure-engine-azure.js';
 import { packageLocalCommit, runLocalCommitRelease, selectReleaseWorkloads, type LocalCommitSource } from './engine-release.js';
 import { releaseCommandFor, type EngineReleaseResult } from './infrastructure-engine.js';
 
@@ -79,7 +79,7 @@ export async function releaseAzureEngineServices(ctx: CommandContext, params: {
   }));
   if ('blocked' in source) return source;
   const group = `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}`;
-  const idOf = (name: string) => `${group}/providers/Microsoft.App/${environmentSpec.services[name]!.workloadKind === 'cron' ? 'jobs' : 'containerApps'}/${azureResourceName(context.prefix, name)}`;
+  const idOf = (name: string) => `${group}/providers/Microsoft.App/${environmentSpec.services[name]!.workloadKind === 'cron' ? 'jobs' : 'containerApps'}/${azureResourceName(context.prefix, name, context.legacyNames)}`;
   // Workloads exist only once an image does; until then this release only builds.
   let firstImage = !azureBinding(context.environment).image;
   if (!firstImage) {
@@ -98,7 +98,7 @@ export async function releaseAzureEngineServices(ctx: CommandContext, params: {
     },
     recordImage: (image, packaged) => {
       const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-      ctx.repos.environments.updatePlatformBindings(current.id, { azure: { ...azureBinding(current), kind: 'opentofu', image, imageCommit: packaged.commitSha } });
+      ctx.repos.environments.updatePlatformBindings(current.id, { azure: { ...azureBindingToSave(current), kind: 'opentofu', image, imageCommit: packaged.commitSha } });
     },
     releaseWorkload: ({ name, kind, resource, image }) => kind === 'cron'
       ? releaseAzureJob(context.tokens, { id: resource, name, image })

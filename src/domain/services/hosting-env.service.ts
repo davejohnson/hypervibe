@@ -1,3 +1,4 @@
+import { SpecStore } from '../spec/spec.store.js';
 import type { Environment } from '../entities/environment.entity.js';
 import { UNCONFIGURED_HOSTING_PROVIDER, type Project } from '../entities/project.entity.js';
 import type { Service } from '../entities/service.entity.js';
@@ -52,6 +53,10 @@ export async function syncHostingEnvVars(params: {
 }): Promise<Receipt & { provider?: string }> {
   const reservedError = reservedRuntimeEnvError(params.vars);
   if (reservedError) return { success: false, message: reservedError, error: reservedError };
+  const desired = new SpecStore().preview(params.project)?.environments[params.environment.name];
+  const retired = desired?.services[params.service.name]?.removeEnvVars ?? [];
+  const conflicts = Object.keys(params.vars).filter(key => retired.includes(key));
+  if (conflicts.length) return { success: false, message: `Service "${params.service.name}" explicitly retires ${conflicts.join(', ')}.` };
   const provider = hostingProviderForEnvironment(params.project, params.environment);
   const displayName = providerDisplayName(provider);
 
@@ -64,7 +69,7 @@ export async function syncHostingEnvVars(params: {
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,
@@ -168,7 +173,7 @@ export async function removeHostingEnvVars(params: {
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,
@@ -222,7 +227,7 @@ export async function readHostingEnvVars(params: {
     };
   }
 
-  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project);
+  const adapterResult = await adapterFactory.getProviderAdapter(provider, params.project, undefined, { environment: params.environment });
   if (!adapterResult.success || !adapterResult.adapter) {
     return {
       success: false,

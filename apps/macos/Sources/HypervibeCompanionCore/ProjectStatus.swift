@@ -84,12 +84,22 @@ public struct EnvironmentStatus: Equatable, Sendable {
         }
 
         for worker in environment.observation?.workers ?? [] where worker.needsAttention && health != .failed {
-            issues.append(StatusIssue(
-                id: "\(name)|worker|\(worker.service)", level: .attention,
-                title: "\(worker.service)'s wake-up check needs attention in \(name)",
-                chatPrompt: "Use Hypervibe to inspect the \(worker.service) worker in the \(name) environment of \(projectName). Check its wake-up status and logs, then explain what needs fixing before making changes."
-            ))
-            label = label ?? "Worker needs attention"
+            // A failed workload is not a wake-up problem; say which one it is.
+            if worker.workloadFailed {
+                issues.append(StatusIssue(
+                    id: "\(name)|worker|\(worker.service)", level: .attention,
+                    title: "\(worker.service) has failed in \(name)",
+                    chatPrompt: "Use Hypervibe to inspect the \(worker.service) worker in the \(name) environment of \(projectName). It has failed. Check its status and logs, then explain what needs fixing before making changes."
+                ))
+                label = label ?? "Worker failed"
+            } else {
+                issues.append(StatusIssue(
+                    id: "\(name)|worker|\(worker.service)", level: .attention,
+                    title: "\(worker.service)'s wake-up check needs attention in \(name)",
+                    chatPrompt: "Use Hypervibe to inspect the \(worker.service) worker in the \(name) environment of \(projectName). Check its wake-up status and logs, then explain what needs fixing before making changes."
+                ))
+                label = label ?? "Worker needs attention"
+            }
         }
 
         switch health {

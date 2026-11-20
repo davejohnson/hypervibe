@@ -1,3 +1,4 @@
+import { releaseSource, rollbackArtifactsForAttempt, rollbackHistory } from './github-release-source.js';
 import { createHash } from 'node:crypto';
 import type { Project } from '../entities/project.entity.js';
 import type { Environment } from '../entities/environment.entity.js';
@@ -31,7 +32,7 @@ export async function previewManagedCiRollback(params: {
   const sha = params.toSha.toLowerCase();
   const blockers: RollbackPreviewBlocker[] = [];
   const run = await github.getWorkflowRun(owner, repo, params.sourceWorkflowRunId);
-  if (run.id !== params.sourceWorkflowRunId || run.path !== contract.workflow.path
+  if (run.id !== params.sourceWorkflowRunId
       || run.status !== 'completed' || run.conclusion !== 'success'
       || run.repository?.full_name !== repository || run.head_repository?.full_name !== repository
       || !/^[a-f0-9]{40}$/.test(run.head_sha)) throw new Error('Rollback source run provenance is incomplete or does not belong to this successful managed workflow.');
@@ -39,7 +40,12 @@ export async function previewManagedCiRollback(params: {
   const candidates = artifacts.artifacts.filter(artifact => artifact.id === params.sourceArtifactId);
   if (artifacts.total_count !== artifacts.artifacts.length || candidates.length !== 1) throw new Error('Rollback artifact observation is incomplete or ambiguous.');
   const artifact = candidates[0];
-  if (run.run_attempt !== 1) blockers.push({ code: 'retried_source_run', message: 'A retried source run needs attempt-specific artifact provenance before recovery can be authorized.' });
+  const branch = contract.workflow.branch;
+  const head = releaseSource.trustedReleaseHead(await github.getRef(owner, repo, 'heads/' + branch), branch);
+  if (!releaseSource.matchesReleaseProducer(run, artifact, repository, branch, contract.workflow.path)
+      || !await releaseSource.isCommitOnReleaseBranch(run.head_sha, head, (base, tip) => github.compareCommits(owner, repo, base, tip))) {
+    throw new Error('Rollback source producer cannot be verified against the configured release branch.');
+  }
   const legacyName = `hypervibe-server-release-${environment.name.toLowerCase().replace(/[^a-z0-9-]+/g, '-')}-${sha}`;
   if (artifact.expired || artifact.workflow_run?.id !== run.id || artifact.workflow_run.head_sha !== run.head_sha
       || !Number.isSafeInteger(artifact.workflow_run.repository_id) || artifact.workflow_run.repository_id <= 0
@@ -47,13 +53,21 @@ export async function previewManagedCiRollback(params: {
       || ![managedCiReleaseArtifactName(environment.name, sha), legacyName].includes(artifact.name)) {
     throw new Error('Rollback artifact does not match the exact source run, repository, SHA and environment, or has expired.');
   }
+  try {
+    const prefix = artifact.name.slice(0, -sha.length);
+    const verified = await rollbackArtifactsForAttempt(github, owner, repo,
+      { branch, workflow: contract.workflow.path, prefix }, run, artifacts.artifacts);
+    if (!verified.some(candidate => candidate.id === artifact.id)) throw new Error('Artifact belongs to a different attempt');
+  } catch {
+    blockers.push({ code: 'retried_source_run', message: 'GitHub could not verify the selected artifact against the successful deployment attempt.' });
+  }
   const [files, sourceSpecText, sourceBindingsText, sourceWorkflowText, observation, latest, repositoryInfo, workflows] = await Promise.all([
     github.readArtifactFiles(owner, repo, artifact.id),
     github.getFileContent(owner, repo, '.hypervibe/spec.json', sha),
     github.getFileContent(owner, repo, '.hypervibe/bindings.json', run.head_sha),
     github.getFileContent(owner, repo, contract.workflow.path, run.head_sha),
     observeManagedWorkflowFiles({ adapter: github, owner, repo, contract }),
-    github.listWorkflowRuns(owner, repo, contract.workflow.path, { per_page: 1 }),
+    rollbackHistory(github, owner, repo, contract.workflow.path),
     github.getRepository(owner, repo),
     github.listWorkflows(owner, repo),
   ]);
@@ -72,7 +86,7 @@ export async function previewManagedCiRollback(params: {
   if (!workflows.workflows.some(workflow => workflow.path === contract.workflow.path && workflow.state === 'active')) {
     blockers.push({ code: 'workflow_inactive', message: 'The exact managed deployment workflow is not active.' });
   }
-  const latestRun = latest.workflow_runs[0];
+  const latestRun = latest[0];
   if (!latestRun || latestRun.status !== 'completed') blockers.push({ code: 'deployment_not_terminal', message: 'The latest managed deployment is missing or still running.' });
   if (!contract.workflow.supportsImmutableRollback) blockers.push({ code: 'immutable_rollback_unsupported', message: 'The hosting workflow cannot restore an immutable image.' });
   blockers.push(...inspected.blockers);

@@ -5,6 +5,12 @@ import { buildArtifactRegistryConfiguration } from './gcp-project.backend.js';
 import { CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES, CLOUD_RUN_BUILD_IDENTITY_SELF_ROLES, CLOUD_RUN_RUNTIME_BASE_ROLES,
   CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES, getCloudPrepareProfile } from '../../../../domain/services/cloud-prepare.js';
 
+export {
+  composeGcpProjectConfiguration, executeGcpProjectSetup, getGcpProjectSetupContribution, getGcpProjectSetupContributions,
+  hasGcpProjectSetup, type GcpProjectSetupContribution, type GcpProjectSetupDependencies,
+  type GcpProjectSetupParams, type GcpProjectSetupResult,
+} from './project-setup-executor.js';
+
 /** Pinned archive and extracted-package hashes from the signed OpenTofu registry release.
  * Provenance: test/provider-contracts/gcp/project-setup/google-beta.lock.hcl. */
 export const gcpSetupBackend: InfrastructureEngineBackend = {

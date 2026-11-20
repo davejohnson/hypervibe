@@ -21,6 +21,9 @@ describe('image repository for the environment region', () => {
 
   it('keeps each region in its own project-shared state, never an environment state', () => {
     expect(imageRepositoryState('p1', 'us-west1')).toEqual({ provider: 'gcp', projectId: 'p1', environmentId: 'image-repository-us-west1', partition: 'project-shared' });
+    const production = imageRepositoryState('p1', 'us-west1', 'billing-app-production');
+    expect(production).not.toEqual(imageRepositoryState('p1', 'us-west1'));
+    expect(production).not.toEqual(imageRepositoryState('p1', 'us-west1', 'billing-app-staging'));
     const files = JSON.stringify(imageRepositoryConfiguration('demo-project', 'us-west1').files);
     expect(files).toContain('"location":"us-west1"');
     expect(files).toContain('prevent_destroy');

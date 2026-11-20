@@ -120,6 +120,8 @@ export interface GcpCloudRunEngineInput {
   domains?: Array<{ domain: string; service: string }>;
   /** Domains this environment previously mapped that are no longer desired. */
   retiredDomains?: string[];
+  /** Additional hostnames use a distinct address namespace, including after removal. */
+  extraDomains?: string[];
   /** Cloud Storage buckets; the runtime identity gets object access to each, nothing broader. */
   storage?: GcpStorageInput[];
   /** Buckets this environment previously created that are no longer desired. */
@@ -193,7 +195,8 @@ export function storageEngineKey(name: string): string {
   return `storage_${name.replace(/[^a-z0-9]/g, '_')}`;
 }
 
-export function domainEngineKey(domain: string): string {
+export function domainEngineKey(domain: string, additional = false): string {
+  if (additional) return `alias_${createHash('sha256').update(domain.toLowerCase()).digest('hex')}`;
   return `domain_${domain.toLowerCase().replace(/[^a-z0-9]/g, '_')}`;
 }
 
@@ -720,7 +723,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     if (!DOMAIN_PATTERN.test(domain)) throw new Error(`Domain ${domain} is invalid.`);
     const serviceKey = engineKey(service);
     if (!services[serviceKey]) throw new Error(`Domain ${domain} targets undeclared service ${service}.`);
-    const key = domainEngineKey(domain);
+    const key = domainEngineKey(domain, input.extraDomains?.includes(domain));
     domainMappings[key] = {
       location: input.region,
       name: domain,
@@ -730,7 +733,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     resources[`google_cloud_run_domain_mapping.${key}`] = { actionId: `domain:${domain}`, kind: 'domain', name: domain };
   }
   for (const domain of input.retiredDomains ?? []) {
-    const key = domainEngineKey(domain);
+    const key = domainEngineKey(domain, input.extraDomains?.includes(domain));
     resources[`google_cloud_run_domain_mapping.${key}`] ??= { actionId: `domain:${domain}`, kind: 'domain', name: domain };
   }
   for (const retired of input.retiredServices ?? []) {

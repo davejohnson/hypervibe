@@ -81,6 +81,7 @@ export async function executeBootstrap(params: {
   expectedSourceCommitSha?: string;
   verifyHttpHealth?: boolean;
   queueEnvVars?: Record<string, string>;
+  removeEnvVarsByService?: Record<string, string[]>;
   envVarsByService?: Record<string, Record<string, string>>;
   ensureHostingProject?: boolean;
   /** Internal reviewed hosting-identity stage: configure an empty service, never deploy code. */
@@ -334,6 +335,7 @@ export async function executeBootstrap(params: {
     environment,
     services: workloads,
     envVars: Object.keys(deployEnvVars).length > 0 ? deployEnvVars : undefined,
+    ...(params.removeEnvVarsByService ? { removeEnvVarsByService: params.removeEnvVarsByService } : {}),
     ...(params.envVarsByService ? { envVarsByService: params.envVarsByService } : {}),
     ...(params.verifyHttpHealth ? { verifyHttpHealth: true } : {}),
     ...(deferProviderDeployment ? { deferProviderDeployment: true } : {}),

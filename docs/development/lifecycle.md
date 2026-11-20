@@ -174,6 +174,8 @@ Distinguish failed execution from work that was never attempted. When confirmati
 
 ## Runtime configuration ownership
 
+Existing Railway services can retire specific names with `services.<name>.removeEnvVars`. Shared configuration still applies to other services. A filtered plan may retire only the names explicitly selected for its services. Review and confirm retirement after a compatible release is running. OpenTofu-managed clouds currently block service-specific retirement.
+
 Ordinary environment configuration is additive and preserve-only. Omission is
 not deletion. Explicit `removeEnvVars` tombstones need exact confirmation and
 must reject collisions with desired values, secret slots and integration-owned

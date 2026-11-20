@@ -6,10 +6,10 @@ import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.a
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
-import { runCloudPrepare } from '../cloud-prepare.execute.js';
-import { getCloudPrepareProfile, isCloudPrepared } from '../cloud-prepare.js';
+import { runCloudPrepare, verifyAndRecordBootstrapPreparation } from '../cloud-prepare.execute.js';
+import { getCloudPreparation, getCloudPrepareProfile, isCloudPrepared } from '../cloud-prepare.js';
 
-const setup = vi.hoisted(() => vi.fn(async (_params: unknown) => ({ success: true, mode: 'preview', planId: 'saved-setup', actions: [] as unknown[], error: undefined as string | undefined })));
+const setup = vi.hoisted(() => vi.fn(async (_params: unknown) => ({ success: true, mode: 'preview', planId: 'saved-setup', htmlPath: undefined as string | undefined, actions: [] as unknown[], error: undefined as string | undefined })));
 vi.mock('../gcp-project-setup.service.js', () => ({ runGcpProjectSetup: setup, getGcpProjectSetupContribution: () => undefined }));
 vi.mock('google-auth-library', () => ({ GoogleAuth: class {
   async getClient() { return { getAccessToken: async () => ({ token: 'private-admin-token' }) }; }
@@ -25,7 +25,7 @@ describe('runCloudPrepare', () => {
 
   beforeEach(() => {
     setup.mockReset();
-    setup.mockResolvedValue({ success: true, mode: 'preview', planId: 'saved-setup', actions: [], error: undefined });
+    setup.mockResolvedValue({ success: true, mode: 'preview', planId: 'saved-setup', htmlPath: '/reports/saved-setup.html', actions: [], error: undefined });
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-cloud-prepare-'));
     SqliteAdapter.resetInstance();
     initializeDatabase(path.join(tempDir, 'hypervibe.db'));
@@ -71,6 +71,7 @@ describe('runCloudPrepare', () => {
     expect(payload).toMatchObject({
       success: true,
       mode: 'preview',
+      htmlPath: '/reports/saved-setup.html',
       plan: {
         provider: 'cloudrun',
         version: 'gcp-cloudrun-v2',
@@ -92,6 +93,49 @@ describe('runCloudPrepare', () => {
     expect(plan.grantRoles).not.toContain('roles/redis.viewer');
     expect(plan.grantRoles).not.toContain('roles/redis.admin');
     expect(plan.grantRoles).not.toContain('roles/pubsub.editor');
+  });
+
+  it('requires a dedicated connection or explicit target identities before accessing Google', async () => {
+    const project = seedProject();
+    const authorize = vi.fn(async () => 'test-token');
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', environmentProjectId: 'app-production',
+      defaultAdminAccessTokenProvider: authorize });
+    expect(result.success).toBe(false);
+    expect(authorize).not.toHaveBeenCalled();
+    expect(setup).not.toHaveBeenCalled();
+  });
+
+  it('rejects conflicting native project selections before authorization or bootstrap verification', async () => {
+    const project = seedProject();
+    const authorize = vi.fn(async () => 'test-token');
+    const fetch = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', gcpProjectId: 'hls-property-care',
+      environmentProjectId: 'app-production', defaultAdminAccessTokenProvider: authorize });
+    expect(result.success).toBe(false);
+    expect(authorize).not.toHaveBeenCalled();
+    await expect(verifyAndRecordBootstrapPreparation(project, 'test-token', 'hls-property-care',
+      DEPLOY_SERVICE_ACCOUNT_EMAIL, RUNTIME_SERVICE_ACCOUNT_EMAIL, 'us-central1', 'app-production')).rejects.toThrow(/project/i);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(setup).not.toHaveBeenCalled();
+  });
+
+  it.each(['app-production', 'other-project'])('uses exact project-scoped credentials and checks the nested key project (%s)', async (keyProject) => {
+    const project = seedProject();
+    const projectId = 'app-production';
+    const email = `app-deploy@${projectId}.iam.gserviceaccount.com`;
+    new ConnectionRepository().upsertVerifiedBatch([{ provider: 'cloudrun', scope: 'davejohnson/hls-property-care#gcp:app-production',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId, credentials: JSON.stringify({
+        type: 'service_account', project_id: keyProject, client_email: email, private_key: 'unused',
+      }) }) }]);
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', environmentProjectId: projectId, adminAccessToken: 'test-token' });
+    if (keyProject === projectId) {
+      expect(result).toMatchObject({ success: true, plan: { gcpProjectId: projectId, deployServiceAccountEmail: email } });
+      expect(setup).toHaveBeenCalledWith(expect.objectContaining({ gcpProjectId: projectId }));
+    } else {
+      expect(result.success).toBe(false);
+      expect(setup).not.toHaveBeenCalled();
+    }
   });
 
   it('separates least-privilege workload roles from the deploy identity', async () => {
@@ -280,7 +324,7 @@ describe('runCloudPrepare', () => {
   });
 
   it('returns a blocked engine confirmation without making provider calls or recording access', async () => {
-    setup.mockResolvedValue({ success: false, mode: 'confirm', planId: 'saved-setup', actions: [], error: 'Preview the exact setup again.' });
+    setup.mockResolvedValue({ success: false, mode: 'confirm', planId: 'saved-setup', htmlPath: undefined, actions: [], error: 'Preview the exact setup again.' });
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
     const project = seedProject();
@@ -291,7 +335,7 @@ describe('runCloudPrepare', () => {
   });
 
   it.each([true, false])('verifies role convergence after engine apply before recording preparation (converged=%s)', async (converged) => {
-    setup.mockResolvedValue({ success: true, mode: 'confirm', planId: 'saved-setup', actions: [], error: undefined });
+    setup.mockResolvedValue({ success: true, mode: 'confirm', planId: 'saved-setup', htmlPath: '/reports/saved-setup.html', actions: [], error: undefined });
     const requests: Array<{ url: string; method?: string }> = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
       requests.push({ url, method: init?.method });
@@ -305,6 +349,40 @@ describe('runCloudPrepare', () => {
     expect(result.success).toBe(converged);
     expect(requests.filter(({ method, url }) => method && method !== 'GET' && !url.endsWith(':getIamPolicy'))).toEqual([]);
     expect(Boolean(new ProjectRepository().findById(project.id)?.policies.cloudPreparation)).toBe(converged);
+  });
+
+  it('preserves the environment, native project, and region when retrying authorization', async () => {
+    const project = seedProject();
+    const projectId = 'app-production';
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', environmentProjectId: projectId, environmentName: 'production',
+      region: 'us-west1', deployServiceAccountEmail: `app-deploy@${projectId}.iam.gserviceaccount.com`,
+      defaultAdminAccessTokenProvider: async () => { throw new Error('Google authorization failed'); } });
+    expect(result).toMatchObject({ success: false, adminCredentialSetup: {
+      retryCall: { environment: 'production', gcpProjectId: projectId, region: 'us-west1' },
+      credentialExample: expect.stringContaining('environment="production"'),
+    } });
+  });
+
+  it('records confirmed permission grants only for the selected project', async () => {
+    const projects = new ProjectRepository();
+    const project = seedProject();
+    const legacy = { version: 'legacy', preparedAt: '2025-01-01', gcpProjectId: 'hls-property-care' };
+    projects.update(project.id, { policies: { cloudPreparation: { cloudrun: legacy } } });
+    const dedicatedId = 'app-production';
+    const email = `app-deploy@${dedicatedId}.iam.gserviceaccount.com`;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/projects/app-production')) return Response.json({ name: 'projects/12345', projectId: dedicatedId, state: 'ACTIVE' });
+      if (url.includes('/services/storage.googleapis.com')) return Response.json({ name: 'projects/12345/services/storage.googleapis.com', parent: 'projects/12345', config: { name: 'storage.googleapis.com' }, state: 'ENABLED' });
+      if (url.endsWith('/projects/app-production:getIamPolicy')) return Response.json({ bindings: [{ role: 'roles/storage.viewer', members: [`serviceAccount:${email}`] }] });
+      throw new Error(`Unexpected request ${url}`);
+    }));
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', environmentProjectId: dedicatedId,
+      gcpProjectId: dedicatedId, deployServiceAccountEmail: email, confirm: true, gcsAccess: 'inspect', adminAccessToken: 'test-token' });
+    expect(result.success, String(result.error)).toBe(true);
+    const updated = projects.findById(project.id)!;
+    expect(getCloudPreparation(updated, 'cloudrun')).toMatchObject(legacy);
+    expect(getCloudPreparation(updated, 'cloudrun', dedicatedId)).toMatchObject({ gcpProjectId: dedicatedId, requiredRoles: ['roles/storage.viewer'] });
+    expect(getCloudPreparation(updated, 'cloudrun', 'app-staging')).toBeNull();
   });
 
   it('refuses to remove grants that are not owned by project setup state', async () => {

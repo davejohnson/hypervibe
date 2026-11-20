@@ -28,6 +28,8 @@
         "requireStatusChecks": true,
         "statusChecks": [
           "Hypervibe / acceptance",
+          "Hypervibe / acceptance-2",
+          "Hypervibe / acceptance-heavy",
           "Hypervibe / macos-contract"
         ],
         "strictStatusChecks": false,
@@ -127,7 +129,7 @@
         "changeScope": "all",
         "commands": [
           "npm run typecheck",
-          "npm test"
+          "npm run test:fast -- --shard=1/2"
         ],
         "failureArtifacts": []
       },
@@ -149,7 +151,48 @@
         "changeScope": "all",
         "commands": [
           "npm test -- src/tools/__tests__/macos-status.contract.test.ts",
-          "swift test --package-path apps/macos --filter CurrentCoreStatusContractTests"
+          "npm run build",
+          "HYPERVIBE_COMPANION_CONNECTION_FIXTURE=\"$PWD/test/fixtures/companion-connections.mjs\" swift test --package-path apps/macos --filter CurrentCore"
+        ],
+        "failureArtifacts": []
+      },
+      "acceptance-2": {
+        "kind": "check",
+        "enabled": true,
+        "category": "test",
+        "triggers": {
+          "pullRequest": true,
+          "push": [
+            "main"
+          ],
+          "manual": true
+        },
+        "runtime": {
+          "kind": "node"
+        },
+        "changeScope": "all",
+        "commands": [
+          "npm run test:fast -- --shard=2/2"
+        ],
+        "failureArtifacts": []
+      },
+      "acceptance-heavy": {
+        "kind": "check",
+        "enabled": true,
+        "category": "test",
+        "triggers": {
+          "pullRequest": true,
+          "push": [
+            "main"
+          ],
+          "manual": true
+        },
+        "runtime": {
+          "kind": "node"
+        },
+        "changeScope": "all",
+        "commands": [
+          "npm run test:heavy"
         ],
         "failureArtifacts": []
       }

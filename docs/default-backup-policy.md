@@ -259,19 +259,20 @@ consistent. Database coverage excludes cluster roles, grants, server settings
 and the running application artifact; see the
 [logical backup runtime](postgres-logical-backup-runtime.md).
 
-The reviewed GitHub workflow runs daily and observes health hourly. It shares
-the deployment concurrency group. Unknown, missing, stale or failed evidence
-creates or updates a scoped GitHub issue; only a valid healthy receipt closes
-that bot-owned alert. Observation checks exact inventory and prior restore
-evidence; it does not download and rehash every byte hourly. A stopped scheduler
-cannot alert about itself, so an independent monitor remains a separate concern.
+The managed GitHub workflow schedules one backup each day at 03:17 UTC. It
+shares the deployment concurrency group. Each backup verifies the restore
+before reporting success. To check health between runs, dispatch the workflow
+with `operation: "health"`. This read-only check compares committed manifests
+and prior restore evidence with the current inventory. There is no separate
+scheduled health check or GitHub issue alert.
 
 Controller failures emit a version-2 operational receipt with a closed failure stage and
 category. When known, it includes HTTP status, task status, exit code, whether a
-provider mutation was attempted, and provider cleanup verification. The alert
-uses the same receipt validator as the controller. It preserves these safe
-fields and existing reason codes; raw errors, credentials and worker logs are
-excluded. Worker failure markers cannot certify task completion or cleanup.
+provider mutation was attempted, and provider cleanup verification. Inspect
+the GitHub Actions run for its outcome and download its receipt artifact when
+available. The controller includes reason codes and excludes raw errors,
+credentials and worker logs. Worker failure markers cannot certify task
+completion or cleanup.
 If local restore resources or storage clients also fail cleanup, a finite
 `localCleanupFailed: true` flag preserves that warning alongside the primary
 failure. It is separate from provider task cleanup verification; its absence
@@ -280,17 +281,24 @@ An unknown applied count stays `null`; only explicit evidence of no attempted
 mutation permits zero. Inspect a failure after an attempted write before
 manually authorizing another backup, even if its category is authorization or
 timeout. The workflow blocks reruns of the same backup attempt; it does not
-suspend later scheduled runs. A failure before the controller starts may leave
-no receipt, which keeps the alert unknown.
+suspend later scheduled runs. If the controller never starts, the run may fail
+before it produces a receipt.
 Diagnostics do not reconstruct the cause of an older generic failure.
 
 Operational receipts are separate from retained recovery evidence: SQL, object
 and joint manifests remain format 2 and controller completion markers remain
-format 1. The alert can read legacy version-1 operational receipts, which have
-no stage detail. Activating the new diagnostics requires a tested, published
-helper digest and a reviewed regeneration of the backup workflow together.
-Updating the local MCP runtime alone does not update the scheduled controller
-or worker. Exact workflow-authority checks reject mixed compiler/helper output.
+format 1. Legacy version-1 operational receipts lack failure-stage details.
+
+An installed workflow with an hourly health check and issue alerts keeps that
+schedule until its replacement merges into the default branch. Ordinary
+repository publication preserves the installed backup files. To adopt the
+daily-only workflow, set `backups.runnerImage` to the `image` in the matching
+release's `backup-runner-release.json`. Run `hv_plan scope="backups"` for that environment.
+Review and apply the scoped proposal, then merge the workflow, target contract
+and corresponding spec. The helper verifies the published files before it
+runs. Previous recovery sets remain in storage. The first successful backup
+under the new digest supplies recovery evidence for the new program. An issue
+opened by the previous workflow retains its last status.
 
 Generated GitHub deployment workflows do not run backup health gates
 or require backup helper credentials before migrations or rollout.

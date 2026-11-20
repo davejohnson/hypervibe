@@ -10,7 +10,7 @@ import { AzureEngineCredentialsSchema } from '../../src/adapters/providers/azure
 import { AzureTokens } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { getSecretStore, SecretStore } from '../../src/adapters/secrets/secret-store.js';
 import { assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
-import { engineFixtureEnvironment, engineFixtureResponseProblem, probeDatabaseFromHere, readAwsDatabaseExposure, readAwsInventory,
+import { engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
   readAzureDatabaseExposure, readAzureInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
 import { readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -29,7 +29,10 @@ function required(name: string): string {
 
 async function processOutput(executable: string, args: string[], cwd: string, dataDir: string, input?: Json): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { cwd, env: { ...process.env, HYPERVIBE_DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
+    // The shared test setup turns off repository specs and .env discovery for synthetic projects. The fixture is a real
+    // repository: Hypervibe finds the source to build through its repository spec, so those switches must not reach the CLI.
+    const { HYPERVIBE_DISABLE_REPO_SPEC: _spec, HYPERVIBE_DISABLE_IMPLICIT_DEPLOY_ENV_FILE: _envFile, ...inherited } = process.env;
+    const child = spawn(executable, args, { cwd, env: { ...inherited, HYPERVIBE_DATA_DIR: dataDir }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = ''; let bytes = 0;
     const timer = setTimeout(() => child.kill('SIGTERM'), 75 * 60_000); // An Azure apply may run 60 minutes.
     child.stdout.on('data', (chunk) => { bytes += chunk.length; if (bytes > 8 * 1024 * 1024) child.kill('SIGTERM'); else stdout += chunk; });
@@ -125,6 +128,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
       const baseline = JSON.parse(readFileSync(baselineFile, 'utf8')) as string[];
       const inventory = async () => sinceBaseline(await inventoryNow(), baseline);
 
+      const repoSpecFile = path.join(workspace, '.hypervibe', 'spec.json');
       const cli = async (command: string[], input: Json): Promise<Json> => {
         let envelope: Json;
         try { envelope = JSON.parse(await processOutput(process.execPath, [cliPath, ...command, '--input', '-', '--json'], workspace, dataDir, input)); }
@@ -132,13 +136,19 @@ live('AWS and Azure engine disposable environment fixture', () => {
         if (envelope.ok !== true) {
           // Hypervibe's own redacted blockers say what to fix; nothing else from the failed command is shown.
           const blocked = (envelope.error?.details?.blocked ?? []).map((entry: unknown) => String(entry).slice(0, 800)).join('\n');
-          throw new Error(`Hypervibe ${command.join(' ')} did not succeed (${envelope.error?.code ?? 'unknown'}).${blocked ? `\n${blocked}` : ''}`);
+          throw new Error(`Hypervibe ${command.join(' ')} did not succeed (${envelope.error?.code ?? 'unknown'}): ${String(envelope.error?.message ?? '').slice(0, 600)}${blocked ? `\n${blocked}` : ''}`);
         }
         return envelope;
       };
       if (!existsSync(path.join(workspace, '.git'))) {
         cpSync(path.join(import.meta.dirname, 'fixture-database'), workspace, { recursive: true });
         writeFileSync(path.join(workspace, '.gitignore'), '.hypervibe/\nnode_modules/\nfixture-evidence.json\nfixture-baseline.json\n.env*\n');
+        // Hypervibe builds from the repository that holds the project's spec file. Without it a plan has no
+        // source, builds no image and creates no workloads (live 2026-11-18: the release was then refused).
+        const stored = db.prepare('SELECT document FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1').get(project.id) as { document: string } | undefined;
+        if (!stored) throw new Error('The dedicated project has no readable desired state.');
+        mkdirSync(path.join(workspace, '.hypervibe'), { recursive: true });
+        writeFileSync(repoSpecFile, `${JSON.stringify(JSON.parse(stored.document), null, 2)}\n`);
         for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Hypervibe fixture'], ['config', 'user.email', 'fixture@hypervibe.invalid'],
           ...(project.git_remote_url ? [['remote', 'add', 'origin', project.git_remote_url]] : []),
           ['add', 'Dockerfile', 'package.json', 'server.mjs', '.gitignore'], ['commit', '-m', 'Disposable engine conformance fixture']]) {
@@ -147,22 +157,28 @@ live('AWS and Azure engine disposable environment fixture', () => {
       }
 
       const savedSpec = (): Json => {
-        const row = db.prepare('SELECT document FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1').get(project.id) as { document: string } | undefined;
-        if (!row) throw new Error('The dedicated project has no readable desired state; existing environments cannot be preserved.');
-        const spec = JSON.parse(row.document);
+        // The fixture repository's spec file is what the CLI reads and writes here.
+        if (!existsSync(repoSpecFile)) throw new Error('The fixture repository has no spec file; existing environments cannot be preserved.');
+        const spec = JSON.parse(readFileSync(repoSpecFile, 'utf8'));
         if (!spec.environments || spec.project !== projectName) throw new Error('The dedicated project specification is invalid.');
         return spec;
       };
-      const inSpec = () => Boolean(savedSpec().environments[environmentName]);
-      const setEnvironment = async (revision: 'create' | 'update' | undefined) => {
+      // A second, smaller environment that joins the first one's shared pieces for part of the run.
+      // A different start, not a longer name: Azure and AWS cut long names short, so `<name>b` would land on the same cloud names (see the issue on shared name prefixes).
+      const siblingName = environmentName.replace(/^fx-/, 'fs-');
+      const region = process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined;
+      const inSpec = (name = environmentName) => Boolean(savedSpec().environments[name]);
+      const setSpecEnvironment = async (name: string, environment: Record<string, unknown> | undefined) => {
         const original = savedSpec();
-        const { [environmentName]: _removed, ...others } = original.environments;
+        const { [name]: _removed, ...others } = original.environments;
         await cli(['spec'], { project: projectName, replace: true, spec: { ...original,
           runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
-          environments: revision ? { ...others, [environmentName]: engineFixtureEnvironment(cloud, revision, process.env.HYPERVIBE_LIVE_REGION?.trim() || undefined) } : others } });
+          environments: environment ? { ...others, [name]: environment } : others } });
       };
-      const plan = async (input: Json = {}) => {
-        const envelope = await cli(['plan'], { project: projectName, env: environmentName, ...input });
+      const setEnvironment = (revision: 'create' | 'update' | undefined) =>
+        setSpecEnvironment(environmentName, revision ? engineFixtureEnvironment(cloud, revision, marker.region, region) : undefined);
+      const plan = async (input: Json = {}, name = environmentName) => {
+        const envelope = await cli(['plan'], { project: projectName, env: name, ...input });
         if (!Array.isArray(envelope.data?.actions) || (envelope.data.blocked ?? []).length) throw new Error('The fixture plan is blocked or incomplete.');
         return envelope;
       };
@@ -189,6 +205,57 @@ live('AWS and Azure engine disposable environment fixture', () => {
       }
       if (!cleanupOnly) assertFixtureLifecycleConsent(process.env.HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE);
 
+      const tearDown = async (name: string) => {
+        // A teardown that reports leftovers is planned again, as its own message asks.
+        for (let attempt = 0; attempt < 4 && inSpec(name); attempt++) {
+          await apply(await plan({ scope: 'teardown', ...(cloud === 'aws' && name === environmentName ? { deleteFinalSnapshot: true } : {}) }, name));
+        }
+        if (inSpec(name)) throw new Error(`Teardown of ${name} did not finish within its bounded attempts.`);
+      };
+      const webAnswer = async (name: string, problemOf: (status: number, body: unknown) => string | undefined) => {
+        // The address Hypervibe recorded for the web service when it applied. `status` on these engines reports workers only.
+        const row = db.prepare('SELECT platform_bindings FROM environments WHERE project_id = ? AND name = ?').get(project.id, name) as { platform_bindings: string } | undefined;
+        const bindings = row ? JSON.parse(row.platform_bindings) as Json : {};
+        const url = bindings.services?.web?.url ?? bindings[cloud]?.services?.web?.url;
+        if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new Error(`Hypervibe recorded no HTTPS address for the web service of ${name}.`);
+        // A new revision and the worker's first write take a few minutes to show.
+        let problem: string | undefined = 'the web service did not answer';
+        for (let attempt = 0; attempt < 45 && problem; attempt++) {
+          if (attempt) await sleep(20_000);
+          try {
+            const response = await fetch(new URL('/', url), { signal: AbortSignal.timeout(30_000), redirect: 'error' });
+            problem = problemOf(response.status, await response.json());
+          } catch { problem = 'the web service did not answer'; }
+        }
+        if (problem) throw new Error(`${name} is not running as expected: ${problem}.`);
+      };
+      const assertUnchanged = async (name: string) => {
+        if (changesOf(await plan({}, name)).length) throw new Error(`${name} has changes to make although its desired state did not change.`);
+      };
+      /**
+       * A second environment joins the project, is used, and leaves, while the first keeps working.
+       * It has no worker of its own, so a worker write showing up there would mean it was handed the first one's database.
+       */
+      const siblingJoinsAndLeaves = async () => {
+        await setSpecEnvironment(siblingName, engineFixtureSiblingEnvironment(cloud, region));
+        for (let attempt = 0; ; attempt++) {
+          if (attempt === 6) throw new Error('The second environment did not converge within its bounded apply steps.');
+          const envelope = await plan({}, siblingName);
+          if (!changesOf(envelope).length) break;
+          if (!await apply(envelope)) throw new Error('The second environment could not be applied.');
+        }
+        await cli(['deploy'], { project: projectName, env: siblingName, confirm: true });
+        await webAnswer(siblingName, engineFixtureSiblingResponseProblem);
+        // One database server or cluster still: `exposure` refuses any other count.
+        if ((await exposure(await inventory())).problems.length) throw new Error('The database is exposed after a second environment joined.');
+        await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, 'create'));
+        await assertUnchanged(environmentName);
+        await tearDown(siblingName);
+        await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, 'create'));
+        await assertUnchanged(environmentName);
+        journal.checks.sibling = true; save(journal);
+      };
+
       await runDisposableFixture({ journal, save, cleanupOnly, signal: interrupted.signal, driver: {
         inventory,
         observe: async (resource) => (await inventoryNow()).some((entry) => resourceKey(entry) === resourceKey(resource)) ? 'present' : 'absent',
@@ -201,40 +268,47 @@ live('AWS and Azure engine disposable environment fixture', () => {
         },
         converge: async (revision) => {
           if (revision === 'absent') {
-            if (!inSpec()) return;
+            if (!inSpec() && !inSpec(siblingName)) return;
             // Nothing was ever built (for example the first plan was blocked): only the spec entry needs removing.
-            if (!journal.resources.length && !(await inventory()).length) { await setEnvironment(undefined); return; }
-            // A teardown that reports leftovers is planned again, as its own message asks.
-            for (let attempt = 0; attempt < 4 && inSpec(); attempt++) {
-              await apply(await plan({ scope: 'teardown', ...(cloud === 'aws' ? { deleteFinalSnapshot: true } : {}) }));
-            }
-            if (inSpec()) throw new Error('Teardown did not finish within its bounded attempts.');
+            if (!journal.resources.length && !(await inventory()).length) { await setSpecEnvironment(siblingName, undefined); await setEnvironment(undefined); return; }
+            // The sibling goes first: the shared pieces leave with the last environment.
+            await tearDown(siblingName);
+            await tearDown(environmentName);
             // Deletions settle after the commands return; wait a bounded time for the account to match its baseline.
             for (let wait = 0; wait < 30 && (await inventory()).length; wait++) await sleep(30_000);
             return;
           }
+          // Between the first environment's checks and its update, a second one comes and goes.
+          if (revision === 'update' && !journal.checks.sibling) await siblingJoinsAndLeaves();
           await setEnvironment(revision);
           for (let attempt = 0; attempt < 8; attempt++) {
             const envelope = await plan();
-            if (!changesOf(envelope).length) { await cli(['deploy'], { project: projectName, env: environmentName, confirm: true }); return; }
-            if (!await apply(envelope)) throw new Error('Fixture apply is incomplete; no dependent release is authorized.');
+            if (!changesOf(envelope).length) {
+              try { await cli(['deploy'], { project: projectName, env: environmentName, confirm: true }); } catch (error) {
+                // Teardown follows a failed release, so record how AWS describes the web service first.
+                if (aws) {
+                  const auth = await awsEngineAuthentication(aws);
+                  const name = `hv-${projectName}-${environmentName}`;
+                  process.stdout.write(`\n${await sampleAwsWebRelease({ region: aws.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } },
+                    `arn:aws:ecs:${aws.region}:${aws.accountId}:service/${name}/${name}-web`)}\n`);
+                }
+                throw error;
+              }
+              return;
+            }
+            if (!await apply(envelope)) {
+              // Teardown deletes the services and their logs, so read why they are not running first.
+              if (aws) {
+                const auth = await awsEngineAuthentication(aws);
+                process.stdout.write(`\n${await readAwsContainerTrouble({ region: aws.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } }, `/hypervibe/hv-${projectName}-${environmentName}/tasks`)}\n`);
+              }
+              throw new Error('Fixture apply is incomplete; no dependent release is authorized.');
+            }
           }
           throw new Error('Fixture convergence exceeded its bounded apply steps.');
         },
         verifyRunning: async (revision) => {
-          const status = await cli(['status'], { project: projectName, env: environmentName });
-          const url = (status.data?.services ?? []).find((entry: Json) => entry.name === 'web')?.url;
-          if (typeof url !== 'string' || new URL(url).protocol !== 'https:') throw new Error('The fixture has no HTTPS address for its web service.');
-          // A new revision and the worker's first write take a few minutes to show.
-          let problem: string | undefined = 'the web service did not answer';
-          for (let attempt = 0; attempt < 30 && problem; attempt++) {
-            if (attempt) await sleep(20_000);
-            try {
-              const response = await fetch(new URL('/', url), { signal: AbortSignal.timeout(30_000), redirect: 'error' });
-              problem = engineFixtureResponseProblem(response.status, await response.json(), revision);
-            } catch { problem = 'the web service did not answer'; }
-          }
-          if (problem) throw new Error(`The fixture is not running as expected: ${problem}.`);
+          await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, revision));
           // The app reached its database above. From this computer the same database must be closed.
           const database = await exposure(await inventory());
           if (database.problems.length) throw new Error(`The database is exposed: ${database.problems.join('; ')}.`);

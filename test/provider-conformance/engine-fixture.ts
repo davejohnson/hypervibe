@@ -1,8 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
-import { DescribeNatGatewaysCommand, DescribeVpcEndpointsCommand, DescribeVpcsCommand, EC2Client } from '@aws-sdk/client-ec2';
+import { DescribeNatGatewaysCommand, DescribeNetworkInterfacesCommand, DescribeSecurityGroupsCommand, DescribeVpcEndpointsCommand, DescribeVpcsCommand, EC2Client } from '@aws-sdk/client-ec2';
 import { DescribeRepositoriesCommand, ECRClient } from '@aws-sdk/client-ecr';
-import { ECSClient, ListClustersCommand } from '@aws-sdk/client-ecs';
+import { EventBridgeClient, ListRulesCommand } from '@aws-sdk/client-eventbridge';
+import { ListSchedulesCommand, SchedulerClient } from '@aws-sdk/client-scheduler';
+import { ListStateMachinesCommand, SFNClient } from '@aws-sdk/client-sfn';
+import { DescribeParametersCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { CloudWatchLogsClient, DescribeLogGroupsCommand, FilterLogEventsCommand } from '@aws-sdk/client-cloudwatch-logs';
+import { DescribeExpressGatewayServiceCommand, DescribeServiceDeploymentsCommand, DescribeServicesCommand, DescribeTasksCommand, ECSClient, ListClustersCommand, ListServicesCommand, ListTasksCommand } from '@aws-sdk/client-ecs';
 import { DescribeDBClusterSnapshotsCommand, DescribeDBClustersCommand, DescribeDBInstancesCommand, RDSClient } from '@aws-sdk/client-rds';
 import { ListBucketsCommand, S3Client } from '@aws-sdk/client-s3';
 import type { AwsAccess } from '../../src/adapters/providers/aws/aws-engine.client.js';
@@ -11,27 +16,63 @@ import { resourceKey, type NativeFixtureResource } from './lifecycle-live-harnes
 
 export type EngineFixtureCloud = 'aws' | 'azure';
 
-/** The disposable environment: a public web service and a worker that both use the database. */
-export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update', region?: string): Record<string, unknown> {
+/**
+ * The disposable environment: a public web service, an always-on worker, a worker
+ * that runs only while it has work, a scheduled job and file storage, all using
+ * one database.
+ */
+export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'create' | 'update', connectionRegion: string, region?: string): Record<string, unknown> {
   return {
     // A region is given only when the connection's default cannot be used, as when Azure refuses a new subscription a database there.
     hosting: { provider: cloud, engine: 'opentofu', ...(region ? { region } : {}) },
     database: cloud === 'aws' ? { provider: 'rds' } : { provider: 'azure-postgres', version: 17 },
+    storage: { files: { provider: cloud === 'aws' ? 's3' : 'azureblob', type: 'bucket', region: region ?? connectionRegion, injectInto: ['web'] } },
     services: {
       web: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true },
       worker: { workloadKind: 'worker', startCommand: 'node server.mjs worker' },
+      ondemand: { workloadKind: 'worker', startCommand: 'node server.mjs ondemand', onDemand: {
+        pendingWorkQuery: "SELECT count(*) FROM conformance_jobs WHERE status = 'queued'",
+        nextWorkAtQuery: "SELECT min(run_at) FROM conformance_jobs WHERE status = 'queued'",
+      } },
+      scheduled: { workloadKind: 'cron', cronSchedule: '*/2 * * * *', startCommand: 'node server.mjs scheduled' },
     },
     email: { enabled: false }, envVars: { CONFORMANCE_APP_REVISION: revision }, deploy: { strategy: 'manual' },
   };
 }
 
-/** The app's answer must show the revision, a database write and a recent worker write. */
+/** The app's answer must show the revision and recent proof from every workload and from storage. */
 export function engineFixtureResponseProblem(status: number, value: unknown, revision: string): string | undefined {
-  const body = value as { service?: string; revision?: string; database?: boolean; worker?: boolean } | null;
+  const body = value as { service?: string; revision?: string; database?: boolean; worker?: boolean; onDemand?: boolean; scheduled?: boolean; storage?: boolean } | null;
   if (status !== 200 || body?.service !== 'hypervibe-provider-conformance') return `the web service did not answer as the fixture (HTTP ${status})`;
   if (body.revision !== revision) return `the web service is not serving the ${revision} revision`;
   if (body.database !== true) return 'the web service could not use its database';
   if (body.worker !== true) return 'the worker has not written to the database in the last two minutes';
+  if (body.storage !== true) return 'the web service could not write a file to its storage and read it back';
+  if (body.scheduled !== true) return 'the scheduled job has not run in the last five minutes';
+  if (body.onDemand !== true) return 'the on-demand worker has not finished queued work in the last five minutes';
+  return undefined;
+}
+
+/** A second environment for the same project: a web service and its own database, nothing else. */
+export function engineFixtureSiblingEnvironment(cloud: EngineFixtureCloud, region?: string): Record<string, unknown> {
+  return {
+    hosting: { provider: cloud, engine: 'opentofu', ...(region ? { region } : {}) },
+    database: cloud === 'aws' ? { provider: 'rds' } : { provider: 'azure-postgres', version: 17 },
+    services: { web: { workloadKind: 'web', startCommand: 'node server.mjs', healthCheckPath: '/health', public: true } },
+    email: { enabled: false }, envVars: { CONFORMANCE_APP_REVISION: 'sibling' }, deploy: { strategy: 'manual' },
+  };
+}
+
+/**
+ * The second environment must use a database, and it must not be the first one's: the first environment's
+ * worker writes there every 15 seconds, so seeing a recent worker write here means the two share a database.
+ */
+export function engineFixtureSiblingResponseProblem(status: number, value: unknown): string | undefined {
+  const body = value as { service?: string; revision?: string; database?: boolean; worker?: boolean } | null;
+  if (status !== 200 || body?.service !== 'hypervibe-provider-conformance') return `the second environment's web service did not answer as the fixture (HTTP ${status})`;
+  if (body.revision !== 'sibling') return "the second environment's web service is not serving its own settings";
+  if (body.database !== true) return "the second environment's web service could not use its database";
+  if (body.worker !== false) return "the second environment sees the first environment's worker writes, so they share a database";
   return undefined;
 }
 
@@ -112,15 +153,18 @@ async function pages<T>(read: (token?: string) => Promise<{ items: T[]; next?: s
 }
 
 /**
- * What costs money or holds data in the fixture's AWS region: networks, their
+ * What costs money, holds data or keeps running in the fixture's AWS region: networks, their
  * endpoints and NAT gateways, database clusters, instances and kept snapshots,
- * container clusters, image repositories and buckets. A network cannot be
+ * container clusters, image repositories and buckets, plus schedules, state machines,
+ * event rules, parameters and log groups. A network cannot be
  * deleted while anything is attached to it, so a missing network also covers
  * load balancers, tasks and network interfaces. SDK errors throw.
  */
 export async function readAwsInventory(access: AwsAccess): Promise<NativeFixtureResource[]> {
   const config = { region: access.region, credentials: access.credentials };
   const ec2 = new EC2Client(config); const rds = new RDSClient(config); const ecs = new ECSClient(config); const ecr = new ECRClient(config); const s3 = new S3Client(config);
+  const scheduler = new SchedulerClient(config); const sfn = new SFNClient(config); const events = new EventBridgeClient(config);
+  const logs = new CloudWatchLogsClient(config); const ssm = new SSMClient(config);
   const item = (type: string, id: string | undefined): NativeFixtureResource => {
     if (!id) throw new Error(`AWS listed a ${type} without an id.`);
     return { provider: 'aws', type, id, address: `${type}/${id}` };
@@ -141,8 +185,19 @@ export async function readAwsInventory(access: AwsAccess): Promise<NativeFixture
       ...(await pages(async (nextToken) => { const r = await ecr.send(new DescribeRepositoriesCommand({ nextToken })); return { items: r.repositories ?? [], next: r.nextToken }; })).map((r) => item('ecr-repository', r.repositoryArn)),
       ...(await pages(async (ContinuationToken) => { const r = await s3.send(new ListBucketsCommand({ ContinuationToken, BucketRegion: access.region })); return { items: r.Buckets ?? [], next: r.ContinuationToken }; }))
         .map((b) => item('s3-bucket', b.Name)),
+      // The fixture lives in the account's default network, which is always there. Anything still attached to it
+      // (a load balancer, a container, a database) holds a network interface, and its firewall rules a security group.
+      ...(await pages(async (NextToken) => { const r = await ec2.send(new DescribeNetworkInterfacesCommand({ NextToken })); return { items: r.NetworkInterfaces ?? [], next: r.NextToken }; })).map((entry) => item('network-interface', entry.NetworkInterfaceId)),
+      ...(await pages(async (NextToken) => { const r = await ec2.send(new DescribeSecurityGroupsCommand({ NextToken })); return { items: r.SecurityGroups ?? [], next: r.NextToken }; })).map((entry) => item('security-group', entry.GroupId)),
+      // What runs scheduled jobs and wakes on-demand workers, and what holds settings and logs.
+      ...(await pages(async (NextToken) => { const r = await scheduler.send(new ListSchedulesCommand({ NextToken })); return { items: r.Schedules ?? [], next: r.NextToken }; })).map((entry) => item('schedule', entry.Arn)),
+      ...(await pages(async (nextToken) => { const r = await sfn.send(new ListStateMachinesCommand({ nextToken })); return { items: r.stateMachines ?? [], next: r.nextToken }; })).map((entry) => item('state-machine', entry.stateMachineArn)),
+      ...(await pages(async (NextToken) => { const r = await events.send(new ListRulesCommand({ NextToken })); return { items: r.Rules ?? [], next: r.NextToken }; })).map((entry) => item('event-rule', entry.Arn)),
+      // Secrets are not listed: the deploy role may not list them, by design.
+      ...(await pages(async (NextToken) => { const r = await ssm.send(new DescribeParametersCommand({ NextToken })); return { items: r.Parameters ?? [], next: r.NextToken }; })).map((entry) => item('parameter', entry.Name)),
+      ...(await pages(async (nextToken) => { const r = await logs.send(new DescribeLogGroupsCommand({ nextToken })); return { items: r.logGroups ?? [], next: r.nextToken }; })).map((entry) => item('log-group', entry.logGroupName)),
     ];
-  } finally { for (const client of [ec2, rds, ecs, ecr, s3]) client.destroy(); }
+  } finally { for (const client of [ec2, rds, ecs, ecr, s3, scheduler, sfn, events, logs, ssm]) client.destroy(); }
 }
 
 /** The fixture's cluster address, and whether any of its instances asks for a public address. */
@@ -156,4 +211,59 @@ export async function readAwsDatabaseExposure(access: AwsAccess, created: Native
     const instances = (await rds.send(new DescribeDBInstancesCommand({ Filters: [{ Name: 'db-cluster-id', Values: [cluster.DBClusterIdentifier] }] }))).DBInstances ?? [];
     return { host: cluster.Endpoint, problems: instances.filter((instance) => instance.PubliclyAccessible).map((instance) => `instance ${instance.DBInstanceIdentifier} is publicly accessible`) };
   } finally { rds.destroy(); }
+}
+
+/**
+ * Why AWS containers are not running, read while they still exist: each service's
+ * latest events, why its stopped containers stopped, and the newest log lines.
+ * Teardown deletes all of it, so a failed apply reads this first. Read-only; a
+ * failed read is reported as text, never thrown, because this runs on the failure path.
+ */
+export async function readAwsContainerTrouble(access: AwsAccess, logGroupPrefix: string): Promise<string> {
+  const config = { region: access.region, credentials: access.credentials };
+  const ecs = new ECSClient(config); const logs = new CloudWatchLogsClient(config);
+  const lines: string[] = [];
+  try {
+    for (const cluster of (await ecs.send(new ListClustersCommand({}))).clusterArns ?? []) {
+      const services = (await ecs.send(new ListServicesCommand({ cluster }))).serviceArns ?? [];
+      for (const service of services.length ? (await ecs.send(new DescribeServicesCommand({ cluster, services }))).services ?? [] : []) {
+        lines.push(`service ${service.serviceName}: ${service.status}, ${service.runningCount}/${service.desiredCount} running`);
+        for (const event of (service.events ?? []).slice(0, 6)) lines.push(`  event: ${event.message}`);
+      }
+      const stopped = (await ecs.send(new ListTasksCommand({ cluster, desiredStatus: 'STOPPED' }))).taskArns ?? [];
+      for (const task of stopped.length ? (await ecs.send(new DescribeTasksCommand({ cluster, tasks: stopped.slice(0, 10) }))).tasks ?? [] : []) {
+        lines.push(`stopped ${task.group}: ${task.stopCode} ${task.stoppedReason}`);
+        for (const container of task.containers ?? []) lines.push(`  container ${container.name}: exit ${container.exitCode ?? 'none'} ${container.reason ?? ''}`);
+      }
+    }
+    const events = (await logs.send(new FilterLogEventsCommand({ logGroupName: logGroupPrefix, limit: 40, startTime: Date.now() - 30 * 60_000 }))).events ?? [];
+    // The fixture never logs its settings, but a crash can echo a connection address.
+    for (const event of events) lines.push(`  log ${event.logStreamName}: ${(event.message ?? '').slice(0, 300).replace(/postgres(ql)?:\/\/\S+/g, '[database address]')}`);
+  } catch (error) { lines.push(`could not read further: ${error instanceof Error ? error.message : String(error)}`); }
+  finally { ecs.destroy(); logs.destroy(); }
+  return lines.join('\n') || 'AWS reported no services, stopped containers or log lines.';
+}
+
+/**
+ * What AWS says about a web service's release, sampled over a few minutes: its
+ * status, the deployment it names as current and each configuration it lists as
+ * active. Read after a release that did not report finished, to see whether AWS
+ * settles later or describes the release differently from what Hypervibe expects.
+ * Read-only; a failed read is reported as text.
+ */
+export async function sampleAwsWebRelease(access: AwsAccess, serviceArn: string, samples = 10, pauseMs = 30_000): Promise<string> {
+  const ecs = new ECSClient({ region: access.region, credentials: access.credentials });
+  const lines: string[] = [];
+  try {
+    for (let sample = 0; sample < samples; sample++) {
+      if (sample) await new Promise((resolve) => setTimeout(resolve, pauseMs));
+      const service = (await ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn }))).service;
+      const deployment = service?.currentDeployment
+        ? (await ecs.send(new DescribeServiceDeploymentsCommand({ serviceDeploymentArns: [service.currentDeployment] }))).serviceDeployments?.[0] : undefined;
+      lines.push(`sample ${sample}: service ${service?.status?.statusCode}; deployment ${service?.currentDeployment?.split('/').pop() ?? 'none'} ${deployment?.status ?? ''}; ${
+        (service?.activeConfigurations ?? []).map((entry) => `[${entry.serviceRevisionArn?.split('/').pop()} ${entry.primaryContainer?.image?.split('/').pop()}]`).join(' ') || 'no active configuration'}`);
+    }
+  } catch (error) { lines.push(`could not read further: ${error instanceof Error ? error.message : String(error)}`); }
+  finally { ecs.destroy(); }
+  return lines.join('\n');
 }

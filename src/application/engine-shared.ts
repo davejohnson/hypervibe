@@ -2,7 +2,7 @@ import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
-import type { PlanAction } from '../domain/plan/plan.types.js';
+import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import type { InfrastructurePlanResult } from './infrastructure-engine.js';
 
@@ -80,15 +80,15 @@ export function recordEnginePlan(params: {
   confirm?: 'consequential' | 'all';
 }): InfrastructurePlanResult {
   const { environmentName, specRevision, actions, warnings } = params;
+  const confirmActions = (params.confirm === 'all' ? actions : actions.filter(requiresActionConfirmation)).map(action => action.id);
   const runRepo = new RunRepository();
   const run = runRepo.create({ projectId: params.projectId, environmentId: params.environmentId, type: 'plan', plan: {
     kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision,
-    observedFingerprint: null, actions, unmanaged: [], warnings, engine: params.engine,
+    observedFingerprint: null, actions, unmanaged: [], warnings, engine: params.engine, reviewConfirmActions: confirmActions,
   } as unknown as Record<string, unknown> });
   runRepo.updateStatus(run.id, 'succeeded');
   return {
     planRunId: run.id, environmentName, specRevision, actions, warnings,
-    confirmActions: (params.confirm === 'all' ? actions
-      : actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing))).map((action) => action.id),
+    confirmActions,
   };
 }

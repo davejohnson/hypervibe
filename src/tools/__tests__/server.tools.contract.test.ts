@@ -175,6 +175,7 @@ describe('server tool surface', () => {
     );
     expect(names).not.toContain('hv_db_migrate');
     expect(tools.find((tool) => tool.name === 'hv_logs')?.annotations?.readOnlyHint).toBe(true);
+    expect(tools.find((tool) => tool.name === 'hv_runs')?.annotations?.readOnlyHint).toBe(false);
     expect(tools.find((tool) => tool.name === 'hv_apply')?.annotations?.readOnlyHint).toBe(false);
     expect(tools.find((tool) => tool.name === 'hv_cloud_secrets')?.annotations?.readOnlyHint).toBe(false);
     await client.close();

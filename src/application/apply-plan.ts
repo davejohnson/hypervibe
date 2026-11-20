@@ -16,6 +16,7 @@ import { applyDatabaseScopeBinding } from './apply-database-scope-binding.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { isScopedSecretAction, scopedSecretObservation } from '../domain/plan/scoped-secrets.js';
 import { deploymentPrerequisitePhase, isManagedCiCredentialAction } from '../domain/plan/plan-stage.js';
+import { compileManagedBackupFiles } from '../domain/services/managed-backup-workflows.service.js';
 import { withBackupStorageDefaults } from '../domain/services/backup-strategy.service.js';
 import { environmentResourceName } from '../domain/services/resource-names.js';
 import {
@@ -60,6 +61,7 @@ import { recordRuntimeRolloutRequirements } from '../domain/services/runtime-rol
 import {
   applyGitHubActionsRelease,
   isGitHubActionsDeployAction,
+  missingProviderSecretsMessage,
 } from '../domain/services/ci-deploy.service.js';
 import { applyManagedCiAction } from '../domain/services/managed-ci.service.js';
 import { resolveDevOpsSelection, resolveGitHubActionsSelection } from '../domain/spec/devops-selection.js';
@@ -88,10 +90,9 @@ import {
 import {
   credentialFieldsFromSchema,
   connectionSetupDetails,
-  connectionSetupUrl,
-  GITHUB_TOKEN_URLS,
   type ConnectionGuidanceContext,
 } from '../domain/services/connection-guidance.js';
+import { githubPackagePullSetupKeys } from '../adapters/providers/github/package-pull.js';
 import { removeServiceBinding, serviceBindingFor } from '../domain/services/spec.service.js';
 import { removeHostingEnvVars, syncHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import {
@@ -427,7 +428,7 @@ function providerConnectionSetup(
 
 export function connectionRecoveryHint(
   blocks: ConnectionBlock[],
-  options: { after?: string; includePackageRead?: boolean; project?: string; gitRemoteUrl?: string } = {}
+  options: { after?: string; project?: string; gitRemoteUrl?: string } = {}
 ): string {
   const uniqueBlocks = uniqueConnectionBlocks(blocks);
   const providers = connectionProviders(uniqueBlocks).join(', ');
@@ -437,11 +438,11 @@ export function connectionRecoveryHint(
     .map((entry) => `${entry.provider}: ${entry.recommendedSetupUrl}`)
     .join('; ');
   const commands = setup.map((entry) => entry.credentialExample).join('; ');
-  const packageReadNeeded = options.includePackageRead
-    || uniqueBlocks.some((block) => requiredCredentialKeys(block).includes('packageReadToken'));
-  const packageReadHint = packageReadNeeded
-    ? ' For GitHub Actions image deploys, the recommended combined classic PAT link preselects repo, workflow, and read:packages. A read:packages-only token cannot manage repository workflows.'
-    : '';
+  const packageRoles = uniqueBlocks.filter(block => block.provider === 'github')
+    .map(requiredCredentialKeys).find(keys => keys.includes('packageReadToken'));
+  const packageReadHint = !packageRoles ? '' : packageRoles.includes('apiToken')
+    ? ' For GitHub Actions image deploys, a combined classic PAT with repo, workflow and read:packages can be explicitly mapped to both roles.'
+    : ' For GitHub Actions image deploys, add the read:packages token to the existing repository connection.';
   const after = options.after ? ` ${options.after}` : '';
   return `This task needs provider access that is not connected on this Mac (${providers}).${setupPages ? ` Recommended credential page(s): ${setupPages}.` : ''} Save the credential outside chat in an exported environment variable, a gitignored dotenv file, or a local JSON file, then use the exact connection command shown in connectionSetup: ${commands}.${packageReadHint} Replace /absolute/path with the real local path. Do not call this an abstract "Hypervibe credential flow"; show these concrete links and commands. If the credential is not controlled by this user, prepare a value-free handoff naming the provider, scope, and blocked task. Do not bypass Hypervibe with provider CLIs or rerun plan/apply/deploy before the connection verifies.${after}`;
 }
@@ -574,16 +575,22 @@ export function splitActionScopedConnectionBlocks(
     ) {
       return [];
     }
-    const hasImageRegistrySecret = missing.some((name) => name.startsWith('IMAGE_REGISTRY_'));
-    return [{
-      provider: hasImageRegistrySecret ? 'github' : String(action.metadata?.provider ?? action.resource.provider),
-      ...(hasImageRegistrySecret
-        ? { requiredCredentialKeys: ['apiToken', 'packageReadToken'] }
-        : {}),
-      reason: hasImageRegistrySecret
-        ? `GitHub Actions deploy ${action.resource.name} is missing GHCR image pull credentials (${missing.join(', ')}). Connect GitHub with apiToken for repo/workflow API access plus packageReadToken for read:packages (create: ${connectionSetupUrl(GITHUB_TOKEN_URLS.packageRead, context)}) before relying on push-to-deploy.`
-        : `GitHub Actions deploy ${action.resource.name} is missing provider secrets (${missing.join(', ')}). Connect and verify ${String(action.metadata?.provider ?? action.resource.provider)} before relying on push-to-deploy.`,
-    }];
+    const registry = missing.filter(name => name.startsWith('IMAGE_REGISTRY_'));
+    const providerSecrets = missing.filter(name => !name.startsWith('IMAGE_REGISTRY_'));
+    const provider = String(action.metadata?.provider ?? action.resource.provider);
+    const repository = typeof action.metadata?.repository === 'string'
+      ? action.metadata.repository : parseGitHubRepoFromRemote(context.repositoryUrl) ?? context.scope;
+    const blocks: ConnectionBlock[] = [];
+    if (registry.length) blocks.push({
+      provider: 'github', ...(repository ? { scope: repository } : {}),
+      requiredCredentialKeys: githubPackagePullSetupKeys(repository),
+      reason: missingProviderSecretsMessage(provider, registry, { project: context.project, scope: repository }),
+    });
+    if (providerSecrets.length) blocks.push({
+      provider,
+      reason: `GitHub Actions deploy ${action.resource.name} is missing provider secrets (${providerSecrets.join(', ')}). Connect and verify ${provider} before relying on push-to-deploy.`,
+    });
+    return blocks;
   });
   return {
     hardBlocked: blocked.filter((entry) => entry.category === 'prerequisite' || entry.policy !== 'action-scoped-if-independent-actions'),
@@ -796,7 +803,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       ? { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: outcome.reason }] }
       : { ...outcome, actionScopedWarnings: [] };
   }
-  if (planScope === 'infrastructure-engine') {
+  if (planScope === 'infrastructure-engine' || planScope === 'domain-registration') {
     if (invalidSpec) return invalidSpec;
     const engineOutcome = await applyInfrastructureEngine(ctx, { project, spec, specRevision: params.specRevision,
       planId, confirmActions: params.confirmActions });
@@ -1553,9 +1560,17 @@ export async function executePlanApply(ctx: CommandContext, params: {
     }
     if (capability === 'github.infrastructure.sync') {
       if (planScope === 'backup-program-publication') {
-        const publishing = Array.isArray(action.metadata?.desiredFiles) && action.metadata.desiredFiles.length > 0;
+        const reviewedFiles = action.metadata?.desiredFiles;
+        const publishing = Array.isArray(reviewedFiles) && reviewedFiles.length > 0;
         if (action.metadata?.backupEnvironment !== envName || envSpec.backups?.mode !== (publishing ? 'daily' : 'disabled')) {
           return { success: false, status: 'blocked', message: 'The selected backup publication no longer matches the explicit environment backup intent. Re-run hv_plan scope="backups".' };
+        }
+        if (publishing) {
+          const current = await compileManagedBackupFiles({ project: applyProject, spec, environmentName: envName });
+          if (current.issues.length || current.files.length !== reviewedFiles.length || current.files.some(file =>
+            !reviewedFiles.some(reviewed => reviewed?.path === file.path && reviewed.content === file.content && reviewed.hash === file.hash))) {
+            return { success: false, status: 'blocked', message: 'The saved backup program differs from the current configuration or generator. Re-run hv_plan scope="backups" and review the new files.' };
+          }
         }
       }
       const expectedRepository = resolveGitHubInfrastructureRepository(applyProject, spec);
@@ -2079,11 +2094,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
             : `Service "${action.resource.name}" is not tracked locally`,
         };
       }
+      const keys = stringArrayField(asRecord(action.metadata), 'keys');
+      const retired = new Set([...(envSpec.removeEnvVars ?? []), ...(envSpec.services[action.resource.name]?.removeEnvVars ?? [])]);
+      if (keys.length === 0 || keys.some(key => !retired.has(key))) return blockedActionIdentity(action, 'The selected service must declare each retired variable.');
       return removeHostingEnvVars({
         project: applyProject,
         environment: latestEnvironment,
         service,
-        keys: stringArrayField(asRecord(action.metadata), 'keys'),
+        keys,
       });
     }
     if (capability === 'hosting.deploy-source.disconnect') {

@@ -4,7 +4,7 @@ import { azureEngineProblems } from '../../src/application/infrastructure-engine
 import type { AzureTokenProvider } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import { environmentProfile } from '../../src/domain/services/infrastructure-engine-selection.js';
-import { classifyDatabaseProbe, engineFixtureEnvironment, engineFixtureResponseProblem, probeDatabaseFromHere, readAzureDatabaseExposure,
+import { classifyDatabaseProbe, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAzureDatabaseExposure,
   readAzureInventory, sinceBaseline } from './engine-fixture.js';
 import { resourceKey, runDisposableFixture, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -23,26 +23,50 @@ function azure(answers: Record<string, Array<{ status: number; body: unknown }>>
 
 describe('engine fixture desired state', () => {
   it.each([['aws', awsEngineProblems], ['azure', azureEngineProblems]] as const)('is a testing environment the %s planner admits', (cloud, problems) => {
-    const spec = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: { 'fx-0a1b2c3d': engineFixtureEnvironment(cloud, 'create') } });
+    const spec = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: { 'fx-0a1b2c3d': engineFixtureEnvironment(cloud, 'create', cloud === 'aws' ? 'us-east-1' : 'eastus2') } });
     expect(problems(spec, 'fx-0a1b2c3d')).toEqual([]);
     expect(environmentProfile('fx-0a1b2c3d')).toBe('testing');
-    expect(Object.keys(spec.environments['fx-0a1b2c3d']!.services)).toEqual(['web', 'worker']);
+    expect(Object.keys(spec.environments['fx-0a1b2c3d']!.services)).toEqual(['web', 'worker', 'ondemand', 'scheduled']);
+    expect(spec.environments['fx-0a1b2c3d']!.storage!.files).toMatchObject({ region: cloud === 'aws' ? 'us-east-1' : 'eastus2', injectInto: ['web'] });
     expect(spec.environments['fx-0a1b2c3d']!.database).toBeTruthy();
     expect(selectLiveFixtureProfile(`${cloud}-engine`)).toMatchObject({ provider: cloud, path: 'engine-environment' });
-    const placed = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: { 'fx-0a1b2c3d': engineFixtureEnvironment(cloud, 'create', cloud === 'aws' ? 'us-west-2' : 'westus2') } });
+    const placed = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: { 'fx-0a1b2c3d': engineFixtureEnvironment(cloud, 'create', 'elsewhere', cloud === 'aws' ? 'us-west-2' : 'westus2') } });
     expect(problems(placed, 'fx-0a1b2c3d')).toEqual([]);
+    expect(placed.environments['fx-0a1b2c3d']!.storage!.files!.region).toBe(cloud === 'aws' ? 'us-west-2' : 'westus2');
   });
 });
 
 describe('engine fixture application check', () => {
-  const good = { service: 'hypervibe-provider-conformance', revision: 'update', database: true, worker: true };
-  it('passes only when the revision, the database write and the worker write are all shown', () => {
+  const good = { service: 'hypervibe-provider-conformance', revision: 'update', database: true, worker: true, storage: true, scheduled: true, onDemand: true };
+  it('passes only when the revision and proof from the database, every workload and storage are all shown', () => {
     expect(engineFixtureResponseProblem(200, good, 'update')).toBeUndefined();
     expect(engineFixtureResponseProblem(200, good, 'create')).toMatch(/create revision/);
     expect(engineFixtureResponseProblem(200, { ...good, database: false }, 'update')).toMatch(/database/);
     expect(engineFixtureResponseProblem(200, { ...good, worker: false }, 'update')).toMatch(/worker/);
+    expect(engineFixtureResponseProblem(200, { ...good, storage: false }, 'update')).toMatch(/storage/);
+    expect(engineFixtureResponseProblem(200, { ...good, scheduled: undefined }, 'update')).toMatch(/scheduled job/);
+    expect(engineFixtureResponseProblem(200, { ...good, onDemand: false }, 'update')).toMatch(/on-demand worker/);
     expect(engineFixtureResponseProblem(503, good, 'update')).toMatch(/HTTP 503/);
     expect(engineFixtureResponseProblem(200, null, 'update')).toMatch(/did not answer as the fixture/);
+  });
+});
+
+describe('second environment', () => {
+  it.each([['aws', awsEngineProblems], ['azure', azureEngineProblems]] as const)('is a testing environment the %s planner admits beside the first', (cloud, problems) => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: {
+      'fx-0a1b2c3d': engineFixtureEnvironment(cloud, 'create', cloud === 'aws' ? 'us-east-1' : 'eastus2'), 'fx-0a1b2c3db': engineFixtureSiblingEnvironment(cloud) } });
+    expect(problems(spec, 'fx-0a1b2c3db')).toEqual([]);
+    expect(problems(spec, 'fx-0a1b2c3d')).toEqual([]);
+    expect(environmentProfile('fx-0a1b2c3db')).toBe('testing');
+  });
+
+  it('passes only with its own settings and a database the first environment does not write to', () => {
+    const good = { service: 'hypervibe-provider-conformance', revision: 'sibling', database: true, worker: false };
+    expect(engineFixtureSiblingResponseProblem(200, good)).toBeUndefined();
+    expect(engineFixtureSiblingResponseProblem(200, { ...good, worker: true })).toMatch(/share a database/);
+    expect(engineFixtureSiblingResponseProblem(200, { ...good, database: false })).toMatch(/could not use its database/);
+    expect(engineFixtureSiblingResponseProblem(200, { ...good, revision: 'create' })).toMatch(/own settings/);
+    expect(engineFixtureSiblingResponseProblem(502, good)).toMatch(/HTTP 502/);
   });
 });
 

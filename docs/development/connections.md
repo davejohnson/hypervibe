@@ -118,7 +118,10 @@ confirmation, and acceptance is durable only after the required consumer checks.
 
 An immutable secret cannot be replaced by confirmation alone. Its first write
 requires the target and every declared conflicting key to be confirmed absent;
-a partial write may be repaired only with the same accepted value. Changed
+a partial write may be repaired only with the same accepted value. Ordinary
+rotation skips immutable keys by default. An explicit selection, a required
+companion or an unfinished rotation that includes a protected key blocks before
+further changes and preserves the unfinished record for recovery. Changed
 policy, conflicting values or unknown observations block. Retirement of a legacy
 encryption key requires an explicit rewrap workflow, not ordinary env deletion.
 
@@ -163,6 +166,12 @@ symlinks, wrong environments and unknown output block. It must not pull, refresh
 switch environments, mutate services or rotate credentials; the operator performs
 those actions explicitly and then renews the verified Hypervibe connection.
 
+
+## Credential roles during setup
+
+A GitHub management connection uses the explicitly selected repository PAT. Private image pulls use the separately assigned package-read role. Hypervibe suggests `HYPERVIBE_GITHUB_TOKEN` and `HYPERVIBE_GITHUB_PACKAGES_TOKEN` as reference names. Existing private references and explicitly mapped names still work, including an intentionally shared source mapped to both fields. A token with package permissions is assigned to the package role only when configured for that role. A build may receive a package credential as `NODE_AUTH_TOKEN`. GitHub itself issues the per-job `GITHUB_TOKEN`.
+
+For SendGrid, use a scoped private reference for the management connection and a separate `SENDGRID_API_KEY` runtime secret with `mail.send`. The suggested management reference name is `HYPERVIBE_SENDGRID_API_KEY`. Environments and repository secrets with the same destination name are separate consumers. Record the scope when reviewing their inventory. [GitHub package authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry) and [SendGrid key permissions](https://www.twilio.com/docs/sendgrid/ui/account-and-settings/api-keys).
 
 ## Package tokens in managed builds
 

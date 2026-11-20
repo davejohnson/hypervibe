@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -79,7 +79,8 @@ describe('launch exact saved-plan approval', () => {
     f.plan.mockResolvedValue(reviewed);
     const collect = vi.spyOn(engineSecrets, 'collectOutsideKeys').mockResolvedValue({ status: 'blocked', message: 'Container is not ready' });
     const result = await f.commands.execute('hv_launch', { project: f.project.name, env: 'staging' });
-    expect(result).toMatchObject({ ok: true, data: { status: 'needs_confirmation', planId: reviewed.planRunId } });
+    expect(result).toMatchObject({ ok: true, data: { status: 'needs_confirmation', planId: reviewed.planRunId, htmlPath: expect.any(String) } });
+    expect(readFileSync((result.data as { htmlPath: string }).htmlPath, 'utf8')).toContain(reviewed.planRunId);
     expect(collect.mock.calls.length).toBe(0);
     expect(f.apply).not.toHaveBeenCalled();
   });

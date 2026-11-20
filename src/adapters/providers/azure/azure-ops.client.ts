@@ -210,12 +210,6 @@ function connectionAnswer(error: unknown): string {
   const message = (inner instanceof Error ? inner.message : '') || (error instanceof Error ? error.message : String(error));
   return `${typeof code === 'string' ? `${code}: ` : ''}${message}`.slice(0, 300);
 }
-const blockedAddress = (error: unknown): string | undefined =>
-  /no pg_hba\.conf entry for host "(\d{1,3}(?:\.\d{1,3}){3})"/.exec(error instanceof Error ? error.message : '')?.[1];
-
-/** An address nobody can connect from (TEST-NET-1, reserved for documentation). */
-const AZURE_PLACEHOLDER_ADDRESS = '192.0.2.1';
-
 /** This computer's public IPv4 address as an AWS-run echo service sees it; undefined when it cannot be read. */
 export async function lookupPublicAddress(fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
   try {
@@ -227,10 +221,8 @@ export async function lookupPublicAddress(fetchImpl: typeof fetch = fetch): Prom
 
 export interface AzureSetupAccessOptions {
   pollMs?: number;
-  /** Used when Azure does not say which address it refused. */
+  /** This computer's public address; the default asks an address service. */
   lookupAddress?: () => Promise<string | undefined>;
-  /** Told how the address was learned, for the step's result. */
-  onLearned?: (how: 'Azure\'s refusal' | 'an address service') => void;
 }
 
 /**
@@ -240,11 +232,10 @@ export interface AzureSetupAccessOptions {
  * public access off again. Closing is attempted whatever happened before it,
  * and a failure to close is an error.
  *
- * Learning the address: with public access on and no rule, Azure drops
- * connections without a word (observed live 2026-11-18). So a rule for an
- * address nobody can use goes in first, in case Azure then names the address it
- * refuses; if it still does not, an address service is asked. Either way the
- * probe must then connect, which a wrong address cannot do.
+ * Azure never says which address it turned away: with or without a firewall
+ * rule it drops the connection (observed live 2026-11-18, West US 2). So the
+ * address comes from an address service. The probe must then connect, which a
+ * wrong address cannot do.
  */
 export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, serverId: string, probe: () => Promise<void>, work: () => Promise<T>, options: AzureSetupAccessOptions = {}): Promise<T> {
   const pollMs = options.pollMs ?? 5000;
@@ -283,37 +274,19 @@ export async function withAzureSetupAccess<T>(tokens: AzureTokenProvider, server
   try {
     const opened = await publicAccess('Enabled');
     if (opened) throw new Error(`Hypervibe could not open the database server to this computer (${opened}).`);
-    const placeholder = await allow(AZURE_PLACEHOLDER_ADDRESS);
-    if (![200, 201, 202].includes(placeholder.status)) throw new Error(`Hypervibe could not prepare the database server's firewall (${azureError(placeholder)}).`);
-    let address: string | undefined;
-    let allowed = false;
-    let last: unknown;
-    // The probe asks one thing: does the server answer this computer? A PostgreSQL error other than the
-    // firewall's refusal (a login a new server does not know yet, say) is an answer; `work` deals with it.
-    const answered = (error: unknown) => !blockedAddress(error) && /^[0-9A-Z]{5}$/.test(String((error as { code?: unknown } | null)?.code ?? ''));
-    for (let attempt = 0; attempt < 8 && !address && !allowed; attempt++) {
-      try { await probe(); allowed = true; } catch (error) {
-        last = error;
-        address = blockedAddress(error);
-        allowed = answered(error);
-        if (!address && !allowed) await wait();
+    const address = await lookupAddress();
+    if (!address) throw new Error('Hypervibe could not learn this computer\'s public address, so it did not open the database server to anything. Check the internet connection and run the plan again.');
+    const added = await allow(address);
+    if (![200, 201, 202].includes(added.status)) throw new Error(`Hypervibe could not allow this computer to reach the database server (${azureError(added)}).`);
+    // The rule takes up to a few minutes to apply; until then connections are dropped. The probe asks one
+    // thing: does the server answer this computer? Any PostgreSQL error (a login a new server does not
+    // know yet, say) is an answer, and `work` deals with it.
+    for (let attempt = 0; ; attempt++) {
+      try { await probe(); break; } catch (error) {
+        if (/^[0-9A-Z]{5}$/.test(String((error as { code?: unknown } | null)?.code ?? ''))) break;
+        if (attempt >= 23) throw new Error(`The database server did not answer this computer after allowing ${address}. Last answer: ${connectionAnswer(error)}`);
+        await wait();
       }
-    }
-    let how: 'Azure\'s refusal' | 'an address service' = 'Azure\'s refusal';
-    if (!address && !allowed) { address = await lookupAddress(); how = 'an address service'; }
-    if (!address && !allowed) throw new Error(`Hypervibe could not learn which address Azure sees this computer as, so it did not open the database server to anything. Last answer: ${connectionAnswer(last)}`);
-    if (address) {
-      const added = await allow(address);
-      if (![200, 201, 202].includes(added.status)) throw new Error(`Hypervibe could not allow this computer to reach the database server (${azureError(added)}).`);
-      // The rule takes up to a few minutes to apply; until then connections are dropped or refused.
-      for (let attempt = 0; ; attempt++) {
-        try { await probe(); break; } catch (error) {
-          if (answered(error)) break;
-          if (attempt >= 23) throw error;
-          await wait();
-        }
-      }
-      options.onLearned?.(how);
     }
     result = await work();
   } catch (error) { failure = error; }

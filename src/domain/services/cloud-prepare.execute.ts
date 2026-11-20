@@ -9,6 +9,8 @@ import { GoogleAuth } from 'google-auth-library';
 import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import { getGcpProjectSetupContribution, runGcpProjectSetup } from './gcp-project-setup.service.js';
 import type { Project } from '../entities/project.entity.js';
+import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
+import { GCP_PROJECT_ID_PATTERN, gcpConnectionScope } from './gcp-environment-target.js';
 import { getProjectScopeHints } from './project-scope.js';
 import {
   GCS_PREPARE_ADDONS,
@@ -115,6 +117,8 @@ export async function runCloudPrepare(params: {
   project: Project;
   provider: string;
   gcpProjectId?: string;
+  environmentProjectId?: string;
+  environmentName?: string;
   region?: string;
   deployServiceAccountEmail?: string;
   runtimeServiceAccountEmail?: string;
@@ -152,6 +156,7 @@ export async function runCloudPrepare(params: {
   }
 
   const resolved = resolveGcpBootstrapTarget({
+    environmentProjectId: params.environmentProjectId,
     project,
     gcpProjectId,
     deployServiceAccountEmail,
@@ -292,9 +297,9 @@ export async function runCloudPrepare(params: {
     const contributionId = gcsAccess ? `prepare-gcs-${gcsAccess}` : memorystoreAccess ? `prepare-memorystore-${memorystoreAccess}`
       : queueAccess ? 'prepare-queues' : workerAccess ? 'prepare-workers' : `prepare-base-${plan.region ?? 'us-central1'}`;
     const adoption = basePreparation ? await reviewGcpPreparationAdoption({ project: projectRepo.findById(project.id) ?? project,
-      target: plan, token, contributionId, configuration }) : undefined;
+      environmentProjectId: params.environmentProjectId, target: plan, token, contributionId, configuration }) : undefined;
     if (adoption) configuration = adoption.configuration;
-    const setup = await runGcpProjectSetup({ projectId: project.id, gcpProjectId: resolved.gcpProjectId,
+    const setup = await runGcpProjectSetup({ projectId: project.id, projectName: project.name, gcpProjectId: resolved.gcpProjectId,
       auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: token, GOOGLE_PROJECT: resolved.gcpProjectId }, redact: [token] },
       contribution: { id: contributionId, configuration }, confirm,
       ...(adoption ? { allowImportAddresses: adoption.allowImportAddresses, existingResourceAddresses: adoption.existingResourceAddresses } : {}),
@@ -307,66 +312,64 @@ export async function runCloudPrepare(params: {
       message: 'Review these exact Google Cloud setup actions, then confirm the saved preview.' };
     const observed = await verifyPreparedInfrastructure(token, plan);
     const { enabledApis, runtimeServiceAccountIamResult, runtimeSelfIamResult, iamResult, runtimeIamResult } = observed;
-    const currentProject = projectRepo.findById(project.id) ?? project;
-    const previous = getCloudPreparation(currentProject, profile.provider);
-    const preservesPrevious = previous?.version === profile.version
-      && previous.gcpProjectId === resolved.gcpProjectId
-      && previous.deployServiceAccountEmail === resolved.deployServiceAccountEmail;
-    const preservesRuntime = preservesPrevious
-      && previous?.runtimeServiceAccountEmail === resolved.runtimeServiceAccountEmail
-      && (runtimeServiceAccountIamResult === undefined
-        || previous?.runtimeServiceAccountUniqueId
-          === runtimeServiceAccountIamResult.serviceAccountUniqueId);
-    const recordedApis = Array.from(new Set([
-      ...(preservesPrevious ? previous.requiredApis : []),
-      ...requiredApis,
-    ]));
-    const recordedRoles = Array.from(new Set([
-      ...(preservesPrevious ? previous.requiredRoles : []),
-      ...requiredRoles,
-    ])).filter((role) => !revokeRoles.includes(role));
-    const recordedRuntimeRoles = Array.from(new Set([
-      ...(preservesRuntime ? previous?.runtimeRequiredRoles ?? [] : []),
-      ...runtimeGrantRoles,
-    ])).filter((role) => !runtimeRevokeRoles.includes(role));
-    const recordedRuntimeServiceAccountAccessRoles = Array.from(new Set([
-      ...(preservesRuntime ? previous?.runtimeServiceAccountAccessRoles ?? [] : []),
-      ...(runtimeServiceAccountIamResult?.updatedRoles ?? []),
-      ...(runtimeServiceAccountIamResult?.existingRoles ?? []),
-    ]));
-    const runtimeServiceAccountUniqueId = runtimeServiceAccountIamResult?.serviceAccountUniqueId
-      ?? (preservesRuntime ? previous?.runtimeServiceAccountUniqueId : undefined);
-    const updatedProject = removalOnly && !preservesPrevious
-      ? project
-      : projectRepo.update(project.id, {
-        policies: withCloudPreparationRecord(currentProject.policies, profile.provider, {
-          provider: profile.provider,
-          version: profile.version,
-          preparedAt: new Date().toISOString(),
-          gcpProjectId: resolved.gcpProjectId,
-          deployServiceAccountEmail: resolved.deployServiceAccountEmail,
-          ...(resolved.runtimeServiceAccountEmail
-            ? { runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail }
-            : {}),
-          artifactRepositoryRegions: [...new Set([...(preservesPrevious ? previous.artifactRepositoryRegions ?? [] : []), ...(basePreparation ? [plan.region ?? 'us-central1'] : [])])],
-          requiredApis: recordedApis,
-          requiredRoles: recordedRoles,
-          ...(resolved.runtimeServiceAccountEmail
-            ? {
-                runtimeRequiredRoles: recordedRuntimeRoles,
-                ...(runtimeServiceAccountUniqueId
-                  ? { runtimeServiceAccountUniqueId }
-                  : {}),
-                runtimeServiceAccountAccessRoles: recordedRuntimeServiceAccountAccessRoles,
-                runtimeSelfRoles: Array.from(new Set([
-                  ...(preservesRuntime ? previous?.runtimeSelfRoles ?? [] : []),
-                  ...(runtimeSelfIamResult?.updatedRoles ?? []),
-                  ...(runtimeSelfIamResult?.existingRoles ?? []),
-                ])),
-              }
-            : {}),
-        }),
-      });
+    const updatedProject = projectRepo.updatePolicies(project.id, (currentProject) => {
+      const previous = getCloudPreparation(currentProject, profile.provider, params.environmentProjectId);
+      const preservesPrevious = previous?.version === profile.version
+        && previous.gcpProjectId === resolved.gcpProjectId
+        && previous.deployServiceAccountEmail === resolved.deployServiceAccountEmail;
+      const preservesRuntime = preservesPrevious
+        && previous?.runtimeServiceAccountEmail === resolved.runtimeServiceAccountEmail
+        && (runtimeServiceAccountIamResult === undefined
+          || previous?.runtimeServiceAccountUniqueId
+            === runtimeServiceAccountIamResult.serviceAccountUniqueId);
+      const recordedApis = Array.from(new Set([
+        ...(preservesPrevious ? previous.requiredApis : []),
+        ...requiredApis,
+      ]));
+      const recordedRoles = Array.from(new Set([
+        ...(preservesPrevious ? previous.requiredRoles : []),
+        ...requiredRoles,
+      ])).filter((role) => !revokeRoles.includes(role));
+      const recordedRuntimeRoles = Array.from(new Set([
+        ...(preservesRuntime ? previous?.runtimeRequiredRoles ?? [] : []),
+        ...runtimeGrantRoles,
+      ])).filter((role) => !runtimeRevokeRoles.includes(role));
+      const recordedRuntimeServiceAccountAccessRoles = Array.from(new Set([
+        ...(preservesRuntime ? previous?.runtimeServiceAccountAccessRoles ?? [] : []),
+        ...(runtimeServiceAccountIamResult?.updatedRoles ?? []),
+        ...(runtimeServiceAccountIamResult?.existingRoles ?? []),
+      ]));
+      const runtimeServiceAccountUniqueId = runtimeServiceAccountIamResult?.serviceAccountUniqueId
+        ?? (preservesRuntime ? previous?.runtimeServiceAccountUniqueId : undefined);
+      if (removalOnly && !preservesPrevious) return currentProject.policies;
+      return withCloudPreparationRecord(currentProject.policies, profile.provider, {
+        provider: profile.provider,
+        version: profile.version,
+        preparedAt: new Date().toISOString(),
+        gcpProjectId: resolved.gcpProjectId,
+        deployServiceAccountEmail: resolved.deployServiceAccountEmail,
+        ...(resolved.runtimeServiceAccountEmail
+          ? { runtimeServiceAccountEmail: resolved.runtimeServiceAccountEmail }
+          : {}),
+        artifactRepositoryRegions: [...new Set([...(preservesPrevious ? previous.artifactRepositoryRegions ?? [] : []), ...(basePreparation ? [plan.region ?? 'us-central1'] : [])])],
+        requiredApis: recordedApis,
+        requiredRoles: recordedRoles,
+        ...(resolved.runtimeServiceAccountEmail
+          ? {
+              runtimeRequiredRoles: recordedRuntimeRoles,
+              ...(runtimeServiceAccountUniqueId
+                ? { runtimeServiceAccountUniqueId }
+                : {}),
+              runtimeServiceAccountAccessRoles: recordedRuntimeServiceAccountAccessRoles,
+              runtimeSelfRoles: Array.from(new Set([
+                ...(preservesRuntime ? previous?.runtimeSelfRoles ?? [] : []),
+                ...(runtimeSelfIamResult?.updatedRoles ?? []),
+                ...(runtimeSelfIamResult?.existingRoles ?? []),
+              ])),
+            }
+          : {}),
+      }, params.environmentProjectId);
+    });
 
     auditRepo.create({
       action: 'cloud.prepare.succeeded',
@@ -383,6 +386,8 @@ export async function runCloudPrepare(params: {
       message: removalOnly
         ? 'Cloud access cleanup completed.'
         : 'Cloud prepared for Hypervibe deploys.',
+      planId: setup.planId,
+      htmlPath: setup.htmlPath,
       project: project.name,
       provider: profile.provider,
       version: profile.version,
@@ -412,14 +417,18 @@ export async function runCloudPrepare(params: {
           alreadyAbsentRuntimeRoles: runtimeIamResult.absentRoles,
         } : {}),
       } : {}),
-      preparation: updatedProject?.policies.cloudPreparation,
-      nextSteps: [
-        'hv_connections provider="cloudrun" action="verify"',
-        'hv_connections provider="cloudsql" action="verify"',
-        ...(gcsAccess ? ['hv_inspect provider="gcs" resource="storage"'] : []),
-        ...(memorystoreAccess ? ['hv_inspect provider="memorystore" resource="cache" region="<region>"'] : []),
-        'hv_plan, then hv_apply',
-      ],
+      preparation: params.environmentProjectId !== undefined
+        ? { [profile.provider]: getCloudPreparation(updatedProject, profile.provider, params.environmentProjectId) }
+        : updatedProject.policies.cloudPreparation,
+      nextSteps: params.environmentProjectId !== undefined
+        ? [`Continue deployment for ${params.environmentName ?? 'the selected environment'} in Google Cloud project ${params.environmentProjectId}.`]
+        : [
+          'hv_connections provider="cloudrun" action="verify"',
+          'hv_connections provider="cloudsql" action="verify"',
+          ...(gcsAccess ? ['hv_inspect provider="gcs" resource="storage"'] : []),
+          ...(memorystoreAccess ? ['hv_inspect provider="memorystore" resource="cache" region="<region>"'] : []),
+          'hv_plan, then hv_apply',
+        ],
     };
   } catch (error) {
     const failureCategory = classifyPrepareError(error, adminAuth);
@@ -446,6 +455,9 @@ export async function runCloudPrepare(params: {
         projectName: project.name,
         provider: profile.provider,
         gcpProjectId: resolved.gcpProjectId,
+        environmentProjectId: params.environmentProjectId,
+        environmentName: params.environmentName,
+        region: params.region,
         gcsAccess,
         memorystoreAccess,
         queueAccess,
@@ -483,16 +495,42 @@ export async function getDefaultAdminAccessToken(): Promise<string> {
 function resolveGcpBootstrapTarget(params: {
   project: Project;
   gcpProjectId?: string;
+  environmentProjectId?: string;
   deployServiceAccountEmail?: string;
   runtimeServiceAccountEmail?: string;
 }): { success: true; gcpProjectId: string; deployServiceAccountEmail: string; runtimeServiceAccountEmail?: string } | { success: false; error: string } {
-  const secretStore = getSecretStore();
-  const cloudRunConnection = connectionRepo.findBestMatchFromHints('cloudrun', getProjectScopeHints(params.project));
-  const cloudRunCreds = cloudRunConnection
-    ? secretStore.decryptObject<ServiceAccountCredentials & { projectId?: string; credentials?: string; runtimeServiceAccountEmail?: string }>(cloudRunConnection.credentialsEncrypted)
-    : undefined;
+  const { environmentProjectId } = params;
+  if (environmentProjectId !== undefined && !GCP_PROJECT_ID_PATTERN.test(environmentProjectId)) {
+    return { success: false, error: 'Select a valid GCP project ID for this environment before preparing it.' };
+  }
+  if (environmentProjectId !== undefined && params.gcpProjectId !== undefined && params.gcpProjectId !== environmentProjectId) {
+    return { success: false, error: 'The requested GCP project differs from the project selected for this environment.' };
+  }
+  const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl);
+  const cloudRunConnection = environmentProjectId === undefined
+    ? connectionRepo.findBestMatchFromHints('cloudrun', getProjectScopeHints(params.project))
+    : repository ? connectionRepo.findByProviderAndScope('cloudrun', gcpConnectionScope(repository, environmentProjectId)) : null;
+  if (environmentProjectId !== undefined && cloudRunConnection && cloudRunConnection.status !== 'verified') {
+    return { success: false, error: 'Verify the Cloud Run connection for the selected environment project before preparing it.' };
+  }
+  type ConnectionCredentials = ServiceAccountCredentials & { projectId?: string; credentials?: string; runtimeServiceAccountEmail?: string };
+  let cloudRunCreds: ConnectionCredentials | undefined;
+  if (cloudRunConnection) {
+    try {
+      cloudRunCreds = getSecretStore().decryptObject<ConnectionCredentials>(cloudRunConnection.credentialsEncrypted);
+    } catch {
+      return { success: false, error: 'The Cloud Run connection for this project could not be read.' };
+    }
+  }
   const nestedServiceAccount = parseOptionalServiceAccountJson(cloudRunCreds?.credentials);
-  const gcpProjectId = params.gcpProjectId ?? cloudRunCreds?.projectId ?? cloudRunCreds?.project_id;
+  if (environmentProjectId !== undefined && cloudRunCreds) {
+    const projectIds = [cloudRunCreds.projectId, cloudRunCreds.project_id, nestedServiceAccount?.project_id].filter((id) => id !== undefined);
+    if (!projectIds.length || projectIds.some((id) => id !== environmentProjectId)
+      || (cloudRunCreds.credentials !== undefined && !nestedServiceAccount)) {
+      return { success: false, error: 'The Cloud Run connection must identify the exact GCP project selected for this environment.' };
+    }
+  }
+  const gcpProjectId = environmentProjectId ?? params.gcpProjectId ?? cloudRunCreds?.projectId ?? cloudRunCreds?.project_id;
   const deployServiceAccountEmail = params.deployServiceAccountEmail ?? nestedServiceAccount?.client_email ?? cloudRunCreds?.client_email;
   const runtimeServiceAccountEmail = params.runtimeServiceAccountEmail
     ?? cloudRunCreds?.runtimeServiceAccountEmail;
@@ -616,6 +654,9 @@ function cloudPrepareAuditDetails(params: {
 
 function cloudPrepareAdminCredentialSetup(params: {
   projectName: string;
+  environmentProjectId?: string;
+  environmentName?: string;
+  region?: string;
   provider: string;
   gcpProjectId: string;
   gcsAccess?: GcsPrepareAccess;
@@ -630,6 +671,9 @@ function cloudPrepareAdminCredentialSetup(params: {
     project: params.projectName,
     provider: params.provider,
     action: 'prepare',
+    ...(params.environmentName ? { environment: params.environmentName } : {}),
+    ...(params.environmentProjectId ? { gcpProjectId: params.environmentProjectId } : {}),
+    ...(params.region ? { region: params.region } : {}),
     ...(params.gcsAccess ? { gcsAccess: params.gcsAccess } : {}),
     ...(params.memorystoreAccess ? { memorystoreAccess: params.memorystoreAccess } : {}),
     ...(params.queueAccess ? { queueAccess: params.queueAccess } : {}),
@@ -642,6 +686,9 @@ function cloudPrepareAdminCredentialSetup(params: {
     `project="${params.projectName}"`,
     `provider="${params.provider}"`,
     'action="prepare"',
+    ...(params.environmentName ? [`environment="${params.environmentName}"`] : []),
+    ...(params.environmentProjectId ? [`gcpProjectId="${params.environmentProjectId}"`] : []),
+    ...(params.region ? [`region="${params.region}"`] : []),
     ...(params.gcsAccess ? [`gcsAccess="${params.gcsAccess}"`] : []),
     ...(params.memorystoreAccess ? [`memorystoreAccess="${params.memorystoreAccess}"`] : []),
     ...(params.queueAccess ? [`queueAccess="${params.queueAccess}"`] : []),
@@ -683,8 +730,9 @@ function cloudPrepareAdminCredentialSetup(params: {
       'The local ADC file contains a refresh token; keep it private and revoke it with gcloud auth application-default revoke when it is no longer needed.',
       'Hypervibe uses this identity only for the confirmed preparation call and does not copy it into deployed workloads or store its token.',
     ],
-    credentialExample,
-    retryCall,
+    ...(params.environmentProjectId && !params.environmentName
+      ? { retry: 'Retry preparation for the same environment, GCP project and region after authorizing Google access.' }
+      : { credentialExample, retryCall }),
   };
 }
 
@@ -724,26 +772,30 @@ export function buildSourceBucketName(gcpProjectId: string): string {
 }
 
 /** Bootstrap already applied this entire base configuration in its saved plan. */
-export async function verifyAndRecordBootstrapPreparation(project: Project, token: string, projectId: string, deployEmail: string, runtimeEmail: string, region = 'us-central1'): Promise<void> {
+export async function verifyAndRecordBootstrapPreparation(project: Project, token: string, projectId: string, deployEmail: string, runtimeEmail: string, region = 'us-central1', environmentProjectId?: string): Promise<void> {
+  if (environmentProjectId !== undefined && environmentProjectId !== projectId) {
+    throw new Error('Bootstrap verified a different GCP project from the project selected for this environment.');
+  }
   const input = defaultGcpPreparationInput(projectId, deployEmail, runtimeEmail);
   const profile = getCloudPrepareProfile('cloudrun')!;
   const plan: CloudPreparePlan = { ...input, region, projectName: project.name, provider: 'cloudrun', version: profile.version,
     member: `serviceAccount:${deployEmail}`, runtimeMember: `serviceAccount:${runtimeEmail}`, revokeRoles: [], runtimeRevokeRoles: [] };
   const observed = await verifyPreparedInfrastructure(token, plan);
-  const currentProject = projectRepo.findById(project.id) ?? project;
-  const previous = getCloudPreparation(currentProject, 'cloudrun');
-  const sameTarget = previous?.gcpProjectId === projectId && previous.deployServiceAccountEmail === deployEmail && previous.runtimeServiceAccountEmail === runtimeEmail;
-  projectRepo.update(project.id, { policies: withCloudPreparationRecord(currentProject.policies, 'cloudrun', {
-    provider: 'cloudrun', version: profile.version, preparedAt: new Date().toISOString(), gcpProjectId: projectId,
-    deployServiceAccountEmail: deployEmail, runtimeServiceAccountEmail: runtimeEmail,
-    runtimeServiceAccountUniqueId: observed.runtimeServiceAccountIamResult?.serviceAccountUniqueId,
-    requiredApis: [...new Set([...(sameTarget ? previous.requiredApis : []), ...input.enableApis])],
-    requiredRoles: [...new Set([...(sameTarget ? previous.requiredRoles : []), ...input.grantRoles])],
-    runtimeRequiredRoles: [...new Set([...(sameTarget ? previous.runtimeRequiredRoles ?? [] : []), ...input.runtimeGrantRoles])],
-    artifactRepositoryRegions: [...new Set([...(sameTarget ? previous.artifactRepositoryRegions ?? [] : []), region])],
-    runtimeServiceAccountAccessRoles: input.runtimeServiceAccountGrantRoles,
-    ...(sameTarget ? { runtimeSelfRoles: previous.runtimeSelfRoles } : {}),
-  }) });
+  projectRepo.updatePolicies(project.id, (currentProject) => {
+    const previous = getCloudPreparation(currentProject, 'cloudrun', environmentProjectId);
+    const sameTarget = previous?.gcpProjectId === projectId && previous.deployServiceAccountEmail === deployEmail && previous.runtimeServiceAccountEmail === runtimeEmail;
+    return withCloudPreparationRecord(currentProject.policies, 'cloudrun', {
+      provider: 'cloudrun', version: profile.version, preparedAt: new Date().toISOString(), gcpProjectId: projectId,
+      deployServiceAccountEmail: deployEmail, runtimeServiceAccountEmail: runtimeEmail,
+      runtimeServiceAccountUniqueId: observed.runtimeServiceAccountIamResult?.serviceAccountUniqueId,
+      requiredApis: [...new Set([...(sameTarget ? previous.requiredApis : []), ...input.enableApis])],
+      requiredRoles: [...new Set([...(sameTarget ? previous.requiredRoles : []), ...input.grantRoles])],
+      runtimeRequiredRoles: [...new Set([...(sameTarget ? previous.runtimeRequiredRoles ?? [] : []), ...input.runtimeGrantRoles])],
+      artifactRepositoryRegions: [...new Set([...(sameTarget ? previous.artifactRepositoryRegions ?? [] : []), region])],
+      runtimeServiceAccountAccessRoles: input.runtimeServiceAccountGrantRoles,
+      ...(sameTarget ? { runtimeSelfRoles: previous.runtimeSelfRoles } : {}),
+    }, environmentProjectId);
+  });
 }
 
 /** Read-only confirmation of the exact policy and identities after engine apply. */

@@ -3,6 +3,14 @@ import { formatCommandResult, PRESENTED_COMMAND_IDS } from '../presentation.js';
 import { commandError, commandSuccess } from '../results.js';
 
 describe('command presentation', () => {
+  it('shows the full browser report path ahead of the plan actions', () => {
+    const htmlPath = '/tmp/hypervibe/reports/1b98e85d-b68d-412e-8566-b3015e7d17c8.html';
+    const text = formatCommandResult('hv_plan', commandSuccess({ htmlPath,
+      actions: [{ id: 'database:shared', type: 'create', resource: { provider: 'aws' } }] }));
+    expect(text).toContain(htmlPath);
+    expect(text.indexOf(htmlPath)).toBeLessThan(text.indexOf('database:shared'));
+    expect(text.split(htmlPath)).toHaveLength(2);
+  });
   it('keeps complete release failures and their log links readable', () => {
     const message = 'The selected private repository could not be read with the connected GitHub account. Connect repository read access before retrying the deployment.';
     const logsUrl = 'https://console.cloud.google.com/cloud-build/builds/long-build-identifier?project=example';

@@ -24,6 +24,22 @@ describe('AWS engine configuration', () => {
     expect(awsSharedClusterArn({ ...base, prefix: 'hv-app-shared' })).toBe('arn:aws:rds:us-west-2:111122223333:cluster:hv-app-shared-postgres');
   });
 
+  it('enables recoverable versions and signed browser uploads only for the selected private S3 bucket', () => {
+    const config = buildAwsConfiguration({ ...base, storage: [
+      { name: 'docs', bucket: 'example-docs', versioning: true, browserUploads: true },
+      { name: 'scratch', bucket: 'example-scratch' },
+    ] });
+    const { resource } = config.files['storage.tf.json'] as { resource: Record<string, Record<string, unknown>> };
+    expect(resource.aws_s3_bucket_versioning).toEqual({ docs: { bucket: '${aws_s3_bucket.docs.id}', versioning_configuration: [{ status: 'Enabled' }] } });
+    expect(resource.aws_s3_bucket_lifecycle_configuration?.docs).toMatchObject({ rule: [{ status: 'Enabled', noncurrent_version_expiration: [{ noncurrent_days: 30 }] }] });
+    expect(resource.aws_s3_bucket_cors_configuration?.docs).toMatchObject({ cors_rule: [{ allowed_methods: ['PUT', 'POST', 'GET', 'HEAD'], allowed_origins: ['*'] }] });
+    expect(resource.aws_s3_bucket_public_access_block?.docs).toMatchObject({ block_public_acls: true, block_public_policy: true });
+    for (const type of ['aws_s3_bucket_versioning', 'aws_s3_bucket_lifecycle_configuration', 'aws_s3_bucket_cors_configuration']) {
+      expect(resource[type]?.scratch).toBeUndefined();
+      expect(config.resources[`${type}.docs`]).toMatchObject({ actionId: 'storage:docs', dataBearing: true });
+    }
+  });
+
   it('caps the runtime role with the setup boundary and scopes secrets to the environment', () => {
     const config = buildAwsConfiguration({ ...base, secretKeys: ['API_KEY'], storage: [{ name: 'documents', bucket: 'hv-app-aws-documents' }] });
     const role = (config.files['base.tf.json'] as { resource: { aws_iam_role: { runtime: Record<string, string> }; aws_iam_role_policy: { runtime: { policy: string } } } }).resource;

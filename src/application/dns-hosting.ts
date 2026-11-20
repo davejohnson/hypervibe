@@ -6,11 +6,11 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { ObservedState } from '../domain/ports/observe.port.js';
 import type { DnsRecordType } from '../domain/ports/dns.port.js';
-import type { PlanAction } from '../domain/plan/plan.types.js';
+import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
 import { ConvergeExecutor, type PlanRunDocument, type ConvergeResult } from '../domain/plan/converge.executor.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import { normalizeProviderDnsRecord, providerDnsRecordShouldBeProxied } from '../domain/services/domain-dns-records.js';
-import { executeDnsEngineSegment, executeDnsOwnershipReconciliation, getDnsBindingIdentity, hasOwnedDnsRecords, prepareDnsEnginePlan } from './dns-engine.js';
+import { dnsEngineState, executeDnsEngineSegment, executeDnsOwnershipReconciliation, getDnsBindingIdentity, hasOwnedDnsRecords, prepareDnsEnginePlan } from './dns-engine.js';
 import { verifyDnsTrafficAbsent } from './dns-absence.js';
 import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
 import { desiredDomainServiceName, DOMAIN_RETARGET_OPERATION, observedDomainService } from '../domain/services/domain-attach-policy.js';
@@ -41,7 +41,7 @@ export function persistDnsPlanRun(ctx: CommandContext, params: {
   ctx.repos.runs.updateStatus(run.id, 'succeeded');
   return { planRunId: run.id, environmentName: params.environmentName, specRevision: params.specRevision,
     actions: document.actions,
-    confirmActions: document.actions.filter(action => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map(action => action.id),
+    confirmActions: document.actions.filter(requiresActionConfirmation).map(action => action.id),
     warnings: ['DNS changes use the saved OpenTofu plan. Run hv_plan again after apply to continue hosting readiness.'] };
 }
 
@@ -192,7 +192,7 @@ export async function applyDnsPlan(ctx: CommandContext, params: {
   const spec = params.spec.environments[environmentName];
   if (loaded.document.scope !== 'dns-engine' || !descriptor || !environment || !spec
     || loaded.run.projectId !== params.project.id || loaded.run.environmentId !== environment.id
-    || descriptor.state.projectId !== params.project.id || descriptor.state.environmentId !== environment.id) {
+    || descriptor.state.projectId !== params.project.id || descriptor.state.environmentId !== dnsEngineState(environment, descriptor.zone.provider, descriptor.owner).environmentId) {
     return { kind: 'blocked', reason: 'The saved DNS plan does not match this project and environment. Run hv_plan again.' };
   }
   const source = loaded.document.dns?.source;

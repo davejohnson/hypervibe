@@ -16,7 +16,7 @@ import { ensureEngineBinary } from '../install.js';
 import { buildCiReleaseConfiguration } from '../../../providers/gcp/tofu/gcp-ci.backend.js';
 import { buildGcpBootstrapConfiguration, buildGcpPreparationConfiguration, defaultGcpPreparationInput, gcpSetupBackend } from '../../../providers/gcp/tofu/gcp-setup.backend.js';
 import { composeGcpProjectConfiguration } from '../../../../domain/services/gcp-project-setup.service.js';
-import { engineStatePaths, loadOrCreateStatePassphrase } from '../workspace.js';
+import { engineStatePaths, fileDigest, loadOrCreateStatePassphrase } from '../workspace.js';
 
 const SECRET = 'hv-representative-secret-7f3a9c';
 const cipher = { encrypt: (v: string) => Buffer.from(v).toString('base64'), decrypt: (v: string) => Buffer.from(v, 'base64').toString() };
@@ -46,13 +46,15 @@ const auth = { env: { TF_VAR_secret: SECRET }, redact: [SECRET] };
 describe('OpenTofu engine (real binary, no cloud writes)', () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hv-engine-'));
   let engine: OpenTofuEngine;
+  let binary: string;
   beforeAll(async () => {
     const previous = process.env.HYPERVIBE_DATA_DIR;
     process.env.HYPERVIBE_DATA_DIR = dataDir;
     try {
       const installed = await ensureEngineBinary();
       if (!installed.ok) throw new Error(installed.error);
-      engine = new OpenTofuEngine({ binary: installed.binary, cipher, dataDir, pluginCacheDir: path.join(dataDir, 'plugins'), timeoutMs: 300_000 });
+      binary = installed.binary;
+      engine = new OpenTofuEngine({ binary, cipher, dataDir, pluginCacheDir: path.join(dataDir, 'plugins'), timeoutMs: 300_000 });
     } finally {
       if (previous === undefined) delete process.env.HYPERVIBE_DATA_DIR;
       else process.env.HYPERVIBE_DATA_DIR = previous;
@@ -65,7 +67,7 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
 
   it('validates project-shared keyless CI infrastructure with the pinned provider', async () => {
     const configuration = buildCiReleaseConfiguration({ projectId: 'demo-project', projectNumber: '123456789',
-      repository: 'owner/app', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' });
+      repository: 'owner/app', repositoryId: '345', releases: [{ environmentName: 'staging', branch: 'main', autoDeploy: true }], runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' });
     expect(await engine.validate(gcpSetupBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
 
@@ -79,7 +81,7 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     worker.enableApis.push('workflows.googleapis.com');
     const configuration = composeGcpProjectConfiguration({ bootstrap,
       workers: buildGcpPreparationConfiguration(worker),
-      ci: buildCiReleaseConfiguration({ projectId, projectNumber: '123456789', repository: 'owner/app', runtimeServiceAccountEmail }),
+      ci: buildCiReleaseConfiguration({ projectId, projectNumber: '123456789', repository: 'owner/app', repositoryId: '345', releases: [{ environmentName: 'staging', branch: 'main', autoDeploy: true }], runtimeServiceAccountEmail }),
     });
     expect(await engine.validate(gcpSetupBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
@@ -232,6 +234,7 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     expect(first.blockers).toEqual([]);
     expect(first.actions.map((a) => [a.id, a.type])).toEqual([['service:app', 'create']]);
     expect(fs.readFileSync(first.planFile).includes(SECRET)).toBe(false);
+    expect(fs.existsSync(paths.statePath)).toBe(false);
 
     const segment = first.actions[0]!.metadata!.engineSegment as any;
     const applied = await engine.apply({ backend: builtinBackend, auth, state, planId: 'plan-1', segment, approvedAddresses: segment.addresses });
@@ -275,6 +278,40 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     expect(tampered).toEqual({ outcomes: { 'terraform_data.extra': 'not_started' }, diagnostics: ['The saved engine plan changed after review. Re-run hv_plan.'] });
   }, 300_000);
 
+  it('checks the exact private plan values before saving a reviewed change', async () => {
+    const isolatedState = { ...state, environmentId: 'review-plan' };
+    const plans = engineStatePaths(isolatedState, dataDir).plans;
+    const settings = (account: string) => config({ target: { input: { account, credential: '${var.secret}' } } });
+    const params = { backend: builtinBackend, auth, state: isolatedState };
+    const initial = await engine.plan({ ...params, configuration: settings('old'), planId: 'initial' });
+    if (!initial.ok) throw new Error(initial.error);
+    const addresses = ['terraform_data.target'];
+    expect((await engine.apply({ ...params, planId: 'initial', segment: { ...initial.segment, addresses }, approvedAddresses: addresses })).outcomes)
+      .toEqual({ 'terraform_data.target': 'succeeded' });
+
+    type Values = { input: { account: string; credential: string } };
+    type Entry = { address: string; change: { before: Values; after: Values; actions: string[] } };
+    let observed: unknown;
+    const verifyPlannedChanges = (document: unknown) => {
+      const entry = (document as { resource_changes: Entry[] }).resource_changes.find(row => row.address === addresses[0]);
+      observed = entry?.change;
+      return entry?.change.before.input.account === 'old' && entry?.change.after.input.account === 'approved';
+    };
+    const mismatch = { ok: false, stage: 'plan review', error: 'The saved engine plan does not match the reviewed change.' };
+    const denied = await engine.plan({ ...params, configuration: settings('other'), planId: 'wrong-account', verifyPlannedChanges });
+    expect(denied).toEqual(mismatch);
+    expect(observed).toMatchObject({ actions: ['update'], before: { input: { account: 'old', credential: '[redacted]' } },
+      after: { input: { account: 'other', credential: '[redacted]' } } });
+    expect(await engine.plan({ ...params, configuration: settings('approved'), planId: 'failed-review',
+      verifyPlannedChanges: () => { throw new Error(SECRET); } })).toEqual(mismatch);
+    expect(fs.readdirSync(plans).filter(name => /^(wrong-account|failed-review)\./.test(name))).toEqual([]);
+    const approved = await engine.plan({ ...params, configuration: settings('approved'), planId: 'exact-account', verifyPlannedChanges });
+    if (!approved.ok) throw new Error(approved.error);
+    expect(approved.actions.map(action => action.type)).toEqual(['update']);
+    expect(JSON.stringify(approved)).not.toContain(SECRET);
+    expect(fs.existsSync(approved.planFile)).toBe(true);
+  }, 300_000);
+
   it('reports partial failure per address', async () => {
     const failing = { input: 'boom', provisioner: [{ 'local-exec': { command: 'exit 1' } }] };
     const configuration = config({ app: { input: '${var.secret}' }, good: { input: 'ok' }, bad: failing });
@@ -291,4 +328,66 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     expect(() => loadOrCreateStatePassphrase(paths, cipher)).toThrow(/Restore passphrase\.enc/);
     fs.renameSync(`${paths.passphraseFile}.bak`, paths.passphraseFile);
   });
+
+  it('recovers only the reviewed, protected resource after a failed create', async () => {
+    const isolatedState = { ...state, environmentId: 'protected-recovery' };
+    const recoveryPaths = engineStatePaths(isolatedState, dataDir);
+    const address = 'terraform_data.protected';
+    const configuration = config({
+      protected: { input: '${var.secret}', lifecycle: { prevent_destroy: true },
+        provisioner: [{ 'local-exec': { command: 'exit 1' } }] },
+      sibling: { input: 'unrelated' },
+    });
+    const params = { backend: builtinBackend, configuration, auth, state: isolatedState };
+    const initial = await engine.plan({ ...params, planId: 'first-create' });
+    if (!initial.ok) throw new Error(initial.error);
+    const addresses = Object.keys(configuration.resources);
+    const failed = await engine.apply({ ...params, planId: 'first-create', segment: { ...initial.segment, addresses }, approvedAddresses: addresses });
+    expect(failed.outcomes).toMatchObject({ [address]: 'failed', 'terraform_data.sibling': 'succeeded' });
+    expect(await engine.plan({ ...params, planId: 'blocked-retry' })).toMatchObject({ ok: false, error: expect.stringContaining('prevent_destroy') });
+
+    type Row = { address: string; tainted?: boolean; values: { id: string } };
+    const rows = (value: unknown) => (value as { values: { root_module: { resources: Row[] } } }).values.root_module.resources;
+    const identities = (value: unknown) => rows(value).map(row => ({ address: row.address, id: row.values.id, tainted: row.tainted === true }));
+    const projection = await engine.inspectState({ ...params, project: identities });
+    if (!projection.ok || !projection.present) throw new Error('Expected readable state after partial create.');
+    const owned = projection.value.find(row => row.address === address)!;
+    expect(owned).toMatchObject({ tainted: true, id: expect.any(String) });
+    const verifyResource = (value: unknown, expectedTainted: boolean) => rows(value).some(row =>
+      row.address === address && row.values.id === owned.id && (row.tainted === true) === expectedTainted);
+    const stateDigest = fileDigest(recoveryPaths.statePath);
+    const recovery = { ...params, address, stateDigest, verifyResource };
+    expect(await engine.recoverTaintedResource({ ...recovery, stateDigest: '0'.repeat(64) })).toMatchObject({ ok: false });
+    expect(await engine.recoverTaintedResource({ ...recovery, address: 'terraform_data.sibling' })).toMatchObject({ ok: false });
+    expect(await engine.recoverTaintedResource({ ...recovery, verifyResource: () => false })).toMatchObject({ ok: false });
+    expect(fileDigest(recoveryPaths.statePath)).toBe(stateDigest);
+    expect(fs.readdirSync(recoveryPaths.backups)).toHaveLength(0);
+    // A failed process response after the native write is settled by reading the same object.
+    const shim = path.join(dataDir, 'tofu-interrupted-response');
+    fs.symlinkSync(binary, path.join(dataDir, 'pinned-tofu'));
+    fs.writeFileSync(shim, [
+      '#!/bin/sh', 'tofu="$(dirname "$0")/pinned-tofu"',
+      'if [ "$1" = untaint ]; then',
+      '  if [ -f "$(dirname "$0")/refuse-write" ]; then echo "state is locked" >&2; exit 1; fi',
+      '  "$tofu" "$@" && exit 17', '  exit 1', 'fi', 'exec "$tofu" "$@"', '',
+    ].join('\n'), { mode: 0o700 });
+    const interrupted = new OpenTofuEngine({ binary: shim, dataDir, cipher });
+    const refuseWrite = path.join(dataDir, 'refuse-write');
+    fs.writeFileSync(refuseWrite, '');
+    expect(await interrupted.recoverTaintedResource(recovery)).toMatchObject({ ok: false, error: expect.stringContaining('state is locked') });
+    expect(fileDigest(recoveryPaths.statePath)).toBe(stateDigest);
+    fs.unlinkSync(refuseWrite);
+    expect(await interrupted.recoverTaintedResource(recovery)).toEqual({ ok: true });
+    const backups = fs.readdirSync(recoveryPaths.backups);
+    expect(backups).toHaveLength(2);
+    expect(backups.map(backup => fileDigest(path.join(recoveryPaths.backups, backup)))).toEqual([stateDigest, stateDigest]);
+    expect(fs.statSync(recoveryPaths.statePath).mode & 0o777).toBe(0o600);
+    expect(fs.readFileSync(recoveryPaths.statePath, 'utf8')).not.toContain(SECRET);
+    expect(await engine.inspectState({ ...params, project: identities }))
+      .toEqual({ ...projection, value: projection.value.map(row => ({ ...row, tainted: false })) });
+    expect(await engine.recoverTaintedResource(recovery)).toMatchObject({ ok: false });
+    const retry = await engine.plan({ ...params, planId: 'remaining-work' });
+    if (!retry.ok) throw new Error(retry.error);
+    expect(retry.actions.map(action => action.type)).toEqual(['noop', 'noop']);
+  }, 300_000);
 });

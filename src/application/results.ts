@@ -5,6 +5,7 @@
  * this redacted envelope unchanged.
  */
 
+import { HYPERVIBE_VERSION } from '../version.js';
 import { NotSupportedError } from '../domain/errors/not-supported.error.js';
 import { redactSensitiveString } from '../utils/redact-sensitive-string.js';
 
@@ -15,13 +16,23 @@ export type ErrorCode =
   | 'CONFIRM_REQUIRED'
   | 'MISSING_CONNECTION'
   | 'PROVIDER_ERROR'
+  | 'STALE_SERVER'
   | 'UNSUPPORTED'
   | 'INTERNAL';
 
+export interface BuildIdentity {
+  version: string;
+  startedAt?: string;
+  latestVersion?: string;
+  status?: 'stale' | 'current' | 'offline';
+}
+
 export interface CommandEnvelope {
+  build?: BuildIdentity;
   ok: boolean;
   data?: unknown;
   error?: {
+    build?: BuildIdentity;
     code: ErrorCode;
     message: string;
     details?: unknown;
@@ -44,6 +55,8 @@ export interface CommandEnvelope {
   confirmation?: {
     message: string;
     retryInput: Record<string, boolean | string | string[]>;
+    /** The complete next call excludes any authorization used to produce this preview. */
+    completeInput?: true;
   };
 }
 
@@ -862,7 +875,10 @@ export function formatCommandEnvelope(payload: CommandEnvelope): string {
 }
 
 export function redactCommandEnvelope(payload: CommandEnvelope): CommandEnvelope {
-  return redactForResponse(payload) as CommandEnvelope;
+  const envelope = payload.error
+    ? { ...payload, error: { ...payload.error, build: payload.error.build ?? { version: HYPERVIBE_VERSION } } }
+    : payload;
+  return redactForResponse(envelope) as CommandEnvelope;
 }
 
 export function commandSuccess(data?: unknown, extras?: ResponseExtras): CommandEnvelope {

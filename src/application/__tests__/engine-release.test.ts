@@ -185,7 +185,7 @@ describe('shared engine release', () => {
 it.each([{ imageHasDockerfile: undefined, change: 'create' }, { imageHasDockerfile: false, change: 'create' }, { imageHasDockerfile: true, change: 'create' }, { imageHasDockerfile: undefined, change: 'noop' }])('checks Dockerfile evidence when a plan uses an earlier image (proof $imageHasDockerfile, action $change)', async ({ imageHasDockerfile, change }) => {
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: 'image-app', defaultPlatform: 'aws' });
-  ctx.repos.environments.create({ projectId: project.id, name: 'testing', platformBindings: { aws: { imageUri: 'original', webImageUri: 'web-image', imageHasDockerfile }, services: { admin: {} } } });
+  ctx.repos.environments.create({ projectId: project.id, name: 'testing', platformBindings: { aws: { imageUri: `111122223333.dkr.ecr.us-west-2.amazonaws.com/hv-image-app-testing@sha256:${'a'.repeat(64)}`, webImageUri: `111122223333.dkr.ecr.us-west-2.amazonaws.com/hv-image-app-testing@sha256:${'b'.repeat(64)}`, imageHasDockerfile }, services: { admin: {} } } });
   const accountId = '111122223333'; const region = 'us-west-2';
   const connection = ctx.repos.connections.create({ provider: 'aws', scope: project.name, credentialsEncrypted: getSecretStore().encryptObject({ accountId, region,
     roleArn: `arn:aws:iam::${accountId}:role/hypervibe/hypervibe-deploy`, accessKeyId: 'LOCALACCESSKEY1234', secretAccessKey: 'private-local-secret-32-characters' }) });

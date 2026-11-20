@@ -1,0 +1,61 @@
+{
+  "database": {
+    "componentId": "893dfaf3-00bd-47aa-93b3-b695845a3a28",
+    "source": {
+      "primaryExternalId": "db-1",
+      "provider": "railway",
+      "providerScope": {
+        "environmentId": "production-1",
+        "projectId": "project-1"
+      },
+      "resourceIdentity": {
+        "volumeId": "volume-1",
+        "volumeInstanceId": "volume-instance-1"
+      }
+    }
+  },
+  "destination": {
+    "identity": {
+      "externalId": "archive-1",
+      "instanceScope": {
+        "environmentId": "production-1",
+        "projectId": "project-1"
+      },
+      "provider": "railway"
+    },
+    "name": "hypervibe-backups"
+  },
+  "environment": "production",
+  "fileReferenceQueries": [
+    {
+      "query": "SELECT key FROM files",
+      "storageName": "documents"
+    }
+  ],
+  "hosting": {
+    "provider": "railway",
+    "providerScope": {
+      "environmentId": "production-1",
+      "projectId": "project-1"
+    }
+  },
+  "maxDataAgeHours": 24,
+  "objects": [
+    {
+      "identity": {
+        "externalId": "documents-1",
+        "instanceScope": {
+          "environmentId": "production-1",
+          "projectId": "project-1"
+        },
+        "provider": "railway"
+      },
+      "name": "documents"
+    }
+  ],
+  "project": "backup-ci",
+  "restoreEveryDays": 7,
+  "retainSets": 7,
+  "runnerImage": "ghcr.io/acme/backup@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "version": 1
+}

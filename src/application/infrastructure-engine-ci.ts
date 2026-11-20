@@ -1,3 +1,5 @@
+import { effectiveBranchCiAutoDeploy } from '../domain/spec/spec.schema.js';
+import type { GcpCiReleaseScope } from '../adapters/providers/gcp/tofu/gcp-ci.backend.js';
 import { PINNED_ACTIONS } from '../domain/services/pinned-actions.js';
 import { readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
 import { RELEASE_SCRIPT } from '../adapters/providers/gcp/gcp-ci-release-script.js';
@@ -26,12 +28,12 @@ export interface CiReleaseAccessPreview {
   grants: string[];
 }
 
-export function previewCiReleaseAccess(gcpProjectId: string, repository: string, runtimeServiceAccountEmail: string): CiReleaseAccessPreview {
+export function previewCiReleaseAccess(gcpProjectId: string, repository: string, runtimeServiceAccountEmail: string, releases: GcpCiReleaseScope[]): CiReleaseAccessPreview {
   return {
     releaseIdentity: ciReleaseIdentity(gcpProjectId),
     repository,
     grants: [
-      `GitHub Actions in ${repository} (and only that repository) may act as ${ciReleaseIdentity(gcpProjectId)}, with no stored key`,
+      ...releases.map(scope => `${repository}/.github/workflows/hypervibe-release-${scope.environmentName}.yml on ${scope.branch}, environment ${scope.environmentName} (${scope.autoDeploy ? 'push or manual' : 'manual only'}), may use ${ciReleaseIdentity(gcpProjectId)}`),
       ...CI_RELEASE_PROJECT_ROLES.map((role) => `${ciReleaseIdentity(gcpProjectId)}: ${role}`),
       `${ciReleaseIdentity(gcpProjectId)} may deploy revisions that run as ${runtimeServiceAccountEmail}`,
     ],
@@ -41,9 +43,12 @@ export function previewCiReleaseAccess(gcpProjectId: string, repository: string,
 /** Plans or applies the exact reviewed CI identity configuration through OpenTofu. */
 export async function grantCiReleaseAccess(params: {
   projectId: string;
+  projectName?: string;
   adminToken: string;
   gcpProjectId: string;
   repository: string;
+  repositoryId: string;
+  releases: GcpCiReleaseScope[];
   runtimeServiceAccountEmail: string;
   confirm?: boolean;
 }) {
@@ -56,7 +61,7 @@ export async function grantCiReleaseAccess(params: {
   const projectNumber = body.name!.slice('projects/'.length);
   const configuration = buildCiReleaseConfiguration({ ...params, projectId: params.gcpProjectId, projectNumber });
   const result = await runGcpProjectSetup({
-    projectId: params.projectId, gcpProjectId: params.gcpProjectId,
+    projectId: params.projectId, projectName: params.projectName, gcpProjectId: params.gcpProjectId,
     auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: params.adminToken }, redact: [params.adminToken] },
     contribution: { id: 'ci-release', configuration }, confirm: params.confirm,
   });
@@ -67,6 +72,7 @@ export async function grantCiReleaseAccess(params: {
 export interface ReleaseWorkflowInput {
   environmentName: string;
   branch: string;
+  autoDeploy?: boolean;
   gcpProjectId: string;
   region: string;
   provider: string;
@@ -96,14 +102,14 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     plain('service name', service.name); plain('resource', service.resource); plain('image', service.image);
     if (service.healthPath !== undefined) assertHealthCheckPath(service.healthPath);
   }
+  if (!/^[A-Za-z0-9_-]+$/.test(input.environmentName)) throw new Error('Environment name is not supported in a workflow.');
   if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) throw new Error('Branch name is not supported in a workflow trigger.');
   const lines: string[] = [
-    `# Managed by Hypervibe. Releases ${input.environmentName} on every push to ${input.branch}.`,
+    `# Managed by Hypervibe. Releases ${input.environmentName} from ${input.branch}.`,
     '# Authenticates without stored keys (Workload Identity Federation) and changes only the running image.',
     `name: Hypervibe release (${input.environmentName})`,
     'on:',
-    '  push:',
-    `    branches: [${JSON.stringify(input.branch)}]`,
+    ...(effectiveBranchCiAutoDeploy(input.environmentName, input.autoDeploy) ? ['  push:', `    branches: [${JSON.stringify(input.branch)}]`] : []),
     '  workflow_dispatch: {}',
     'permissions:',
     '  contents: read',
@@ -116,6 +122,8 @@ export function renderReleaseWorkflow(input: ReleaseWorkflowInput): string {
     `  GCP_REGION: ${input.region}`,
     'jobs:',
     '  release:',
+    `    if: github.ref == 'refs/heads/${input.branch}'`,
+    `    environment: ${JSON.stringify(input.environmentName)}`,
     '    runs-on: ubuntu-latest',
     '    steps:',
     '      - uses: actions/checkout@v7',

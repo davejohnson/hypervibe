@@ -1,0 +1,369 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import Database from 'better-sqlite3';
+import { ensureEngineBinary, enginePluginCacheDir } from '../../../engine/opentofu/install.js';
+import { OpenTofuEngine, type EnginePlanResult, type EngineStepFailure } from '../../../engine/opentofu/engine.js';
+import { configurationDigest, engineStatePaths, ensureEngineStateDirectories, fileDigest, type EngineStatePaths } from '../../../engine/opentofu/workspace.js';
+import { getSecretStore } from '../../../secrets/secret-store.js';
+import { preserveSetupReport, saveSetupReport, setupPlansDirectory } from '../../../storage/gcp-setup-report.js';
+import { hardenPrivateFile } from '../../../storage/paths.js';
+import type { EngineAuthentication, EngineConfiguration, EngineStateIdentity, InfrastructureEngineBackend } from '../../../../domain/ports/infrastructure-engine.port.js';
+import { engineSegmentOf } from '../../../../domain/ports/infrastructure-engine.port.js';
+import type { PlanAction } from '../../../../domain/plan/plan.types.js';
+import {
+  bootstrapProjectAddress, isInPlaceBillingUpdate, matchesProjectInstance, matchesRecoveryObservation, selectedProjectBilling, soleProjectAction, verifyBootstrapBillingPlan,
+  type GcpProjectRecovery, type ObservedLinkedProject, type ObservedUnlinkedProject, type RecoveryBinding,
+} from './project-state-recovery.js';
+
+export interface GcpProjectSetupContribution { id: string; configuration: EngineConfiguration }
+export interface GcpProjectSetupParams {
+  projectId: string;
+  projectName?: string;
+  gcpProjectId: string;
+  auth: EngineAuthentication;
+  /** Stable, non-secret identity of the account granting this access. */
+  authenticationScope?: string;
+  contribution: GcpProjectSetupContribution;
+  confirm?: boolean;
+  dataDir?: string;
+  /** Explicitly reviewed removals/imports; never inferred from engine output. */
+  allowDestroyAddresses?: string[];
+  allowImportAddresses?: string[];
+  /** Fresh provider observations proved these resources exist; creation cannot repair missing state. */
+  existingResourceAddresses?: string[];
+  /** Fresh Resource Manager ACTIVE and Billing API unlinked observations for this exact project. */
+  observedUnlinkedProject?: ObservedUnlinkedProject;
+  observedLinkedProject?: ObservedLinkedProject;
+  /** Authorizes only the reviewed local state repair during a new preview. */
+  recoverProjectState?: string;
+  /** Exact saved setup plan approved for cloud changes. */
+  gcpSetupPlanId?: string;
+}
+export interface GcpProjectSetupResult {
+  success: boolean;
+  mode: 'preview' | 'confirm';
+  planId?: string;
+  htmlPath?: string;
+  actions?: PlanAction[];
+  error?: string;
+  projectRecovery?: GcpProjectRecovery;
+  requiresPlanId?: true;
+}
+interface SetupManifest { contributions: Record<string, EngineConfiguration> }
+interface SetupPreview {
+  planId: string; baseline: string; intent: string; planned: EnginePlanResult;
+  manifest: SetupManifest; configuration: EngineConfiguration;
+  createdAt?: string; projectName?: string;
+  requiresPlanId?: true;
+  observedUnlinkedProject?: ObservedUnlinkedProject;
+  observedLinkedProject?: ObservedLinkedProject;
+}
+export interface GcpProjectSetupDependencies {
+  engine: Pick<OpenTofuEngine, 'plan' | 'apply'> & Partial<Pick<OpenTofuEngine, 'inspectState' | 'recoverTaintedResource'>>;
+}
+export function hasGcpProjectSetup(projectId: string, gcpProjectId: string, dataDir?: string): boolean {
+  const paths = engineStatePaths({ provider: 'gcp', projectId, environmentId: gcpProjectId, partition: 'project-shared' }, dataDir);
+  return fs.existsSync(path.join(paths.root, 'setup-manifest.json'));
+}
+export function getGcpProjectSetupContribution(projectId: string, gcpProjectId: string, id: string, dataDir?: string): EngineConfiguration | undefined {
+  const paths = engineStatePaths({ provider: 'gcp', projectId, environmentId: gcpProjectId, partition: 'project-shared' }, dataDir);
+  return readJson<SetupManifest>(path.join(paths.root, 'setup-manifest.json'), { contributions: {} }).contributions[id];
+}
+export function getGcpProjectSetupContributions(projectId: string, gcpProjectId: string, dataDir?: string): Record<string, EngineConfiguration> {
+  const paths = engineStatePaths({ provider: 'gcp', projectId, environmentId: gcpProjectId, partition: 'project-shared' }, dataDir);
+  return readJson<SetupManifest>(path.join(paths.root, 'setup-manifest.json'), { contributions: {} }).contributions;
+}
+function digest(value: unknown): string {
+  const canonical = (entry: unknown): unknown => Array.isArray(entry) ? entry.map(canonical)
+    : entry && typeof entry === 'object' ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, canonical(v)])) : entry;
+  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+}
+function readJson<T>(file: string, fallback: T): T {
+  if (!hardenPrivateFile(file)) return fallback;
+  const content = fs.readFileSync(file, 'utf8');
+  try { return JSON.parse(content) as T; }
+  catch { throw new Error('The saved Google Cloud setup data could not be read.'); }
+}
+function writeJson(file: string, value: unknown): void {
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(value), { mode: 0o600, flag: 'wx' });
+  fs.renameSync(temporary, file);
+}
+
+function boundBaseline(manifest: SetupManifest): string { return 'project-recovery-v1:' + digest(manifest); }
+
+/** An existing preview may carry the original recovery identity on its intent.
+ * Find it even when a subsequent request selects a different billing account. */
+function recoveryBinding(paths: EngineStatePaths, marker: string, projectId: string): RecoveryBinding | undefined {
+  const stored = readJson<RecoveryBinding | undefined>(marker, undefined);
+  if (stored !== undefined) {
+    if (!stored || stored.projectId !== projectId || typeof stored.projectNumber !== 'string' || !/^[1-9]\d*$/.test(stored.projectNumber)
+      || typeof stored.scope !== 'string' || !stored.scope.trim() || typeof stored.selectedAccount !== 'string' || !stored.selectedAccount
+      || typeof stored.intent !== 'string' || !/^[a-f0-9]{64}$/.test(stored.intent)) {
+      throw new Error('The saved billing recovery identity is invalid. Restore the project setup record before continuing.');
+    }
+    return stored;
+  }
+  let binding: RecoveryBinding | undefined;
+  for (const name of fs.readdirSync(paths.plans).filter(name => /^setup-[a-f0-9]{64}\.json$/.test(name))) {
+    const saved = readJson<SetupPreview | undefined>(path.join(paths.plans, name), undefined);
+    if (!saved?.requiresPlanId) continue;
+    const observed = saved.observedUnlinkedProject ?? saved.observedLinkedProject;
+    const selectedAccount = selectedProjectBilling(saved.configuration, projectId);
+    if (!observed || observed.projectId !== projectId || !selectedAccount || name !== `setup-${saved.intent}.json`) {
+      throw new Error('The saved billing recovery evidence is incomplete. Restore the reviewed Google project setup before continuing.');
+    }
+    const candidate = { projectId, projectNumber: observed.projectNumber, scope: observed.scope, intent: saved.intent, selectedAccount };
+    if (binding && digest(binding) !== digest(candidate)) throw new Error('Multiple billing recovery records disagree on this project. Review its saved setup before continuing.');
+    binding = candidate;
+  }
+  return binding;
+}
+
+/** A preview alone leaves no manifest. The failed initial confirmation wrote the
+ * approved manifest and retained the original create preview and encrypted plan. */
+function previousBootstrapCreate(
+  paths: EngineStatePaths, intent: string, existing: SetupManifest, configuration: EngineConfiguration,
+): SetupPreview | undefined {
+  const prior = readJson<SetupPreview | undefined>(path.join(paths.plans, `setup-${intent}.json`), undefined);
+  if (!prior || prior.intent !== intent || !/^setup-[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/.test(prior.planId)
+    || !prior.planned?.ok || prior.planned.blockers.length || prior.planned.unmanagedDeletes.length
+    || !existing.contributions.bootstrap || digest(prior.manifest) !== digest(existing)
+    || digest(prior.configuration) !== digest(configuration)) return;
+  const { bootstrap: _initialBootstrap, ...previousContributions } = existing.contributions;
+  if (prior.baseline !== digest({ contributions: previousContributions })) return;
+  const action = soleProjectAction(prior.planned.actions);
+  if (action?.type !== 'create') return;
+  const segment = engineSegmentOf(action)!;
+  const id = 'opentofu:' + prior.planId;
+  const priorConfig = readJson<EngineConfiguration | undefined>(path.join(paths.plans, prior.planId + '.config.json'), undefined);
+  const planFile = path.join(paths.plans, prior.planId + '.tfplan');
+  if (prior.planned.segmentId === id && prior.planned.segment.id === id && segment.id === id
+    && priorConfig && digest(priorConfig) === digest(configuration) && configurationDigest(configuration) === segment.configurationDigest
+    && segment.planDigest === prior.planned.segment.planDigest && hardenPrivateFile(planFile) && fileDigest(planFile) === segment.planDigest) return prior;
+}
+
+async function reviewFailedProjectPreview(
+  failure: EngineStepFailure, engine: GcpProjectSetupDependencies['engine'], params: GcpProjectSetupParams,
+  planInput: Parameters<OpenTofuEngine['plan']>[0], paths: EngineStatePaths, intent: string, existing: SetupManifest,
+) {
+  // prevent_destroy can also indicate an unrelated configuration mistake. Only
+  // a checked live identity and the retained, previously approved create prove ownership.
+  const observed = params.observedUnlinkedProject;
+  if (failure.stage !== 'plan' || !/Resource instance google_project\.hypervibe has prevent_destroy set, but the\s+plan calls for it to be destroyed\./.test(failure.error)
+    || !observed || observed.projectId !== params.gcpProjectId || typeof observed.projectNumber !== 'string' || !/^[1-9]\d*$/.test(observed.projectNumber)
+    || typeof observed.scope !== 'string' || !observed.scope.trim() || params.contribution.id !== 'bootstrap'
+    || !selectedProjectBilling(planInput.configuration, params.gcpProjectId) || !engine.inspectState || !engine.recoverTaintedResource) return;
+  const prior = previousBootstrapCreate(paths, intent, existing, planInput.configuration);
+  if (!prior || !hardenPrivateFile(paths.statePath)) return;
+  const stateDigest = fileDigest(paths.statePath);
+  const verifyResource = (document: unknown, tainted: boolean) => matchesProjectInstance(document, observed, tainted);
+  const evidence = await engine.inspectState({ ...planInput, project: document => verifyResource(document, true) });
+  if (!evidence.ok || !evidence.present || !evidence.value || fileDigest(paths.statePath) !== stateDigest) return;
+  const token = digest({ operation: 'recover-google-bootstrap-project', state: planInput.state, stateDigest, observed, intent,
+    configuration: digest(planInput.configuration), priorPlan: prior.planId, priorDigest: prior.planned.segment.planDigest });
+  return {
+    offer: { token, projectId: observed.projectId, projectNumber: observed.projectNumber, previousPlanId: prior.planId },
+    command: { ...planInput, address: bootstrapProjectAddress, stateDigest, verifyResource },
+  };
+}
+function mergeValue(left: unknown, right: unknown, location: string): unknown {
+  if (left === undefined || digest(left) === digest(right)) return right;
+  if (location.endsWith('.depends_on') && Array.isArray(left) && Array.isArray(right)) return [...new Set([...left, ...right])].sort();
+  if (left && right && typeof left === 'object' && typeof right === 'object' && !Array.isArray(left) && !Array.isArray(right)) {
+    const result = { ...left } as Record<string, unknown>;
+    for (const [key, value] of Object.entries(right)) result[key] = mergeValue(result[key], value, `${location}.${key}`);
+    return result;
+  }
+  throw new Error(`Project setup contributions disagree at ${location}; preview an explicit shared configuration change.`);
+}
+/** Compose all retained project ownership before planning any new access. */
+export function composeGcpProjectConfiguration(contributions: Record<string, EngineConfiguration>): EngineConfiguration {
+  const merged: EngineConfiguration = { files: {}, resources: {}, imports: {} };
+  for (const configuration of Object.values(contributions)) {
+    for (const [file, document] of Object.entries(configuration.files)) {
+      merged.files[file] = mergeValue(merged.files[file], document, file);
+    }
+    for (const [address, mapping] of Object.entries(configuration.resources)) {
+      merged.resources[address] = mergeValue(merged.resources[address], mapping, address) as typeof mapping;
+    }
+    Object.assign(merged.imports!, configuration.imports ?? {});
+  }
+  if (Object.keys(merged.imports!).length) merged.files['setup-imports.tf.json'] = {
+    import: Object.entries(merged.imports!).map(([to, id]) => ({ to, id })),
+  };
+  return merged;
+}
+
+/**
+ * One durable, encrypted OpenTofu state owns all setup for a Google project.
+ * Preview persists the complete saved plan. Confirmation never re-plans or
+ * extends approval to drift in a previously approved contribution.
+ */
+export async function executeGcpProjectSetup(backend: InfrastructureEngineBackend, params: GcpProjectSetupParams, overrides?: GcpProjectSetupDependencies): Promise<GcpProjectSetupResult> {
+  const mode = params.confirm ? 'confirm' : 'preview';
+  const fail = (error: string): GcpProjectSetupResult => ({ success: false, mode, error });
+  const recoveryRequested = params.recoverProjectState !== undefined;
+  const staleRecovery = 'The local project-state recovery authorization does not match the current evidence. Preview the existing project again.';
+  if (recoveryRequested && (params.confirm || !/^[a-f0-9]{64}$/.test(params.recoverProjectState!))) return fail(staleRecovery);
+  if (!params.confirm && params.gcpSetupPlanId !== undefined) return fail('Supply gcpSetupPlanId when confirming the reviewed Google Cloud setup plan.');
+  const state: EngineStateIdentity = { provider: 'gcp', projectId: params.projectId, environmentId: params.gcpProjectId, partition: 'project-shared' };
+  const paths = engineStatePaths(state, params.dataDir);
+  try {
+    setupPlansDirectory(params);
+    ensureEngineStateDirectories(paths);
+  } catch {
+    return fail('The private Google Cloud setup state directory could not be opened.');
+  }
+  // SQLite's OS-backed exclusive lock is released if this process exits. An
+  // abandoned marker file can never permanently block setup. The engine still
+  // takes its own native state lock while planning/applying.
+  const lockFile = path.join(paths.root, 'setup-lock.sqlite');
+  let lock: Database.Database | undefined;
+  try {
+    fs.closeSync(fs.openSync(lockFile, 'a', 0o600));
+    lock = new Database(lockFile, { timeout: 0 });
+    lock.exec('BEGIN EXCLUSIVE');
+    lock.exec('CREATE TABLE IF NOT EXISTS setup_mutex (id INTEGER PRIMARY KEY)');
+  } catch (error) {
+    lock?.close();
+    const busy = (error as { code?: string }).code === 'SQLITE_BUSY';
+    return fail(busy ? 'Another project setup is running. Wait for it to finish, then preview again.'
+      : 'The project setup lock could not be verified. Restore the local setup-lock.sqlite file before retrying.');
+  }
+  try {
+    const manifestFile = path.join(paths.root, 'setup-manifest.json');
+    const existing = readJson<SetupManifest>(manifestFile, { contributions: {} });
+    const manifest = { contributions: { ...existing.contributions, [params.contribution.id]: params.contribution.configuration } };
+    const configuration = composeGcpProjectConfiguration(manifest.contributions);
+    // Retain deleted address mappings, so a specifically approved removal is representable.
+    const previous = existing.contributions[params.contribution.id];
+    Object.assign(configuration.resources, previous?.resources, params.contribution.configuration.resources);
+    const intent = digest({ gcpProjectId: params.gcpProjectId, contribution: params.contribution,
+      authenticationScope: params.authenticationScope ?? 'google-project-admin',
+      destroy: params.allowDestroyAddresses ?? [], imports: params.allowImportAddresses ?? [], existing: params.existingResourceAddresses ?? [] });
+    const previewFile = path.join(paths.plans, `setup-${intent}.json`);
+    const bootstrap = params.contribution.id === 'bootstrap';
+    const observed = bootstrap ? params.observedUnlinkedProject : undefined;
+    const selectedAccount = bootstrap ? selectedProjectBilling(configuration, params.gcpProjectId) : undefined;
+    const marker = path.join(paths.root, 'bootstrap-billing-recovery.json');
+    const binding = bootstrap ? recoveryBinding(paths, marker, params.gcpProjectId) : undefined;
+    const linked = binding ? params.observedLinkedProject : undefined;
+    if (binding && (binding.intent !== intent || binding.selectedAccount !== selectedAccount
+      || !matchesRecoveryObservation(binding, observed ?? linked)
+      || (linked && (observed || linked.billingAccountName !== 'billingAccounts/' + selectedAccount)))) {
+      return fail('Preview the same active project with the original billing account. Its current identity and billing status must match the saved recovery.');
+    }
+    let saved: SetupPreview;
+    if (params.confirm) {
+      const preview = readJson<SetupPreview | undefined>(previewFile, undefined);
+      if (!preview) return fail('Preview this exact Google Cloud setup before confirming it. No infrastructure was changed.');
+      if (!preview.requiresPlanId && (binding || preview.observedUnlinkedProject || preview.observedLinkedProject
+        || (params.contribution.id === 'bootstrap' && params.observedUnlinkedProject && isInPlaceBillingUpdate(preview.planned.actions)))) {
+        return fail('Preview the current project and billing account again to obtain a plan-bound Google Cloud setup confirmation.');
+      }
+      if ((preview.requiresPlanId || params.gcpSetupPlanId !== undefined) && params.gcpSetupPlanId !== preview.planId) {
+        return fail('Preview the current Google Cloud setup, review its billing change, and confirm with the gcpSetupPlanId from that preview.');
+      }
+      if (preview.requiresPlanId && (!binding || !(preview.observedUnlinkedProject && observed && digest(preview.observedUnlinkedProject) === digest(observed))
+        && !(preview.observedLinkedProject && linked && digest(preview.observedLinkedProject) === digest(linked)))) {
+        return fail('The active project and its billing status could not be verified against this plan. Preview Google Cloud setup again.');
+      }
+      // Accept first-generation bound previews with their exact ID. New envelopes
+      // deliberately fail the manifest-only baseline check in older clients.
+      const baseline = preview.requiresPlanId && preview.baseline.startsWith('project-recovery-v1:') ? boundBaseline(existing) : digest(existing);
+      if (preview.intent !== intent || preview.baseline !== baseline || digest(preview.configuration) !== digest(configuration)) {
+        return fail('Google Cloud setup changed since preview. Preview the current setup again before confirming.');
+      }
+      saved = { ...preview, createdAt: preview.createdAt ?? fs.statSync(previewFile).mtime.toISOString() };
+    } else {
+      saved = { planId: `setup-${randomUUID()}`, createdAt: new Date().toISOString(), projectName: params.projectName,
+        intent, baseline: digest(existing), manifest, configuration, planned: undefined as unknown as EnginePlanResult };
+    }
+    let engine = overrides?.engine;
+    if (!engine) {
+      const binary = await ensureEngineBinary();
+      if (!binary.ok) return fail(binary.error);
+      engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), dataDir: params.dataDir });
+    }
+    if (!params.confirm) {
+      let verifiedBilling = false;
+      const planInput = { backend, configuration, auth: params.auth, state, planId: saved.planId,
+        ...(bootstrap ? { verifyPlannedChanges: (document: unknown) => {
+          const valid = verifyBootstrapBillingPlan(document, params.gcpProjectId, selectedAccount, observed ?? linked, !!linked);
+          verifiedBilling = valid && !!(observed ?? linked);
+          return valid;
+        } } : {}) };
+      let planned = await engine.plan(planInput);
+      if (!planned.ok) {
+        const review = await reviewFailedProjectPreview(planned, engine, params, planInput, paths, intent, existing);
+        if (!review) return fail(recoveryRequested ? staleRecovery : planned.error);
+        if (!recoveryRequested) return { ...fail('The existing Google project can be retained. Review the local state recovery before previewing billing setup.'),
+          projectRecovery: review.offer };
+        if (review.offer.token !== params.recoverProjectState || !engine.recoverTaintedResource) return fail(staleRecovery);
+        // Persist recovery across a process exit between normalization and publication,
+        // or a later partial apply that links billing before another setup action fails.
+        writeJson(marker, { ...observed!, selectedAccount, intent });
+        const repaired = await engine.recoverTaintedResource(review.command);
+        if (!repaired.ok) return fail(repaired.error);
+        planned = await engine.plan(planInput);
+        if (!planned.ok) return fail(`The local project state was repaired. The new setup preview failed. ${planned.error}`);
+      } else if (recoveryRequested) return fail(staleRecovery);
+      if (observed || linked) {
+        if (!verifiedBilling || (observed && !isInPlaceBillingUpdate(planned.actions))) {
+          return fail('The setup plan did not retain the existing project with an in-place billing update. Review the project and its saved setup before continuing.');
+        }
+        if (observed) soleProjectAction(planned.actions)!.billable = true;
+        saved.requiresPlanId = true;
+        saved.baseline = boundBaseline(existing);
+        if (observed) saved.observedUnlinkedProject = observed;
+        if (linked) saved.observedLinkedProject = linked;
+      }
+      const allowed = new Set([...Object.keys(params.contribution.configuration.resources), ...Object.keys(previous?.resources ?? {})]);
+      const destroy = new Set(params.allowDestroyAddresses ?? []);
+      const imports = new Set(params.allowImportAddresses ?? []);
+      const observedPresent = new Set(params.existingResourceAddresses ?? []);
+      const unexpected = planned.actions.filter((action) => action.type !== 'noop').find((action) => {
+        const addresses = engineSegmentOf(action)?.addresses ?? [];
+        return addresses.some((address) => !allowed.has(address)) || action.type === 'replace'
+          || (action.type === 'create' && addresses.some((address) => observedPresent.has(address)))
+          || (action.type === 'destroy' && addresses.some((address) => !destroy.has(address)))
+          || (action.metadata?.engineAdopt === true && addresses.some((address) => !imports.has(address)));
+      });
+      if (planned.blockers.length || unexpected) return fail(planned.blockers.join(' ') || 'The setup plan changes resources outside this approval. Review the affected project setup separately.');
+      saved.planned = planned;
+      const prior = readJson<SetupPreview | undefined>(previewFile, undefined);
+      if (prior) {
+        if (prior.intent !== intent) return fail('The prior Google Cloud setup preview has an unexpected identity.');
+        preserveSetupReport(params, { ...prior, createdAt: prior.createdAt ?? fs.statSync(previewFile).mtime.toISOString() }, params.auth.redact);
+      }
+      const report = saveSetupReport(params, saved, params.auth.redact);
+      if (saved.requiresPlanId && !hardenPrivateFile(marker)) {
+        const identity = observed ?? linked!;
+        writeJson(marker, { projectId: identity.projectId, projectNumber: identity.projectNumber, scope: identity.scope, selectedAccount, intent });
+      }
+      writeJson(previewFile, saved);
+      return { success: true, mode, planId: saved.planId, actions: planned.actions, ...(saved.requiresPlanId ? { requiresPlanId: true } : {}), ...report };
+    }
+    const report = saveSetupReport(params, saved, params.auth.redact);
+    const addresses = saved.planned.actions.filter((action) => action.type !== 'noop').flatMap((action) => engineSegmentOf(action)?.addresses ?? []);
+    if (addresses.length > 0) {
+      // Keep approved intent after a partial apply so retry cannot orphan completed resources.
+      writeJson(manifestFile, saved.manifest);
+      const applied = await engine.apply({ backend, auth: params.auth, state, planId: saved.planId,
+        segment: { ...saved.planned.segment, addresses }, approvedAddresses: addresses });
+      if (addresses.some((address) => applied.outcomes[address] !== 'succeeded')) {
+        return fail(applied.diagnostics.join(' ') || 'Project setup has not converged. Preview again to inspect the remaining work.');
+      }
+    } else writeJson(manifestFile, saved.manifest);
+    fs.unlinkSync(previewFile);
+    if (saved.requiresPlanId && hardenPrivateFile(marker)) fs.unlinkSync(marker);
+    return { success: true, mode, planId: saved.planId, actions: saved.planned.actions, ...report };
+  } catch (error) {
+    // Engine errors are already sanitized. Do not echo arbitrary admin input/configuration.
+    let message = error instanceof Error ? error.message : 'Project setup failed.';
+    for (const secret of params.auth.redact) if (secret) message = message.split(secret).join('[REDACTED]');
+    return fail(message);
+  } finally { lock.exec('ROLLBACK'); lock.close(); }
+}

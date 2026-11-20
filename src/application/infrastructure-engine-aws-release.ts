@@ -24,7 +24,7 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
   const environmentSpec = params.spec.environments[params.environmentName]!;
   if (releaseCommandFor(environmentSpec)) return { blocked: 'Release commands are not available on AWS yet; run migrations when the app starts instead.' };
   if (!params.sourceDirectory) return { blocked: 'AWS releases build from this project\'s local git repository; run Hypervibe from the repository.' };
-  const context = await resolveAwsEngineContext(ctx, params.project, params.environmentName);
+  const context = await resolveAwsEngineContext(ctx, params.project, params.environmentName, params.spec);
   if ('blocked' in context) return context;
   const token = await presentBuildTokenKey(params.spec, params.environmentName, (key) => parameterExists({ region: context.connection.region, credentials: context.credentials }, `${context.parameterPath}${key}`));
   if ('error' in token) return { blocked: token.error };

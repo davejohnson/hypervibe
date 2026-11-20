@@ -57,7 +57,7 @@ export function composeDatabaseCredentialConfiguration(project: Project, port: D
     if (result.success && required.every(key => typeof result.variables[key] === 'string')) return { variables: result.variables, writeOnly: [] as string[] };
     if (!result.success || required.some(key => typeof result.variables[key] !== 'string' && !result.unresolvedKeys?.includes(key))) throw new Error('Database consumer source configuration is absent or unknown.');
     const bound = parseHostingBindings(environment);
-    const connection = await adapterFactory.getProviderAdapter(bound.provider!, project);
+    const connection = await adapterFactory.getProviderAdapter(bound.provider!, project, undefined, { environment });
     const adapter = connection.success ? connection.adapter : undefined;
     if (!adapter || adapter.capabilities.credentialValueEvidence !== 'acknowledgement' || !adapter.observe) throw new Error('Database consumer configuration is unknown.');
     const observed = await adapter.observe(environment);

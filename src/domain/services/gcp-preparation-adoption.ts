@@ -47,10 +47,10 @@ function omitResource(configuration: EngineConfiguration, address: string): void
 
 /** Admit legacy resources only from durable app evidence plus fresh exact provider observations. */
 export async function reviewGcpPreparationAdoption(params: {
-  project: Project; target: Target; token: string; contributionId: string; configuration: EngineConfiguration;
+  project: Project; environmentProjectId?: string; target: Target; token: string; contributionId: string; configuration: EngineConfiguration;
 }): Promise<{ configuration: EngineConfiguration; allowImportAddresses: string[]; existingResourceAddresses: string[] }> {
   const { project, target, token, contributionId } = params;
-  const previous = getCloudPreparation(project, 'cloudrun');
+  const previous = getCloudPreparation(project, 'cloudrun', params.environmentProjectId);
   const result = { configuration: params.configuration, allowImportAddresses: [] as string[], existingResourceAddresses: [] as string[] };
   // New-project bootstrap owns its own presence/absence admission. This repairs prior preparation.
   if (!previous || !target.buildSourceBucket) return result;

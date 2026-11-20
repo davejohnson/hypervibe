@@ -1,3 +1,5 @@
+import { mockManagedPublication } from '../../domain/services/__tests__/managed-publication.test-utils.js';
+import { compileManagedGitHubFiles } from '../../domain/services/github-infrastructure.service.js';
 import type { IProviderLifecycleAdapter } from '../../domain/ports/provider.port.js';
 import '../../application/providers.js';
 import { z } from 'zod';
@@ -28,7 +30,6 @@ import { hashEnvValue, type ObservedState } from '../../domain/ports/observe.por
 import { buildBranchDeployWorkflow, resolveBranchDeployTargets } from '../../domain/services/github-ops.service.js';
 import {
   githubActionsWorkflowInputHash,
-  managedWorkflowPublicationBranch,
   workflowFiles,
   workflowFilesContentHash,
 } from '../../domain/services/ci-deploy.service.js';
@@ -233,12 +234,12 @@ describe('hv_spec', () => {
         expect(written.ok).toBe(true);
         expect(written.warnings).toContainEqual(expect.stringContaining('service:reports'));
         expect(written.warnings).toContainEqual(expect.stringContaining('may behave differently'));
-        expect(written.data.spec.environments.staging.services.reports).toBeUndefined();
+        expect(written.data).not.toHaveProperty('spec');
         const read = await t.call('hv_spec', { project: 'resource-parity-app' });
         expect(read.ok).toBe(true);
         expect(read.warnings).toContainEqual(expect.stringContaining('service:reports'));
         expect(read.data.revision).toBe(written.data.revision);
-        expect(read.data.spec).toEqual(written.data.spec);
+        expect(read.data.spec.environments.staging.services.reports).toBeUndefined();
       } finally {
         await t.close();
       }
@@ -393,7 +394,7 @@ describe('hv_spec', () => {
       });
       expect(initialized.ok).toBe(true);
       expect(initialized.data.revision).toBe(1);
-      expect(initialized.data.spec.runtime).toEqual({ kind: 'node', version: '24' });
+      expect((await t.call('hv_spec', { project: 'fresh-agent-app' })).data.spec.runtime).toEqual({ kind: 'node', version: '24' });
       expect(initialized.data.runtimeReview).toMatchObject({ status: 'review-required' });
       expect(initialized.data.project).toMatchObject({
         name: 'fresh-agent-app',
@@ -410,15 +411,15 @@ describe('hv_spec', () => {
         runtime: { kind: 'node', version: '24' },
       });
       const initializedLocalEnv = readFileSync(path.join(repoDir, '.env'), 'utf8');
-      for (const key of ['HYPERVIBE_GITHUB_TOKEN', 'HYPERVIBE_RAILWAY_TOKEN']) {
+      for (const key of ['HYPERVIBE_GITHUB_PACKAGES_TOKEN', 'HYPERVIBE_GITHUB_TOKEN', 'HYPERVIBE_RAILWAY_TOKEN']) {
         expect(initializedLocalEnv).toMatch(new RegExp(`# Hypervibe: [^\\n]+\\n${key}=`));
       }
       expect(initialized.data.localEnv.addedKeys).toEqual([
+        'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
         'HYPERVIBE_GITHUB_TOKEN',
         'HYPERVIBE_RAILWAY_TOKEN',
       ]);
       expect(initializedLocalEnv).toContain('GitHub API token for repository and workflow management');
-      expect(initializedLocalEnv).not.toContain('GitHub Packages read token');
 
       rmSync(path.join(repoDir, '.env'));
 
@@ -1020,10 +1021,40 @@ describe('hv_spec', () => {
       environment: 'staging',
       reason: 'missing_environment',
     }));
-    expect(result.hint).toContain('separately chosen');
+    expect(result.agentInstruction.action).toBe('continue');
+    expect(result.hint).toContain('staging');
     expect(result.hint).toContain('envVarExceptions');
     expect(JSON.stringify(result)).not.toContain('production-site-id');
     expect(new ProjectRepository().findByName('coverage-block-app')).toBeNull();
+    await t.close();
+  });
+
+  it('records an intentional envVars deletion and returns a scoped spec-write receipt', async () => {
+    const t = await makeClient();
+    const project = 'coverage-patch-app';
+    const shared = { hosting: { provider: 'railway' }, services: { web: {} }, envVars: { MEDIA_DIR: '/data' } };
+    const initial = await t.call('hv_spec', { spec: { project, environments: {
+      staging: shared, production: { ...shared, domain: 'production.example.com' },
+    } } });
+    expect(initial.ok).toBe(true);
+    const patch = await t.call('hv_spec', { project, spec: { environments: { staging: { envVars: { MEDIA_DIR: null } } } } });
+    expect(patch).toMatchObject({ ok: true, data: { revision: 2, environmentVariableCoverage: { complete: true } } });
+    expect(patch.data).not.toHaveProperty('spec');
+    expect(patch.data).not.toHaveProperty('backupPolicies');
+    expect(patch.data.changed.environments).toEqual(['staging']);
+    expect(JSON.stringify(patch.data.connections)).not.toContain('cloudflare');
+    const read = await t.call('hv_spec', { project });
+    expect(read.data.spec.environments.staging.envVars).not.toHaveProperty('MEDIA_DIR');
+    expect(read.data.spec.environments.production.envVars.MEDIA_DIR).toBe('/data');
+    const all = await t.call('hv_connections', { project, view: 'requirements' });
+    expect(all.data.connections).toContainEqual(expect.objectContaining({ provider: 'cloudflare', environments: ['production'] }));
+    const implicit = await t.call('hv_connections', { project, environment: 'staging' });
+    expect(implicit).toMatchObject({ ok: false, error: { code: 'VALIDATION', message: expect.stringContaining('view="requirements"') } });
+    const listed = await t.call('hv_connections', { project, view: 'requirements', environment: 'staging' });
+    expect(listed.ok).toBe(true);
+    expect(listed.data.connections).toEqual([expect.objectContaining({ provider: 'railway', environments: ['staging'], status: 'missing' })]);
+    expect(JSON.stringify(listed.data)).not.toMatch(/cloudflare|credentialExample|setupHelpUrls/);
+    expect(listed.hint).toContain('action="describe"');
     await t.close();
   });
 
@@ -1059,7 +1090,7 @@ describe('hv_spec', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data.environmentVariableCoverage).toEqual({ complete: true, issues: [] });
-    expect(result.data.spec.secrets.RECAPTCHA_SECRET_KEY.environments).toEqual(['staging', 'production']);
+    expect((await t.call('hv_spec', { project: 'coverage-complete-app' })).data.spec.secrets.RECAPTCHA_SECRET_KEY.environments).toEqual(['staging', 'production']);
     await t.close();
   });
 
@@ -1136,14 +1167,15 @@ describe('hv_spec', () => {
         },
       } });
       expect(initial.ok).toBe(true);
-      const beforeProduction = structuredClone(initial.data.spec.environments.production);
+      const beforeProduction = (await t.call('hv_spec', { project })).data.spec.environments.production;
       const renamed = await t.call('hv_spec', { project, spec: {
         environments: { staging: { services: { preview: null, web: { workloadKind: 'web' } } } },
       } });
       expect(renamed, JSON.stringify(renamed.error)).toMatchObject({ ok: true });
-      expect(renamed.data.spec.environments.production).toEqual(beforeProduction);
-      expect(renamed.data.spec.secrets.APP_SIGNING_KEY.environments).toEqual(['staging']);
-      expect(Object.keys(renamed.data.spec.environments.staging.services)).toEqual(['web']);
+      const read = await t.call('hv_spec', { project });
+      expect(read.data.spec.environments.production).toEqual(beforeProduction);
+      expect(read.data.spec.secrets.APP_SIGNING_KEY.environments).toEqual(['staging']);
+      expect(Object.keys(read.data.spec.environments.staging.services)).toEqual(['web']);
       expect(renamed.data.environmentVariableCoverage.issues).toHaveLength(2);
       expect(renamed.warnings).toContainEqual(expect.stringContaining('declaration'));
       // A new input is not grandfathered merely because a service was renamed.
@@ -1332,10 +1364,132 @@ describe('hv_spec', () => {
     });
 
     expect(set.ok).toBe(true);
-    expect(set.data.spec.environments.production.deploy.trigger).toBe('native');
+    expect((await t.call('hv_spec', { project: 'native-confirmed-app' })).data.spec.environments.production.deploy.trigger).toBe('native');
     expect(set.warnings).toContainEqual(expect.stringContaining('Railway native deploys require the Railway GitHub App'));
     await t.close();
   });
+
+  it('checks the package role before a managed private image pull, including a combined PAT', async () => {
+    const t = await makeClient();
+    const scope = 'acme/private-image-app';
+    const envPath = path.join(tempDir, '.env');
+    writeFileSync(envPath, 'NODE_AUTH_TOKEN=fixture-combined-pat\n');
+    vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+      success: true, login: 'acme-owner', scopes: ['repo', 'workflow', 'read:packages'],
+    });
+    const connect = (repo: string, both: boolean) => t.call('hv_connections', {
+      provider: 'github', scope: repo, credentialsRef: `dotenv:${envPath}`,
+      credentialsMap: { apiToken: 'NODE_AUTH_TOKEN', ...(both ? { packageReadToken: 'NODE_AUTH_TOKEN' } : {}) },
+    });
+    expect((await connect(scope, false)).ok).toBe(true);
+    expect((await connect('another/repo', true)).ok).toBe(true);
+    const environment = { hosting: { provider: 'railway' }, services: { web: {} } };
+    const project = 'private-image-app';
+    const saved = await t.call('hv_spec', { spec: {
+      project, gitRemoteUrl: `https://github.com/${scope}.git`,
+      environments: {
+        production: { ...environment, deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } },
+        staging: environment,
+      },
+    } });
+    expect(saved.ok).toBe(true);
+    const missing = saved.data.connections.missing.find((item: { provider: string }) => item.provider === 'github');
+    expect(missing).toMatchObject({
+      scope, environments: ['production'], missingCredentialKeys: ['packageReadToken'],
+      guidance: expect.stringContaining('packageReadToken'),
+    });
+    expect(JSON.stringify(missing)).not.toContain('fixture-combined-pat');
+    expect((await connect(scope, true)).ok).toBe(true);
+    const read = await t.call('hv_spec', { project });
+    expect(read.data.connections.required).toContainEqual(expect.objectContaining({ provider: 'github', scope, status: 'verified' }));
+    expect(read.data.connections.missing).not.toContainEqual(expect.objectContaining({ provider: 'github' }));
+    await t.close();
+  });
+
+  it.each(['new', 'exact', 'unverified', 'unreadable', 'owner wildcard', 'wildcard with package access'])(
+    'offers usable private image recovery when the connection is %s', async state => {
+      const t = await makeClient();
+      const previousCwd = process.cwd();
+      const project = 'private-image-setup';
+      const scope = `acme/${project}`;
+      vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
+      try {
+        process.chdir(tempDir);
+        execFileSync('git', ['init', '-q']);
+        const gitRemoteUrl = `https://github.com/${scope}.git`;
+        execFileSync('git', ['remote', 'add', 'origin', gitRemoteUrl]);
+        vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
+          success: true, login: 'acme-owner', id: 81, scopes: ['repo', 'workflow', 'read:packages'],
+        });
+        if (state !== 'new') {
+          const repo = new ConnectionRepository();
+          const connection = repo.create({
+            provider: 'github', scope: state.includes('wildcard') ? 'acme/*' : scope,
+            credentialsEncrypted: state === 'unreadable' ? 'unreadable-encrypted-record' : getSecretStore().encryptObject({
+              apiToken: 'existing-primary', login: 'acme-owner',
+              ...(state === 'wildcard with package access' ? { packageReadToken: 'existing-package' } : {}),
+            }),
+          });
+          if (state !== 'unverified') repo.updateStatus(connection.id, 'verified');
+        }
+        const environment = { hosting: { provider: 'railway' }, services: { web: {} } };
+        const saved = await t.call('hv_spec', { spec: { project, gitRemoteUrl,
+          github: { repository: scope, canonicalEnvironment: 'staging' },
+          environments: { production: { ...environment, deploy: { strategy: 'branch', trigger: 'ci', branch: 'main' } }, staging: environment },
+        } });
+        expect(saved.ok).toBe(true);
+        const listed = await t.call('hv_connections', { project, view: 'requirements', environment: 'production' });
+        const github = listed.data.connections.find((item: { provider: string }) => item.provider === 'github');
+        const missing = saved.data.connections.missing.find((item: { provider: string }) => item.provider === 'github');
+        const slots = saved.data.localEnv.addedKeys.filter((key: string) => key.startsWith('HYPERVIBE_GITHUB'));
+        if (state === 'wildcard with package access') {
+          expect(missing).toBeUndefined();
+          expect(github.status).toBe('verified');
+          expect(slots).toEqual([]);
+          return;
+        }
+        if (state === 'unreadable') {
+          expect(missing.status).toBe('unverified');
+          expect(missing).not.toHaveProperty('missingCredentialKeys');
+          expect(missing.guidance).toContain('Restore local credential access');
+          expect(slots).toEqual([]);
+          return;
+        }
+        if (state === 'unverified') {
+          expect(missing.status).toBe('unverified');
+          expect(missing).not.toHaveProperty('missingCredentialKeys');
+          expect(slots).toEqual([]);
+          expect(github.connectionAction).toEqual({ project, provider: 'github', action: 'verify', scope });
+          expect((await t.call('hv_connections', github.connectionAction)).ok).toBe(true);
+          const reread = await t.call('hv_spec', { project });
+          expect(reread.data.connections.missing).toContainEqual(expect.objectContaining({ scope, missingCredentialKeys: ['packageReadToken'] }));
+          return;
+        }
+        const exact = state === 'exact';
+        const needPrimary = state === 'new';
+        expect(missing.environments).toEqual(needPrimary ? ['production', 'staging'] : ['production']);
+        expect(missing.missingCredentialKeys).toEqual(needPrimary ? ['apiToken', 'packageReadToken'] : ['packageReadToken']);
+        expect(slots).toEqual(exact ? ['HYPERVIBE_GITHUB_PACKAGES_TOKEN'] : ['HYPERVIBE_GITHUB_PACKAGES_TOKEN', 'HYPERVIBE_GITHUB_TOKEN']);
+        expect(missing.connectionAction).toEqual(github.connectionAction);
+        const described = await t.call('hv_connections', github.connectionAction);
+        const setup = described.data.connectionSetup;
+        expect(setup.roles.map((role: { credentialKey: string }) => role.credentialKey)).toEqual(exact ? ['packageReadToken'] : ['apiToken', 'packageReadToken']);
+        const example = setup.credentialExample;
+        expect(example).toContain(`scope="${scope}"`);
+        expect(example).toContain(exact ? 'credentialsKey="packageReadToken"' : 'credentialsMap=');
+        writeFileSync(path.join(tempDir, '.env'), 'HYPERVIBE_GITHUB_TOKEN=api-value\nHYPERVIBE_GITHUB_PACKAGES_TOKEN=packages-value\n');
+        const credentialsRef = /credentialsRef="([^"]+)"/.exec(example)![1].replace('/absolute/path', tempDir);
+        const keys = exact ? { credentialsKey: 'packageReadToken' } : { credentialsMap: JSON.parse(/credentialsMap=(\{[^}]+\})/.exec(example)![1]) };
+        expect((await t.call('hv_connections', { provider: 'github', project, scope, credentialsRef, ...keys })).ok).toBe(true);
+        const reread = await t.call('hv_spec', { project });
+        expect(reread.data.connections.missing).not.toContainEqual(expect.objectContaining({ provider: 'github' }));
+      } finally {
+        await t.close();
+        process.chdir(previousCwd);
+        vi.unstubAllEnvs();
+      }
+    }
+  );
 
   it('returns required connection setup immediately from the desired spec', async () => {
     const t = await makeClient();
@@ -1364,23 +1518,12 @@ describe('hv_spec', () => {
     ]);
     const cloudflare = set.data.connections.missing.find((entry: { provider: string }) => entry.provider === 'cloudflare');
     const github = set.data.connections.missing.find((entry: { provider: string }) => entry.provider === 'github');
-    expectActionableConnectionSetup(cloudflare.connectionSetup, {
-      provider: 'cloudflare',
-      project: 'connection-check-app',
-      scope: 'connection-check-app.com',
-    });
-    expectActionableConnectionSetup(github.connectionSetup, {
-      provider: 'github',
-      project: 'connection-check-app',
-    });
-    expect(github.connectionSetup.localEnvInputs.map((input: { envKey: string }) => input.envKey)).toEqual([
-      'HYPERVIBE_GITHUB_TOKEN',
-    ]);
-    expect(cloudflare.connectionSetup.localEnvInputs.map((input: { envKey: string }) => input.envKey)).toEqual([
-      'CLOUDFLARE_API_TOKEN',
-    ]);
-    expect(set.hint).toContain('This task needs provider access that is not connected on this Mac');
-    expect(set.hint).toContain('connectionSetup');
+    expect(set.hint).toContain('action="describe"');
+    for (const entry of [cloudflare, github]) {
+      expect(entry).not.toHaveProperty('connectionSetup');
+      const described = await t.call('hv_connections', { project: 'connection-check-app', provider: entry.provider, action: 'describe', scope: entry.scope });
+      expectActionableConnectionSetup(described.data.connectionSetup, { provider: entry.provider, project: 'connection-check-app' });
+    }
     expect(set.next).toEqual(['hv_connections', 'hv_plan']);
     await t.close();
   });
@@ -1710,36 +1853,52 @@ describe('hv_plan / hv_status / hv_apply', () => {
     });
   }
 
-  function mockPendingGitHubPublication(projectName: string, pullRequestNumber: number) {
-    const proposalBranch = managedWorkflowPublicationBranch('production');
+  function mockPendingGitHubPublication(_projectName: string, pullRequestNumber: number) {
     const getFileContent = vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockResolvedValue(null);
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
       login: 'davejohnson',
       scopes: ['repo', 'workflow', 'read:packages'],
     });
-    vi.spyOn(GitHubAdapter.prototype, 'getRepository').mockResolvedValue({ default_branch: 'main' });
-    vi.spyOn(GitHubAdapter.prototype, 'getRef')
-      .mockResolvedValueOnce({ ref: 'refs/heads/main', object: { sha: 'base-sha' } })
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        ref: `refs/heads/${proposalBranch}`,
-        object: { sha: 'base-sha' },
-      });
-    vi.spyOn(GitHubAdapter.prototype, 'listPullRequests').mockResolvedValue([]);
-    vi.spyOn(GitHubAdapter.prototype, 'createRef').mockResolvedValue();
-    vi.spyOn(GitHubAdapter.prototype, 'getFile').mockResolvedValue(null);
-    vi.spyOn(GitHubAdapter.prototype, 'createPullRequest').mockResolvedValue({
-      number: pullRequestNumber,
-      html_url: `https://github.com/davejohnson/${projectName}/pull/${pullRequestNumber}`,
-    });
-    const writeWorkflow = vi.spyOn(GitHubAdapter.prototype, 'createOrUpdateFile').mockResolvedValue({
-      created: true,
-      updated: false,
-    });
+    const {write: writeWorkflow} = mockManagedPublication(pullRequestNumber);
     const setSecret = vi.spyOn(GitHubAdapter.prototype, 'setEnvironmentSecret').mockResolvedValue();
     return { getFileContent, writeWorkflow, setSecret };
   }
+
+  it('shows secret-safe repository changes and observation coverage in public status and plan', async () => {
+    const t = await makeClient();
+    const name = 'reviewable-repository';
+    const setup = await t.call('hv_spec', {spec: {project: name, gitRemoteUrl: 'https://github.com/davejohnson/' + name,
+      environments: {}, runtime: {kind: 'node', version: '22', installCommand: 'npm ci'},
+      github: {actions: {tests: {kind: 'check', category: 'test', runtime: {kind: 'node'}, commands: ['npm test']}}}}});
+    expect(setup.ok).toBe(true);
+    verifyConnection('github', {apiToken: 'fixture', login: 'davejohnson'});
+    const current = await t.call('hv_spec', { project: name });
+    const files = compileManagedGitHubFiles(current.data.spec.github, current.data.spec.runtime);
+    const workflow = files.find(f => f.path.startsWith('.github/workflows/'))!;
+    let live: string | Error = workflow.content.replace('hv_spec;', 'hv_spec_set;');
+    vi.spyOn(GitHubAdapter.prototype, 'getFileContent').mockImplementation(async (_owner, _repo, filePath) => {
+      if (filePath === workflow.path) {
+        if (live instanceof Error) throw live;
+        return live;
+      }
+      return files.find(f => f.path === filePath)?.content ?? null;
+    });
+    for (const [value, expected] of [[live, 'generator header'], [workflow.content.replace('npm test', 'private-observed-command'), 'job steps'],
+      [new Error('private-observed-command'), 'unknown']] as const) {
+      live = value;
+      for (const command of ['hv_status', 'hv_plan']) {
+        const result = await t.call(command, {project: name});
+        expect(result.ok).toBe(true);
+        const actions = result.data.drift ?? result.data.actions;
+        const summary = actions.find((a: any) => a.id === 'repo:github-infrastructure-pr').diff.find((field: any) => field.field === 'file:' + workflow.path);
+        expect(JSON.stringify(summary)).toContain(expected);
+        expect(JSON.stringify(result)).not.toContain('private-observed-command');
+        if (command === 'hv_status') expect(result.data.coverage.repositoryFiles).toBe('included');
+      }
+    }
+    await t.close();
+  });
 
   it('rejects a stored unsupported workload spec before provider observation or planning', async () => {
     const project = new ProjectRepository().create({ name: 'stored-unsupported-workload-app' });
@@ -1839,8 +1998,27 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.verified).toBe(false);
     expect(plan.data.summary.create).toBeGreaterThan(0);
     expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'railway' }));
+    expect(path.isAbsolute(plan.data.htmlPath)).toBe(true);
+    const report = readFileSync(plan.data.htmlPath, 'utf8');
+    expect(report).toContain(plan.data.planId);
+    expect(report).toContain('Blockers');
+    expect(new RunRepository().findById(plan.data.planId)?.plan).toMatchObject({
+      reviewBlockers: expect.arrayContaining([plan.data.blocked[0].reason]),
+    });
     expect(plan.hint).toContain('hv_connections');
     await t.close();
+  });
+
+  it('returns the saved plan ID when its final review cannot be written', async () => {
+    const t = await makeClient();
+    await t.call('hv_spec', { spec: SPEC });
+    mockObserved(null);
+    vi.spyOn(RunRepository.prototype, 'updatePlanReview').mockImplementationOnce(() => { throw new Error('Storage is read-only'); });
+    try {
+      const result = await t.call('hv_plan', { project: 'core-spec-app', env: 'staging' });
+      expect(result).toMatchObject({ ok: false, error: { code: 'INTERNAL', details: { persisted: true, planId: expect.any(String) } }, next: ['hv_plan'] });
+      expect(new RunRepository().findById(result.error.details.planId)?.type).toBe('plan');
+    } finally { await t.close(); }
   });
 
   it('adopts an exact Railway domain on a bound service even when the legacy binding omitted its hostname', async () => {
@@ -2023,6 +2201,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
       requiresConfirm: true,
       billable: true,
     });
+    expect(register.reason).toContain('account acct-1');
+    expect(register.reason).toContain('1 year');
+    expect(register.reason).toContain('auto-renew off');
     expect(register.metadata).toBeUndefined();
     expect(JSON.stringify(storedPlanAction(plan.data.planId, register.id)?.metadata)).toContain('10.00');
     const attach = plan.data.actions.find((action: { id: string }) => action.id === 'domain:apreskeys.com');
@@ -2065,6 +2246,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(plan.data.actions).not.toContainEqual(expect.objectContaining({
       id: 'domain:requested-example.com:register',
     }));
+    expect(plan.data.blocked).toContainEqual(expect.objectContaining({ provider: 'cloudflare', reason: expect.stringContaining('availability') }));
     expect(plan.warnings).toContainEqual(expect.stringContaining(
       'did not return an availability result for requested-example.com'
     ));
@@ -2229,6 +2411,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(create).toHaveBeenCalledWith('acct-1', {
       domainName: 'apreskeys.com',
       autoRenew: true,
+      privacyMode: 'redaction',
       years: 1,
     });
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
@@ -2238,7 +2421,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('keeps Cloudflare domain registration pending while the Registrar workflow is in progress', async () => {
+  it.each([false, true])('keeps a Cloudflare purchase pending without resubmitting (lost acknowledgement: %s)', async (lost) => {
     const t = await makeClient();
     await t.call('hv_spec', {
       spec: {
@@ -2298,14 +2481,27 @@ describe('hv_plan / hv_status / hv_apply', () => {
       state: 'in_progress',
     });
 
+    if (lost) create.mockRejectedValueOnce(new Error('Connection closed after submission'));
+    const poll = vi.spyOn(CloudflareAdapter.prototype, 'getRegistrarRegistrationStatus').mockResolvedValue({
+      completed: false, created_at: '2026-06-15T00:00:00Z', updated_at: '2026-06-15T00:01:00Z',
+      links: { self: '/status?token=private-registrar-response' }, state: 'in_progress', context: { token: 'private-registrar-response' },
+    });
+
     const plan = await t.call('hv_plan', { project: 'domain-pending-app', env: 'production' });
     expect(plan.ok).toBe(true);
     const attach = plan.data.actions.find((action: { id: string }) => action.id === 'domain:pending-example.com');
     expect(attach.dependsOn).toContain('domain:pending-example.com:register');
 
+    vi.spyOn(EnvironmentRepository.prototype, 'syncRepoBindingsForId').mockImplementationOnce(() => { throw Error('private-export-detail'); });
+    const beforeSend = await t.call('hv_apply', { project: 'domain-pending-app', planId: plan.data.planId,
+      confirmActions: ['domain:pending-example.com:register'] });
+    expect(JSON.stringify(beforeSend)).not.toContain('private-export-detail');
+    expect(create).not.toHaveBeenCalled();
+    const retryPlan = await t.call('hv_plan', { project: 'domain-pending-app', env: 'production' });
+    expect(retryPlan.data.actions).toContainEqual(expect.objectContaining({ id: 'domain:pending-example.com:register', type: 'create', requiresConfirm: true }));
     const apply = await t.call('hv_apply', {
       project: 'domain-pending-app',
-      planId: plan.data.planId,
+      planId: retryPlan.data.planId,
       confirmActions: ['domain:pending-example.com:register'],
     });
 
@@ -2315,7 +2511,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
       actionId: 'domain:pending-example.com:register',
       status: 'pending',
-      message: expect.stringContaining('in_progress'),
+      message: expect.stringContaining(lost ? 'unknown' : 'in_progress'),
     }));
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
       actionId: 'domain:pending-example.com',
@@ -2326,6 +2522,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(create).toHaveBeenCalledWith('acct-1', {
       domainName: 'pending-example.com',
       autoRenew: true,
+      privacyMode: 'redaction',
       years: 1,
     });
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
@@ -2333,10 +2530,37 @@ describe('hv_plan / hv_status / hv_apply', () => {
       'pending-example.com': {
         provider: 'cloudflare',
         accountId: 'acct-1',
-        state: 'in_progress',
+        state: lost ? 'submitted' : 'in_progress',
         completed: false,
       },
     });
+    const next = await t.call('hv_plan', { project: project.name, env: 'production' });
+    const purchase = next.data.actions.find((action: { id: string }) => action.id === 'domain:pending-example.com:register');
+    expect(purchase.type).toBe('update');
+    await t.call('hv_apply', { project: project.name, planId: next.data.planId });
+    expect(JSON.stringify(new EnvironmentRepository().findByProjectAndName(project.id, 'production')?.platformBindings)).not.toContain('private-registrar-response');
+    expect(poll).toHaveBeenCalledWith('acct-1', 'pending-example.com');
+    expect(create).toHaveBeenCalledTimes(1);
+    const terminal = { completed: true, state: 'failed', links: { self: '/status' },
+      created_at: '2026-06-15T00:00:00Z', updated_at: '2026-06-15T00:02:00Z' };
+    poll.mockResolvedValueOnce(terminal);
+    const statusPlan = await t.call('hv_plan', { project: project.name, env: 'production' });
+    await t.call('hv_apply', { project: project.name, planId: statusPlan.data.planId });
+    await t.call('hv_apply', { project: project.name, planId: retryPlan.data.planId, confirmActions: [purchase.id] });
+    expect(create).toHaveBeenCalledTimes(1);
+    const newPurchase = await t.call('hv_plan', { project: project.name, env: 'production' });
+    const nextAction = newPurchase.data.actions.find((action: { id: string }) => action.id === purchase.id);
+    expect(nextAction.type).toBe(lost ? 'update' : 'create');
+    if (lost) {
+      poll.mockResolvedValueOnce({ ...terminal, state: 'succeeded' });
+      const active = vi.spyOn(CloudflareAdapter.prototype, 'hasActiveRegistrarRegistration').mockResolvedValue(true);
+      const recovered = await t.call('hv_apply', { project: project.name, planId: newPurchase.data.planId });
+      expect(active).toHaveBeenCalledWith('acct-1', 'pending-example.com');
+      expect(recovered.data.receipts).toContainEqual(expect.objectContaining({ actionId: purchase.id, status: 'succeeded' }));
+    } else {
+      await t.call('hv_apply', { project: project.name, planId: newPurchase.data.planId, confirmActions: [purchase.id] });
+    }
+    expect(create).toHaveBeenCalledTimes(lost ? 1 : 2);
     await t.close();
   });
 
@@ -2564,14 +2788,9 @@ describe('hv_plan / hv_status / hv_apply', () => {
         pullRequestUrl: 'https://github.com/davejohnson/ci-plan-app/pull/42',
       }),
     }));
-    expect(writeWorkflow).toHaveBeenCalledWith(
-      'davejohnson',
-      'ci-plan-app',
-      '.github/workflows/deploy-railway-production.yml',
-      expect.stringContaining('Deploy Railway (production)'),
-      expect.any(String),
-      managedWorkflowPublicationBranch('production')
-    );
+    expect(writeWorkflow.mock.calls[0][4]).toContainEqual({
+      path: '.github/workflows/deploy-railway-production.yml', content: expect.stringContaining('Deploy Railway (production)'),
+    });
     expect(writeWorkflow).toHaveBeenCalledTimes(1);
     expect(setSecret).not.toHaveBeenCalled();
     const environment = new EnvironmentRepository().findByProjectAndName(project.id, 'production')!;
@@ -2580,7 +2799,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('fails CI workflow apply when Railway image pull credentials are missing', async () => {
+  it.each(['repository', 'global'])('returns actionable package setup for a %s GitHub primary when plan/apply need a Railway image pull', async primary => {
     const t = await makeClient();
     await t.call('hv_spec', {
       spec: {
@@ -2597,7 +2816,12 @@ describe('hv_plan / hv_status / hv_apply', () => {
       },
     });
     verifyRailwayConnection();
-    verifyConnection('github', { apiToken: 'gh-token', login: 'davejohnson' });
+    const scope = 'davejohnson/ci-missing-image-token-app';
+    const repo = new ConnectionRepository();
+    const primaryConnection = repo.create({ provider: 'github', scope: primary === 'repository' ? scope : null,
+      credentialsEncrypted: getSecretStore().encryptObject({ apiToken: 'gh-token', login: 'davejohnson' }) });
+    repo.updateStatus(primaryConnection.id, 'verified');
+    const expectedKeys = primary === 'repository' ? ['packageReadToken'] : ['apiToken', 'packageReadToken'];
     const project = new ProjectRepository().findByName('ci-missing-image-token-app')!;
     bindObservedRailwayWeb(project);
     const { getFileContent, setSecret } = mockPendingGitHubPublication(
@@ -2655,15 +2879,16 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(storedPlanAction(syncPlan.data.planId, service.id)?.dependsOn).toContain(ci.id);
     expect(syncPlan.data.actionScopedBlocked).toContainEqual(expect.objectContaining({
       provider: 'github',
-      reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
+      scope, requiredCredentialKeys: expectedKeys,
     }));
-    expect(syncPlan.warnings).toContainEqual(expect.stringContaining('GitHub apiToken needs repo + workflow'));
+    expect(syncPlan.warnings).toContainEqual(expect.stringContaining(primary === 'repository' ? 'credentialsKey="packageReadToken"' : 'credentialsMap='));
     expect(syncPlan.next).toEqual(['hv_connections', 'hv_plan']);
-    expectActionableConnectionSetup(syncPlan.data.connectionSetup, {
+    const setup = expectActionableConnectionSetup(syncPlan.data.connectionSetup, {
       provider: 'github',
       project: 'ci-missing-image-token-app',
       scope: 'davejohnson/ci-missing-image-token-app',
     });
+    expect(setup.roles.map((role: { credentialKey: string }) => role.credentialKey)).toEqual(expectedKeys);
     expect(syncPlan.agentInstruction).toMatchObject({ action: 'ask_user' });
     expect(syncPlan.agentInstruction.message).toContain('exact clickable setup links');
     expect(syncPlan.agentInstruction.message).toContain('offer to open');
@@ -2675,14 +2900,15 @@ describe('hv_plan / hv_status / hv_apply', () => {
     expect(apply.error.code).toBe('MISSING_CONNECTION');
     expect(apply.error.details.blocked).toContainEqual(expect.objectContaining({
       provider: 'github',
-      reason: expect.stringContaining('repo/workflow API access plus packageReadToken'),
+      scope, requiredCredentialKeys: expectedKeys,
     }));
     expectActionableConnectionSetup(apply.error.details.connectionSetup, {
       provider: 'github',
       project: 'ci-missing-image-token-app',
       scope: 'davejohnson/ci-missing-image-token-app',
     });
-    expect(apply.hint).toContain('combined classic PAT');
+    if (primary === 'repository') expect(apply.hint).not.toContain('combined classic PAT');
+    else expect(apply.hint).toContain('combined classic PAT');
     expect(apply.hint).toContain('read:packages');
     expect(apply.hint).toContain('connectionSetup');
     expect(apply.next).toEqual(['hv_connections', 'hv_plan', 'hv_apply']);
@@ -3542,21 +3768,25 @@ describe('hv_plan / hv_status / hv_apply', () => {
     await t.close();
   });
 
-  it('applies an explicitly confirmed environment-variable tombstone through the hosting adapter', async () => {
+  it.each([false, true])('applies a confirmed tombstone through the hosting adapter, service scoped=%s', async serviceScoped => {
+    const target = serviceScoped ? 'worker' : 'web';
     const t = await makeClient();
-    await t.call('hv_spec', {
+    const written = await t.call('hv_spec', {
       spec: {
         project: 'env-retirement-app',
         environments: {
           staging: {
             hosting: { provider: 'railway' },
-            services: { web: { startCommand: 'npm start' } },
-            envVars: { NODE_ENV: 'staging' },
-            removeEnvVars: ['OLD_API_TOKEN'],
+            services: { web: { startCommand: 'npm start' }, ...(serviceScoped ? {
+              worker: { workloadKind: 'worker', startCommand: 'npm start', removeEnvVars: ['OLD_API_TOKEN'] },
+            } : {}) },
+            envVars: { NODE_ENV: 'staging', ...(serviceScoped ? { OLD_API_TOKEN: 'keep-on-web' } : {}) },
+            ...(!serviceScoped ? { removeEnvVars: ['OLD_API_TOKEN'] } : {}),
           },
         },
       },
     });
+    expect(written).toMatchObject({ ok: true });
     verifyRailwayConnection();
 
     const project = new ProjectRepository().findByName('env-retirement-app')!;
@@ -3567,7 +3797,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
         provider: 'railway',
         projectId: 'rp-1',
         environmentId: 'rail-env-1',
-        services: { web: { serviceId: 's-web' } },
+        services: { web: { serviceId: 's-web' }, ...(serviceScoped ? { worker: { serviceId: 's-worker' } } : {}) },
       },
     });
     new ServiceRepository().create({
@@ -3576,6 +3806,7 @@ describe('hv_plan / hv_status / hv_apply', () => {
       buildConfig: { startCommand: 'npm start' },
     });
 
+    if (serviceScoped) new ServiceRepository().create({ projectId: project.id, name: 'worker', buildConfig: { startCommand: 'npm start', workloadKind: 'worker' } });
     const observedState: ObservedState = {
       provider: 'railway',
       observedAt: new Date().toISOString(),
@@ -3590,13 +3821,14 @@ describe('hv_plan / hv_status / hv_apply', () => {
         config: { startCommand: 'npm start' },
         sourceState: 'disconnected',
         envVarKeys: ['NODE_ENV', 'OLD_API_TOKEN'],
-        envVarHashes: { NODE_ENV: hashEnvValue('staging') },
+        envVarHashes: { NODE_ENV: hashEnvValue('staging'), OLD_API_TOKEN: hashEnvValue('keep-on-web') },
         status: 'running',
       }],
       databases: [],
       partial: false,
       warnings: [],
     };
+    if (serviceScoped) observedState.services.push({ ...observedState.services[0]!, name: 'worker', externalId: 's-worker', workloadKind: 'worker' });
     const deleteEnvVars = vi.fn(async () => ({
       success: true,
       message: 'removed',
@@ -3621,28 +3853,37 @@ describe('hv_plan / hv_status / hv_apply', () => {
     vi.spyOn(adapterFactory, 'getProviderAdapter').mockResolvedValue({ success: true, adapter } as any);
     vi.spyOn(adapterFactory, 'getHostingAdapter').mockResolvedValue({ success: true, adapter } as any);
 
-    const plan = await t.call('hv_plan', { project: 'env-retirement-app', env: 'staging' });
+    const input = { project: 'env-retirement-app', env: 'staging', ...(serviceScoped ? { services: [target] } : {}) };
+    const plan = await t.call('hv_plan', input);
     expect(plan.ok).toBe(true);
     expect(plan.data.actions).toContainEqual(expect.objectContaining({
-      id: 'service:web:env-remove',
+      id: `service:${target}:env-remove`,
       requiresConfirm: true,
     }));
 
     const apply = await t.call('hv_apply', {
       project: 'env-retirement-app',
       planId: plan.data.planId,
-      confirmActions: ['service:web:env-remove'],
+      confirmActions: [`service:${target}:env-remove`],
     });
     expect(apply.ok).toBe(true);
     expect(deleteEnvVars).toHaveBeenCalledWith(
       expect.objectContaining({ name: 'staging' }),
-      expect.objectContaining({ name: 'web' }),
+      expect.objectContaining({ name: target }),
       ['OLD_API_TOKEN']
     );
     expect(apply.data.receipts).toContainEqual(expect.objectContaining({
-      actionId: 'service:web:env-remove',
+      actionId: `service:${target}:env-remove`,
       status: 'succeeded',
     }));
+    if (serviceScoped) {
+      expect(deleteEnvVars).toHaveBeenCalledTimes(1);
+      observedState.services[1]!.envVarKeys = ['NODE_ENV'];
+      delete observedState.services[1]!.envVarHashes!.OLD_API_TOKEN;
+      const converged = await t.call('hv_plan', input);
+      expect(converged).toMatchObject({ ok: true, data: { pendingActionCount: 0 } });
+      expect(observedState.services[0]!.envVarKeys).toContain('OLD_API_TOKEN');
+    }
     await t.close();
   });
 

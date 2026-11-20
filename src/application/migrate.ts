@@ -113,7 +113,7 @@ export function scopedToEnvironment(key: string, environmentName: string): boole
 }
 
 /** A target environment equivalent to the source on OpenTofu-managed Google Cloud. */
-export function proposeTargetEnvironment(source: EnvironmentSpec, options: { region?: string; domain?: string }): EnvironmentSpec {
+export function proposeTargetEnvironment(source: EnvironmentSpec, options: { region?: string; domain?: string; gcpProjectId?: string }): EnvironmentSpec {
   // Declared settings follow the same rule as settings read from the running source: nothing the
   // provider manages, and nothing that points back at the source's own data, is carried over.
   const envVars = Object.fromEntries(Object.entries(source.envVars).filter(([key, value]) => !MANAGED_KEY.test(key) && !pointsAtSourceData(value)));
@@ -124,7 +124,7 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
     }
   }
   const target: Record<string, unknown> = {
-    hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1' },
+    hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1', ...(options.gcpProjectId ? { gcpProjectId: options.gcpProjectId } : {}) },
     services: Object.fromEntries(Object.entries(source.services).map(([name, service]) => [name, {
       workloadKind: service.workloadKind,
       ...(service.startCommand ? { startCommand: service.startCommand } : {}),
@@ -235,9 +235,11 @@ interface MigrateParams {
   project: Project;
   from: string;
   to: string;
+  gcpProjectId?: string;
   region?: string;
   domain?: string;
   billingAccountName?: string;
+  gcpSetupPlanId?: string;
   approveAccess?: string[];
   confirmActions?: string[];
   planId?: string;
@@ -278,6 +280,10 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   if (!specResult) return { status: 'blocked', message: 'This project has no spec yet.' };
   const sourceSpec = specResult.spec.environments[params.from];
   if (!sourceSpec) return { status: 'blocked', message: `The spec has no source environment "${params.from}".` };
+  const declaredTarget = specResult.spec.environments[params.to];
+  if (params.gcpProjectId && declaredTarget && declaredTarget.hosting.gcpProjectId !== params.gcpProjectId) {
+    return { status: 'blocked', message: `Migration target ${params.to} already selects ${declaredTarget.hosting.gcpProjectId ?? 'the repository default'}. Choose a new target environment to migrate to ${params.gcpProjectId}.` };
+  }
   const sourceEnvironment = ctx.repos.environments.findByProjectAndName(params.project.id, params.from);
   if (!sourceEnvironment) return { status: 'blocked', message: `Environment ${params.from} has never been deployed by Hypervibe.` };
   const liveTarget = await protectForwardingTarget(params.project, specResult.spec, sourceEnvironment,
@@ -289,7 +295,6 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     ctx.repos.environments.findByProjectAndName(params.project.id, params.to) ?? undefined);
   const initialConflict = bindingConflict();
   if (initialConflict) return { status: 'blocked', message: initialConflict };
-  const declaredTarget = specResult.spec.environments[params.to];
   if (params.verifyOnly && sourceSpec.database?.provider === 'railway'
     && (!declaredTarget || declaredTarget.hosting.provider === 'cloudrun')) {
     return { status: 'blocked', message: 'Comparing private Railway PostgreSQL with Cloud SQL requires reviewed verification tasks on both providers. Hypervibe does not yet plan these tasks. Any saved copy receipt records the comparison at copy time.' };
@@ -298,7 +303,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
 
   // 1. Target: proposed from the source when it does not exist yet.
   if (!specResult.spec.environments[params.to]) {
-    const proposed = proposeTargetEnvironment(sourceSpec, { region: params.region, domain: params.domain });
+    const proposed = proposeTargetEnvironment(sourceSpec, { region: params.region, domain: params.domain, gcpProjectId: params.gcpProjectId });
     specResult = store.merge(params.project, { environments: { [params.to]: proposed } });
   }
   const pendingTransfer = lease.pending();
@@ -320,6 +325,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   const launchParams = {
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
+    ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
     ...(params.approveAccess ? { approveAccess: params.approveAccess } : {}),
     ...(!sourcePlanApproval && params.planId ? { planId: params.planId } : {}),
     ...(!sourcePlanApproval && params.confirmActions ? { confirmActions: params.confirmActions } : {}),

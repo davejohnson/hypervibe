@@ -1,3 +1,7 @@
+import { environmentDomains } from '../domain/services/infrastructure-engine-selection.js';
+import { effectiveBranchCiAutoDeploy } from '../domain/spec/spec.schema.js';
+import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
+import { createHash } from 'node:crypto';
 import { strictHealthCheck } from '../domain/services/release-health.js';
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import type { CommandContext } from './context.js';
@@ -5,7 +9,7 @@ import { buildTokenKey, collectOutsideKeys } from './engine-secrets.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec, EnvironmentSpec } from '../domain/spec/spec.schema.js';
-import type { PlanAction } from '../domain/plan/plan.types.js';
+import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
 import { ConvergeExecutor, type ActionReceipt } from '../domain/plan/converge.executor.js';
 import { runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
@@ -25,11 +29,14 @@ import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import { parseEngineCiBinding } from '../domain/spec/engine-ci-binding.js';
 import { environmentDeploymentContractHashForApply } from '../domain/services/deployment-contract.service.js';
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
+import { gcpEnvironmentBindingConflict } from '../domain/services/gcp-environment-target.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
-import { isCloudPreparedForRegion, isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForStorageS3, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
+import { isCloudPreparedForRegion, isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
+  gcpUnboundStateConflict,
+  observeStorageS3Access,
   ENGINE_PLAN_SCOPE,
   type InfrastructurePlanResult,
   isEngineManaged,
@@ -51,16 +58,16 @@ import {
  */
 export type LaunchResult =
   | { status: 'needs_billing_choice'; gcpProjectId: string; openBillingAccounts: Array<{ name: string; displayName?: string }>; plannedSteps: string[]; includedAccess: string[] }
-  | { status: 'needs_access'; accessId: LaunchAccessId; access: string; grants: Record<string, unknown> }
+  | { status: 'needs_access'; accessId: LaunchAccessId; access: string; grants: Record<string, unknown>; confirmationHint?: string }
   | { status: 'needs_subscription'; subscriptions: Array<{ subscriptionId: string; displayName: string }>; message: string }
   | { status: 'needs_connection'; provider: string; url?: string; message: string }
-  | { status: 'needs_confirmation'; planId: string; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
-  | { status: 'blocked'; message: string; details?: unknown }
+  | { status: 'needs_confirmation'; planId: string; htmlPath?: string; confirmActions: string[]; changes: Array<{ id: string; change: string }>; estimatedMonthlyCost: CostLine[] }
+  | { status: 'blocked'; message: string; details?: unknown; next?: ['hv_connections'] }
   | { status: 'needs_secrets'; keys: string[]; url?: string; message: string }
   /** Returned only when a caller asked to stop after a phase (for example migration). */
   | { status: 'ready'; phase: 'prepare' | 'infrastructure'; infrastructureRounds: number }
-  | { status: 'pending'; message: string; receipts: ActionReceipt[]; planId?: string; confirmActions?: string[] }
-  | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; infrastructureRounds: number;
+  | { status: 'pending'; message: string; receipts: ActionReceipt[]; planId?: string; htmlPath?: string; confirmActions?: string[] }
+  | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; domains?: Array<{ name: string; status: 'serving' | 'certificate_pending' }>; infrastructureRounds: number;
       ciWorkflow?: { path: string; changed: boolean; branch: string } };
 
 export const LAUNCH_ACCESS_IDS = ['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release', 'azure-setup', 'aws-setup'] as const;
@@ -131,7 +138,7 @@ export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
   const buckets = Object.keys(environment.storage ?? {}).length;
   if (buckets) lines.push({ item: `${buckets} Cloud Storage bucket(s)`, estimate: 'about $0.02 per GB stored per month, plus small per-request charges' });
   lines.push({ item: 'Secret Manager, Artifact Registry, Cloud Build', estimate: 'usually under $1 per month for a small app' });
-  if (environment.domain) lines.push({ item: `Custom domain ${environment.domain}`, estimate: '$0 (Google-managed certificate; DNS on your existing Cloudflare zone)' });
+  for (const { domain } of environmentDomains(environment)) lines.push({ item: `Custom domain ${domain}`, estimate: '$0 for the Google-managed certificate. DNS uses your existing zone.' });
   return lines;
 }
 
@@ -179,6 +186,7 @@ async function runLaunch(ctx: CommandContext, params: {
   specRevision: number;
   environmentName: string;
   billingAccountName?: string;
+  gcpSetupPlanId?: string;
   /** Azure: the subscription the person chose after needs_subscription. */
   azureSubscriptionId?: string;
   /** AWS: the account a needs_access "aws-setup" result was shown for. */
@@ -220,14 +228,14 @@ async function runLaunch(ctx: CommandContext, params: {
     const loaded = new ConvergeExecutor().loadPlan(params.planId);
     if ('error' in loaded) return { status: 'blocked', message: loaded.error };
     const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
-    if (![ENGINE_PLAN_SCOPE, 'dns-engine'].includes(loaded.document.scope ?? '') || loaded.run.projectId !== params.project.id
+    if (![ENGINE_PLAN_SCOPE, 'dns-engine', 'domain-registration'].includes(loaded.document.scope ?? '') || loaded.run.projectId !== params.project.id
       || loaded.document.environmentName !== params.environmentName || !environment || loaded.run.environmentId !== environment.id) {
       return { status: 'blocked', message: 'The saved plan belongs to a different project, environment or lifecycle scope. Review a new hv_launch plan.' };
     }
     if (loaded.document.specRevision !== params.specRevision) return { status: 'blocked', message: 'The spec changed after this plan was reviewed. Run hv_launch without confirmation inputs to review the current changes.' };
     reviewedPlan = { planRunId: params.planId, environmentName: loaded.document.environmentName,
       specRevision: loaded.document.specRevision, actions: loaded.document.actions,
-      confirmActions: loaded.document.actions.filter((action) => action.type !== 'noop' && (action.requiresConfirm || action.billable || action.dataBearing)).map((action) => action.id),
+      confirmActions: loaded.document.actions.filter(requiresActionConfirmation).map(action => action.id),
       warnings: loaded.document.warnings ?? [] };
     if (params.confirmActions?.length) {
       const expected = reviewedPlan.actions.filter((action) => reviewedPlan!.confirmActions.includes(action.id)).map(approvalToken).sort();
@@ -250,8 +258,9 @@ async function runLaunch(ctx: CommandContext, params: {
 
   // 2. Infrastructure, in as many reviewed rounds as staging requires.
   let rounds = 0;
-  let certificatePending = false;
-  for (; rounds < 6; rounds++) {
+  const pendingCertificates = new Set<string>();
+  const limit = 6 + 2 * (environmentSpec.domains?.length ?? 0);
+  for (; rounds < limit; rounds++) {
     const usingReviewedPlan = reviewedPlan !== undefined;
     let planned = reviewedPlan ?? await planInfrastructureEngine(ctx, params);
     reviewedPlan = undefined;
@@ -269,13 +278,18 @@ async function runLaunch(ctx: CommandContext, params: {
     if ('blocked' in planned) return { status: 'blocked', message: planned.blocked.join('\n') };
     const pending = planned.actions.filter((action) => action.type !== 'noop');
     const onlyCertificate = pending.length > 0 && pending.every((action) => action.metadata?.operation === 'gcpDomainReady');
-    if (pending.length === 0 || (onlyCertificate && certificatePending)) break;
+    if (!pending.length) { pendingCertificates.clear(); break; }
+    if (onlyCertificate && pendingCertificates.size) {
+      pendingCertificates.clear();
+      for (const action of pending) pendingCertificates.add(String(action.metadata?.domain));
+      break;
+    }
     const tokens = planned.actions.filter((action) => planned.confirmActions.includes(action.id)).map(approvalToken);
     const approvedExactly = usingReviewedPlan && JSON.stringify([...(params.confirmActions ?? [])].sort()) === JSON.stringify([...tokens].sort());
     if (tokens.length && !approvedExactly) {
       return {
         status: 'needs_confirmation',
-        planId: planned.planRunId,
+        planId: planned.planRunId, ...ctx.repos.runs.planReport(planned.planRunId),
         confirmActions: tokens,
         changes: pending.map(summarize),
         estimatedMonthlyCost: environmentSpec.hosting.provider === 'azure' ? estimateAzureMonthlyCost(environmentSpec)
@@ -293,7 +307,7 @@ async function runLaunch(ctx: CommandContext, params: {
       });
     } catch (error) {
       if (!isNetworkError(error)) throw error;
-      return { status: 'pending', planId: planned.planRunId, confirmActions: tokens,
+      return { status: 'pending', planId: planned.planRunId, ...ctx.repos.runs.planReport(planned.planRunId), confirmActions: tokens,
         message: 'The infrastructure apply lost its connection. Continue with this same planId and its approved confirmActions so the saved operation can be checked.', receipts: [] };
     }
     if (applied.kind === 'blocked') return { status: 'blocked', message: applied.reason };
@@ -305,11 +319,13 @@ async function runLaunch(ctx: CommandContext, params: {
     if (!applied.result.success && !stillPending.length) return { status: 'blocked', message: 'The saved infrastructure plan did not complete. Inspect its results before continuing.', details: receipts };
     // A slow certificate must not hold back the app itself; anything else stops here.
     if (stillPending.some((receipt) => !receipt.actionId.startsWith('domain-ready:'))) {
-      return { status: 'pending', planId: planned.planRunId, confirmActions: tokens, message: 'Some changes are still settling. Continue with this same planId and its approved confirmActions.', receipts };
+      return { status: 'pending', planId: planned.planRunId, ...ctx.repos.runs.planReport(planned.planRunId), confirmActions: tokens, message: 'Some changes are still settling. Continue with this same planId and its approved confirmActions.', receipts };
     }
-    certificatePending = stillPending.length > 0;
+    pendingCertificates.clear();
+    for (const receipt of stillPending) pendingCertificates.add(receipt.actionId.slice('domain-ready:'.length));
   }
 
+  if (rounds === limit) return { status: 'blocked', message: 'Further infrastructure stages remain unverified. Run hv_launch again to review the next stage.' };
   if (params.stopAfter === 'infrastructure') return { status: 'ready', phase: 'infrastructure', infrastructureRounds: rounds };
 
   // 3. Release the current code and verify it.
@@ -330,13 +346,15 @@ async function runLaunch(ctx: CommandContext, params: {
     if ('status' in ci) return ci;
     ciWorkflow = ci;
   }
-  const domain = environmentSpec.domain?.trim().toLowerCase();
-  if (domain && !certificatePending) urls.custom = `https://${domain}`;
+  const domains = environmentDomains(environmentSpec).map(({ domain }) => ({ name: domain,
+    status: pendingCertificates.has(domain) ? 'certificate_pending' as const : 'serving' as const }));
+  const primary = environmentSpec.domain ? domains[0] : undefined;
+  if (primary?.status === 'serving') urls.custom = `https://${primary.name}`;
   return {
     status: 'live',
     urls,
     releases: released.results,
-    ...(domain ? { domain: { name: domain, status: certificatePending ? 'certificate_pending' as const : 'serving' as const } } : {}),
+    ...(primary ? { domain: primary } : {}), ...(environmentSpec.domains?.length ? { domains } : {}),
     infrastructureRounds: rounds,
     ...(ciWorkflow ? { ciWorkflow } : {}),
   };
@@ -346,13 +364,28 @@ async function runLaunch(ctx: CommandContext, params: {
 async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], environmentSpec: EnvironmentSpec,
   approvedAccess: Set<string>, resourceAccess: Array<{ id: string; label: string }>): Promise<LaunchResult | undefined> {
   // 1. Select billing, then review and approve the exact project setup plan.
-  // Only a connection scoped to this repository counts; global ones point at other projects.
-  if (!await engineGcpAdapter(params.project)) {
-    const preview = await runGcpBootstrap({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project });
+  const environmentProjectId = environmentSpec.hosting.gcpProjectId;
+  const region = environmentSpec.hosting.region ?? 'us-central1';
+  const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
+  const binding = environment?.platformBindings;
+  const boundConflict = gcpEnvironmentBindingConflict(binding, environmentProjectId, region)
+    ?? gcpUnboundStateConflict(environment, environmentProjectId);
+  if (boundConflict) return { status: 'blocked', message: boundConflict };
+  const bootstrapTarget = environmentProjectId ? { environment: params.environmentName, environmentProjectId } : {};
+  const preparationTarget = environmentProjectId ? { environmentName: params.environmentName, environmentProjectId } : {};
+  const adapter = await engineGcpAdapter(params.project, environmentProjectId);
+  if (binding?.projectId && adapter && !environmentProjectId) {
+    const conflict = gcpEnvironmentBindingConflict(binding, adapter.engineConnection().projectId, region);
+    if (conflict) return { status: 'blocked', message: conflict };
+  }
+  if (!adapter) {
+    const preview = await runGcpBootstrap({ ...bootstrapTarget, region, project: params.project });
     if (!preview.success) return { status: 'blocked', message: String(preview.error ?? 'GCP setup preview failed.'), details: preview };
     const target = (preview as { target?: { projectId?: string } }).target?.projectId;
     const accounts = ((preview as { openBillingAccounts?: Array<{ name: string; displayName?: string }> }).openBillingAccounts ?? []);
     if (!target) return { status: 'blocked', message: 'GCP setup could not choose a project id.', details: preview };
+    const conflict = gcpEnvironmentBindingConflict(binding, target, region);
+    if (conflict) return { status: 'blocked', message: conflict };
     if (!params.billingAccountName) {
       if (accounts.length === 0) {
         return { status: 'blocked', message: 'Your Google login cannot see any open billing account. Open https://console.cloud.google.com/billing to create one or get access, then run hv_launch again.' };
@@ -365,36 +398,42 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       };
     }
     const setupApproved = approvedAccess.has('gcp-setup');
-    const setup = await runGcpBootstrap({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: setupApproved });
-    if (!setup.success) return { status: 'blocked', message: String(setup.error ?? 'GCP setup failed.'), details: setup };
+    const setup = await runGcpBootstrap({ ...bootstrapTarget, region, project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: setupApproved,
+      ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
+    });
+    if (!setup.success) return {
+      status: 'blocked', message: String(setup.error ?? 'GCP setup failed.'), details: setup,
+      next: setup.projectRecovery ? ['hv_connections'] : undefined,
+    };
     if (!setupApproved) return {
       status: 'needs_access', accessId: 'gcp-setup',
       access: 'Create the Google Cloud project prerequisites and attach the selected billing account through this reviewed OpenTofu plan. Billing selection does not approve infrastructure or permissions.',
       grants: setup,
+      ...(setup.requiresPlanId === true && typeof setup.planId === 'string' ? {
+        confirmationHint: `Review the remaining setup. After approval, pass gcpSetupPlanId ${JSON.stringify(setup.planId)} with approveAccess including "gcp-setup".`,
+      } : {}),
     };
   }
 
   // A connected project can host several environments in different regions.
   // Each regional repository belongs to retained project-shared engine state.
-  const region = environmentSpec.hosting.region ?? 'us-central1';
-  if (!isCloudPreparedForRegion(ctx.repos.projects.findById(params.project.id) ?? params.project, region)) {
+  if (!isCloudPreparedForRegion(ctx.repos.projects.findById(params.project.id) ?? params.project, region, environmentProjectId)) {
     const confirm = approvedAccess.has('gcp-region');
-    const prepared = await runCloudPrepare({ project: params.project, provider: 'cloudrun',
-      gcpProjectId: await scopedGcpProjectId(params.project), region, adminAuth: 'default', confirm });
+    const prepared = await runCloudPrepare({ ...preparationTarget, project: params.project, provider: 'cloudrun',
+      gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), region, adminAuth: 'default', confirm });
     if (!prepared.success) return { status: 'blocked', message: String(prepared.error ?? 'Regional Google Cloud setup failed.'), details: prepared };
     if (!confirm) return { status: 'needs_access', accessId: 'gcp-region',
       access: `Prepare build resources in ${region} using this saved OpenTofu plan. Shared resources in other regions are retained.`, grants: prepared };
   }
 
   // DNS access is scoped independently from the hosting project.
-  const domainName = environmentSpec.domain?.trim().toLowerCase();
-  if (domainName) {
-    if (!environmentSpec.dns) return { status: 'blocked', message: 'Set environment.dns to the exact DNS provider and zone for this domain. Hosting does not select DNS.' };
+  for (const { domain: domainName, dns } of environmentDomains(environmentSpec)) {
+    if (!dns) return { status: 'blocked', message: 'Set environment.dns to the exact DNS provider and zone for this domain. Hosting does not select DNS.' };
     const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
-    const connection = await resolveDnsConnection({ context: ctx, zone: dnsZoneIdentity(environmentSpec.dns),
-      connectionScope: environmentSpec.dns.connectionScope, scopeHints: [repository, domainName, environmentSpec.dns.zone.name].filter((value): value is string => Boolean(value)) });
+    const connection = await resolveDnsConnection({ context: ctx, zone: dnsZoneIdentity(dns),
+      connectionScope: dns.connectionScope, scopeHints: [repository, domainName, dns.zone.name].filter((value): value is string => Boolean(value)) });
     if ('blocked' in connection) {
-      if (environmentSpec.dns.provider !== 'cloudflare') return { status: 'needs_connection', provider: environmentSpec.dns.provider, message: connection.blocked };
+      if (dns.provider !== 'cloudflare') return { status: 'needs_connection', provider: dns.provider, message: connection.blocked };
       const connected = await connectCloudflareInBrowser({ domain: domainName, waitMs: 3 * 60 * 1000, context: {
         project: params.project.name, ...(repository ? { repository } : {}), environment: params.environmentName,
         purpose: `serve the ${params.environmentName} environment at ${domainName}`,
@@ -410,7 +449,7 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       ready: isCloudPreparedForStorage, options: { gcsAccess: 'lifecycle' as const },
       description: 'Let Hypervibe manage the app storage buckets and let the app read and write its files.' },
     { id: 'storage-s3' as const, needed: Object.values(environmentSpec.storage ?? {}).some((storage) => storage.access === 's3'),
-      ready: isCloudPreparedForStorageS3, options: { gcsAccess: 's3' as const },
+      options: { gcsAccess: 's3' as const },
       description: 'Let Hypervibe manage S3-compatible credentials for the app storage.' },
     { id: 'memorystore' as const, needed: Boolean(environmentSpec.cache),
       ready: isCloudPreparedForCache, options: { memorystoreAccess: 'lifecycle' as const },
@@ -419,16 +458,31 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       ready: isCloudPreparedForWorkerWake, options: { workerAccess: 'lifecycle' as const },
       description: 'Let Hypervibe manage the scheduled checks and permissions for workers that run only while they have work.' },
     { id: 'queues' as const, needed: Object.keys(environmentSpec.queues ?? {}).length > 0,
-      ready: (project: Project) => isCloudPreparedForQueues(project, 'cloudrun'), options: { queueAccess: 'lifecycle' as const },
+      ready: (project: Project, projectId?: string) => isCloudPreparedForQueues(project, 'cloudrun', projectId), options: { queueAccess: 'lifecycle' as const },
       description: 'Let Hypervibe manage Pub/Sub queues and let the app send and receive messages.' },
   ];
+  const storageS3Access = async () => {
+    const context = await resolveEngineContext(ctx, params.project, params.spec, params.environmentName);
+    if ('blocked' in context) return { state: 'blocked' as const, message: context.blocked };
+    return observeStorageS3Access(await context.adapter.engineAccessToken(), context, params.environmentName, environmentSpec);
+  };
   for (const request of accessRequests) {
-    if (!request.needed || request.ready(ctx.repos.projects.findById(params.project.id) ?? params.project)) continue;
+    if (!request.needed) continue;
+    if (request.id === 'storage-s3') {
+      const access = await storageS3Access();
+      if (access.state === 'ready') continue;
+      if (access.state === 'blocked') return { status: 'blocked', message: access.message };
+    } else if (request.ready(ctx.repos.projects.findById(params.project.id) ?? params.project, environmentProjectId)) continue;
     const confirm = approvedAccess.has(request.id);
-    const result = await runCloudPrepare({ region: environmentSpec.hosting.region ?? 'us-central1', project: params.project, provider: 'cloudrun',
-      gcpProjectId: await scopedGcpProjectId(params.project), ...request.options, adminAuth: 'default', confirm });
+    const result = await runCloudPrepare({ ...preparationTarget, region, project: params.project, provider: 'cloudrun',
+      gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), ...request.options, adminAuth: 'default', confirm });
     if (!result.success) return { status: 'blocked', message: String(result.error ?? 'Google Cloud access setup failed.'), details: result };
     if (!confirm) return { status: 'needs_access', accessId: request.id, access: request.description, grants: result };
+    if (request.id === 'storage-s3') {
+      const verified = await storageS3Access();
+      if (verified.state === 'blocked') return { status: 'blocked', message: verified.message };
+      if (verified.state === 'needs_access') return { status: 'blocked', message: 'The S3 access grant is not yet effective for the deploy identity. Retry after the Google Cloud permission takes effect.' };
+    }
   }
   return undefined;
 }
@@ -439,8 +493,9 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
  * fallback is approveAccess "aws-setup" for the account it was shown for.
  */
 async function prepareAwsLaunch(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], approvedAccess: Set<string>): Promise<LaunchResult | undefined> {
-  const existing = await resolveAwsEngineContext(ctx, params.project, params.environmentName);
+  const existing = await resolveAwsEngineContext(ctx, params.project, params.environmentName, params.spec);
   if (!('blocked' in existing)) return undefined;
+  if (existing.placement) return { status: 'blocked', message: existing.blocked };
   const shownAccount = approvedAccess.has('aws-setup') ? params.awsAccountId : undefined;
   if (approvedAccess.has('aws-setup') && !shownAccount) return { status: 'blocked', message: 'Approving AWS setup needs the awsAccountId it was shown for.' };
   const connected = await connectAws({ project: params.project, spec: params.spec, ...(shownAccount ? { approveAccountId: shownAccount } : {}) });
@@ -538,19 +593,33 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
   const environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const binding = (environment.platformBindings as { engine?: EngineBinding; services?: Record<string, { serviceId?: string }> });
   let ci = binding.engine?.ci;
-  if (ci?.repository !== repository) {
+  const github = getGitHubAdapter(repository);
+  if ('error' in github) return { status: 'blocked', message: github.error };
+  const [owner, repo] = repository.split('/');
+  const observed = await github.adapter.getRepository(owner!, repo!).catch(() => undefined);
+  if (!observed || observed.full_name?.toLowerCase() !== repository.toLowerCase() || !Number.isSafeInteger(observed.id) || observed.id! <= 0) {
+    return { status: 'blocked', message: 'GitHub could not verify the exact repository identity for CI access.' };
+  }
+  const repositoryId = String(observed.id);
+  const releases = Object.entries(params.spec.environments).filter(([, env]) => env.hosting.provider === 'cloudrun' && env.deploy?.strategy === 'branch')
+    .sort(([a], [b]) => a.localeCompare(b)).map(([environmentName, env]) => ({
+      environmentName, branch: env.deploy!.branch ?? 'main', autoDeploy: effectiveBranchCiAutoDeploy(environmentName, env.deploy!.autoDeploy),
+    }));
+  const trust = createHash('sha256').update(JSON.stringify([repositoryId, repository, releases])).digest('hex');
+  if (!ci || ci.trust !== trust) {
     try {
       const confirm = params.approveAccess?.includes('ci-release') === true;
       const granted = await grantCiReleaseAccess({
-        projectId: params.project.id, adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository,
+        projectId: params.project.id, projectName: params.project.name, adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository: observed.full_name!, repositoryId, releases,
         runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, confirm,
       });
       if (!confirm) return {
         status: 'needs_access', accessId: 'ci-release',
         access: `Let GitHub Actions in ${repository} push images and release this app without storing a key in GitHub.`,
-        grants: { ...previewCiReleaseAccess(context.gcpProjectId, repository, context.runtimeServiceAccountEmail), planId: granted.planId, actions: granted.actions },
+        grants: { ...previewCiReleaseAccess(context.gcpProjectId, observed.full_name!, context.runtimeServiceAccountEmail, releases),
+          gcpProjectId: context.gcpProjectId, planId: granted.planId, htmlPath: granted.htmlPath, actions: granted.actions },
       };
-      ci = { repository, provider: granted.provider, releaseIdentity: granted.releaseIdentity };
+      ci = { repository, trust, provider: granted.provider, releaseIdentity: granted.releaseIdentity };
     } catch (error) {
       return { status: 'blocked', message: error instanceof Error ? error.message : String(error) };
     }
@@ -568,7 +637,7 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
   const releaseCommand = ciReleaseCommand(environmentSpec, binding.engine?.releaseJob, services);
   if (releaseCommand && 'blocked' in releaseCommand) return { status: 'blocked', message: releaseCommand.blocked };
   const content = renderReleaseWorkflow({
-    environmentName: params.environmentName, branch, gcpProjectId: context.gcpProjectId, region: context.region,
+    environmentName: params.environmentName, branch, autoDeploy: environmentSpec.deploy?.autoDeploy, gcpProjectId: context.gcpProjectId, region: context.region,
     provider: ci.provider, releaseIdentity: ci.releaseIdentity, services,
     ...(packageTokenSecret ? { packageTokenSecret } : {}),
     ...(releaseCommand ? { releaseCommand } : {}),

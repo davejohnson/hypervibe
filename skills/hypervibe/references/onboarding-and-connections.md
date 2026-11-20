@@ -46,8 +46,11 @@ credential; follow the result's actual category.
 
 ## Connect only the required access
 
-Use the selected project's `hv_connections` results and the current plan's
-`connectionSetup` requirements. Existing unverified access needs verification;
+Call `hv_connections` with `project` and `view="requirements"` to see which
+connections the spec needs. Add `environment` to check one environment. The CLI
+equivalent is `hypervibe connections --project <project> --view requirements`.
+The default view lists saved connections and the provider catalog. Use the
+current plan's `connectionSetup` guidance. Existing unverified access needs verification;
 failed or unknown access does not prove a resource is absent. Do not replace a
 connection or restart setup merely because a credential expires locally.
 
@@ -61,6 +64,14 @@ Use the selected provider's declared bootstrap when available. Hypervibe owns
 its generated project and credential creation. Preserve the preview's exact
 project/account and repository scope. Do not assume a provider supports a
 bootstrap or local setup action merely because another provider does.
+
+If Google created the project but billing setup failed, preview bootstrap again
+with the same project, region and selected billing account. When Hypervibe
+returns `projectRecovery`, explain which existing project the local repair
+will retain. After approval, use its exact `retryCall` to repair the local
+record and obtain a fresh plan. Review the plan and its billing changes
+separately. When the preview returns `requiresPlanId`, use its exact
+`confirmCall`, which includes the new `gcpSetupPlanId`, after approval.
 
 If the current tool schema and result explicitly offer a local authentication
 recipe, follow its bounded continuation. Reuse valid login, verify the shell

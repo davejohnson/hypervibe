@@ -5,8 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
+import { SpecStore } from '../../domain/spec/spec.store.js';
+import { CommandRegistry } from '../commands.js';
+import { registerHvSecretsTools } from '../../tools/hv-secrets.tools.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { createCommandContext } from '../context.js';
+import * as cloudRun from '../../adapters/providers/gcp/gcp-cloud-run.client.js';
 import * as secretManager from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
 import * as infrastructure from '../infrastructure-engine.js';
 import * as launch from '../launch.js';
@@ -94,7 +98,23 @@ function fixture(importedSecrets: string[], generatedSecrets: string[] = [], gen
   const page = vi.spyOn(pastePage, 'serveMultiPastePage').mockResolvedValue({ status: 'waiting', provider: 'secret', scope: 'staging', message: 'Waiting for private input' });
   const rotate = (params: Omit<Parameters<typeof rotateSecrets>[1], 'project' | 'environmentName'> = {}) => rotateSecrets(ctx, { project, environmentName: 'staging', ...params });
   const rotation = () => (ctx.repos.environments.findById(environment.id)!.platformBindings as { engine: infrastructure.EngineBinding }).engine.rotation;
-  return { rotate, rotation, page, write, latest, enabledVersions, accepted, failedWrites, launchSpy };
+  const protect = (key: string) => new SpecStore().merge(project, { secrets: { [key]: {
+    ownership: 'hypervibe', generator: 'random-base64url-32-v1', environments: [generatedEnvironment], replacementPolicy: 'immutable',
+  } } });
+  const registry = new CommandRegistry();
+  registerHvSecretsTools(registry, ctx);
+  const command = (action: 'rotate' | 'ages', input: Record<string, unknown> = {}) =>
+    registry.execute('hv_secrets', { project: project.name, env: 'staging', action, ...input });
+  const observePinnedWorkload = (keys: string[], version = '1') => {
+    ctx.repos.environments.updatePlatformBindings(environment.id, { services: { web: { serviceId: 'web' } } });
+    vi.spyOn(cloudRun, 'cloudRunGet').mockResolvedValue({ state: 'present', value: {
+      latestReadyRevision: 'web-1', latestCreatedRevision: 'web-1', template: { containers: [{ env: keys.map((key) => ({
+        valueSource: { secretKeyRef: { secret: infrastructure.engineSecretId('staging', key), version } },
+      })) }] },
+    } });
+  };
+  const binding = () => (ctx.repos.environments.findById(environment.id)!.platformBindings as { engine: infrastructure.EngineBinding }).engine;
+  return { command, protect, environment, binding, observePinnedWorkload, rotate, rotation, page, write, latest, enabledVersions, accepted, failedWrites, launchSpy };
 }
 
 const waiting = { status: 'waiting' as const, provider: 'secret', scope: 'staging', message: 'Waiting for private input' };
@@ -165,6 +185,169 @@ describe('rotation generation requires declared ownership', () => {
     expect(f.write).not.toHaveBeenCalled();
     expect(result).toMatchObject({ status: 'needs_input', keys: ['JWT_SECRET'] });
     expect(f.launchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('immutable generated secrets through the registered rotation command', () => {
+  const protectedKey = 'DOCUMENT_ENCRYPTION_KEY';
+  const mutableKey = 'SESSION_SECRET';
+
+  it.each([{ key: protectedKey }, { keys: [mutableKey, protectedKey] }])('rejects an explicit immutable selection before any effect', async (input) => {
+    const f = fixture([protectedKey], [mutableKey, protectedKey]);
+    f.protect(protectedKey);
+    expect(await f.command('rotate', input)).toMatchObject({ ok: false, error: { message: expect.stringContaining(protectedKey) } });
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.launchSpy).not.toHaveBeenCalled();
+    expect(f.enabledVersions).not.toHaveBeenCalled();
+    expect(f.rotation()).toBeUndefined();
+  });
+
+  it('omits the immutable key from default rotation, retirement and overdue advice', async () => {
+    const f = fixture([], [protectedKey, mutableKey]);
+    f.protect(protectedKey);
+    f.observePinnedWorkload([protectedKey, mutableKey]);
+    expect(await f.command('ages')).toMatchObject({ data: { secrets: expect.arrayContaining([
+      expect.objectContaining({ key: protectedKey, kind: 'generated', overdue: false }),
+      expect.objectContaining({ key: mutableKey, kind: 'generated', overdue: true }),
+    ]) } });
+    expect(await f.command('rotate')).toMatchObject({ ok: true, data: { status: 'rotated', rotated: [mutableKey] } });
+    expect(f.accepted.map(({ key }) => key)).toEqual([mutableKey]);
+    expect(f.enabledVersions.mock.calls.map(([, , id]) => id)).toEqual([infrastructure.engineSecretId('staging', mutableKey)]);
+    expect(f.launchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('leaves a default selection of only immutable keys untouched even if the age read fails', async () => {
+    const f = fixture([], [protectedKey]);
+    f.protect(protectedKey);
+    f.latest.mockResolvedValue(new Response(null, { status: 403 }));
+    expect(await f.command('rotate')).toMatchObject({ ok: false, error: { message: expect.stringContaining(protectedKey) } });
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.launchSpy).not.toHaveBeenCalled();
+    expect(f.rotation()).toBeUndefined();
+  });
+
+  it.each([true, false])('uses current policy when inventory changes before starting (explicit: %s)', async (explicit) => {
+    const f = fixture([], [protectedKey, mutableKey]);
+    f.latest.mockImplementationOnce(async () => {
+      f.protect(protectedKey);
+      return Response.json({ createTime: oldCreatedAt });
+    });
+    const result = await f.command('rotate', explicit ? { keys: [protectedKey, mutableKey] } : {});
+    if (explicit) {
+      expect(result).toMatchObject({ ok: false, error: { message: expect.stringContaining(protectedKey) } });
+      expect(f.write).not.toHaveBeenCalled();
+    } else {
+      expect(result).toMatchObject({ ok: true, data: { rotated: [mutableKey] } });
+      expect(f.accepted.map(({ key }) => key)).toEqual([mutableKey]);
+    }
+    expect(f.rotation()).toBeUndefined();
+  });
+
+  it.each(['generated', 'pasted'])('rechecks policy after the native container read before a %s value write', async (source) => {
+    const f = source === 'generated' ? fixture([], [protectedKey]) : fixture([protectedKey]);
+    f.write.mockRestore();
+    const resource = `projects/rotation-fixture/secrets/${infrastructure.engineSecretId('staging', protectedKey)}`;
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        urls.push(url);
+        return Response.json({ name: `${resource}/versions/2` });
+      }
+      if (url.endsWith('/versions/latest')) {
+        f.protect(protectedKey);
+        return Response.json({ name: `${resource}/versions/1`, state: 'ENABLED' });
+      }
+      return Response.json({ name: resource, labels: { 'managed-by': 'hypervibe', 'hv-environment': f.environment.id } });
+    }));
+    if (source === 'pasted') {
+      f.page.mockImplementationOnce(async (page) => {
+        const saved = await page.accept(protectedKey, 'synthetic-provider-value');
+        return saved.ok ? connected : waiting;
+      });
+    }
+    const result = await f.command('rotate', { keys: [protectedKey] });
+    expect(result).toMatchObject({ ok: false, error: { message: expect.stringContaining(protectedKey) } });
+    expect(urls).toEqual([]);
+    expect(f.binding().secretMetadata).toBeUndefined();
+    expect(f.launchSpy).not.toHaveBeenCalled();
+    expect(f.rotation()?.keys).toEqual([protectedKey]);
+  });
+
+  it.each([true, false])('preserves a partial rotation record when a selected key becomes immutable (already saved: %s)', async (saved) => {
+    const f = fixture(['EXTERNAL_TOKEN'], [protectedKey, mutableKey]);
+    if (!saved) f.failedWrites.add(protectedKey);
+    await f.command('rotate');
+    const interrupted = f.rotation();
+    expect(interrupted?.keys).toContain(protectedKey);
+    f.protect(protectedKey);
+    f.failedWrites.clear();
+    f.write.mockClear();
+    f.page.mockClear();
+    expect(await f.command('rotate', { keys: [mutableKey] })).toMatchObject({ ok: false, error: { message: expect.stringContaining(protectedKey) } });
+    expect(f.rotation()).toEqual(interrupted);
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.page).not.toHaveBeenCalled();
+    expect(f.launchSpy).not.toHaveBeenCalled();
+    expect(f.enabledVersions).not.toHaveBeenCalled();
+  });
+
+  it('blocks replacement of a protected companion when its external key is selected', async () => {
+    const f = fixture([parentKey, companionKey], [companionKey]);
+    f.protect(companionKey);
+    expect(await f.command('rotate', { keys: [parentKey] })).toMatchObject({ ok: false, error: { message: expect.stringContaining(companionKey) } });
+    expect(f.page).not.toHaveBeenCalled();
+    expect(f.rotation()).toBeUndefined();
+  });
+
+  it('rechecks protection before saving an already-open private form or rolling out its result', async () => {
+    const f = fixture([parentKey, companionKey]);
+    f.page.mockImplementationOnce(async (page) => {
+      f.protect(companionKey);
+      expect(await page.accept(companionKey, 'synthetic-replacement')).toMatchObject({ ok: false });
+      return connected;
+    });
+    expect(await f.command('rotate', { keys: [parentKey] })).toMatchObject({ ok: false, error: { message: expect.stringContaining(companionKey) } });
+    expect(f.write).not.toHaveBeenCalled();
+    expect(f.launchSpy).not.toHaveBeenCalled();
+    expect(f.enabledVersions).not.toHaveBeenCalled();
+  });
+
+  it('preserves old versions when policy changes while checking workload adoption', async () => {
+    const f = fixture([], [protectedKey]);
+    f.observePinnedWorkload([protectedKey], '2');
+    f.enabledVersions.mockImplementationOnce(async (_token, _projectId, secretId) => {
+      f.protect(protectedKey);
+      return Response.json({ versions: [{ name: `projects/rotation-fixture/secrets/${secretId}/versions/1` }] });
+    });
+    expect(await f.command('rotate')).toMatchObject({ ok: false, error: { message: expect.stringContaining(protectedKey) } });
+    expect(secretManager.disableSecretVersion).not.toHaveBeenCalled();
+    expect(f.rotation()?.keys).toContain(protectedKey);
+  });
+
+  it('reports a partial retirement and preserves the remaining version after the policy changes', async () => {
+    const f = fixture([], [protectedKey]);
+    f.observePinnedWorkload([protectedKey], '3');
+    const versionPath = `projects/rotation-fixture/secrets/${infrastructure.engineSecretId('staging', protectedKey)}/versions`;
+    f.enabledVersions.mockResolvedValueOnce(Response.json({ versions: [{ name: `${versionPath}/1` }, { name: `${versionPath}/2` }] }));
+    vi.mocked(secretManager.disableSecretVersion).mockImplementationOnce(async () => {
+      f.protect(protectedKey);
+      return Response.json({});
+    });
+    const result = await f.command('rotate');
+    expect(result).toMatchObject({ ok: false, error: { message: expect.stringContaining('1 old version') } });
+    expect(secretManager.disableSecretVersion).toHaveBeenCalledExactlyOnceWith(expect.any(String), `${versionPath}/1`);
+    expect(f.rotation()?.keys).toContain(protectedKey);
+  });
+
+  it('blocks retirement if a selected key becomes immutable during rollout', async () => {
+    const f = fixture([], [protectedKey]);
+    f.launchSpy.mockImplementation(async () => {
+      f.protect(protectedKey);
+      return { status: 'ready', phase: 'infrastructure', infrastructureRounds: 1 };
+    });
+    expect(await f.command('rotate')).toMatchObject({ ok: false, error: { message: expect.stringContaining(protectedKey) } });
+    expect(f.enabledVersions).not.toHaveBeenCalled();
+    expect(f.rotation()?.keys).toContain(protectedKey);
   });
 });
 

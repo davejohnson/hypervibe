@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +7,9 @@ import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { ConvergeExecutor } from '../../domain/plan/converge.executor.js';
 import { createCommandContext } from '../context.js';
 import { ENGINE_PLAN_SCOPE, planEngineSecrets, recordEnginePlan } from '../engine-shared.js';
+import { runPlanReportPath } from '../../adapters/storage/plan-report-files.js';
+import { buildCloudRunConfiguration, storageEngineKey } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { parseEnginePlan, translateEnginePlan } from '../../adapters/engine/opentofu/plan-mapping.js';
 
 let directory: string;
 beforeEach(() => {
@@ -82,6 +85,58 @@ describe('shared engine plan recording', () => {
   });
 
   it('confirms every action of a teardown', () => {
-    expect(record('all').confirmActions).toEqual(['secret:A', 'service:web', 'service:worker']);
+    const result = record('all');
+    expect(result.confirmActions).toEqual(['secret:A', 'service:web', 'service:worker']);
+    const saved = createCommandContext().repos.runs.findById(result.planRunId)!;
+    expect(saved.plan).toMatchObject({ reviewConfirmActions: result.confirmActions });
+    expect(readFileSync(runPlanReportPath(saved.id), 'utf8')).toContain('Confirmation required <b>3</b>');
+  });
+
+  it.each([
+    { provider: 'gcp', target: 'reports-demo-project' },
+    { provider: 'aws', target: '111122223333' },
+    { provider: 'azure', target: '51b1a746-9a7d-4558-8b83-6d76d21775c5' },
+  ])('reports the exact $provider target and action confirmations shown by its saved plan', ({ provider, target }) => {
+    const ctx = createCommandContext();
+    const project = ctx.repos.projects.create({ name: 'report-test' });
+    const env = ctx.repos.environments.create({ projectId: project.id, name: 'staging' });
+    let planActions = actions;
+    const engine = provider === 'gcp' ? { gcpProjectId: target }
+      : provider === 'azure' ? { azure: { subscriptionId: target, resourceGroup: 'test-group' } }
+      : { aws: { accountId: target }, teardown: true };
+    if (provider === 'gcp') {
+      const bucket = 'uploads';
+      const configuration = buildCloudRunConfiguration({ projectId: target, region: 'us-central1', services: [],
+        runtimeServiceAccountEmail: `runtime@${target}.iam.gserviceaccount.com`,
+        storage: [{ name: bucket, bucketName: 'reports-demo-uploads', location: 'us-central1', injectInto: [] }] });
+      const parsed = parseEnginePlan(JSON.stringify({ resource_changes: [{ type: 'google_storage_bucket',
+        address: `google_storage_bucket.${storageEngineKey(bucket)}`, change: { actions: ['create'], after: { name: 'reports-demo-uploads' } } }] }));
+      const translated = translateEnginePlan({ provider, configuration, parsed, segment: { id: 'fixture', engine: 'opentofu',
+        planDigest: 'a'.repeat(64), configurationDigest: 'b'.repeat(64), engineVersion: '1.12', providerVersions: {} } });
+      expect(translated.blockers).toEqual([]);
+      planActions = translated.actions;
+    } else {
+      planActions = actions.map(action => ({ ...action, resource: { ...action.resource, provider } }));
+    }
+    const result = recordEnginePlan({ projectId: project.id, environmentId: env.id, environmentName: env.name,
+      specRevision: 1, actions: planActions, warnings: [], engine, ...(provider === 'aws' ? { confirm: 'all' } : {}) });
+    const expected = provider === 'gcp' ? ['storage:uploads']
+      : provider === 'aws' ? ['secret:A', 'service:web', 'service:worker'] : ['service:worker'];
+    expect(result.confirmActions).toEqual(expected);
+    function expectReview() {
+      const html = readFileSync(runPlanReportPath(result.planRunId), 'utf8');
+      expect.soft(html.includes(`<dt>Target</dt><dd>${target}</dd>`)).toBe(true);
+      const confirmed = [...html.matchAll(/<li id="action-\d+"[\s\S]*?<\/details><\/li>/g)]
+        .map(([row]) => row).filter(row => row.includes('Confirmation required'))
+        .map(row => /<dt>Action ID<\/dt><dd><code>([^<]+)<\/code>/.exec(row)?.[1]);
+      expect(confirmed).toEqual(expected);
+    }
+    expectReview();
+    // Also export the previous version's stored document without a frozen report confirmation list.
+    const saved = ctx.repos.runs.findById(result.planRunId)!;
+    const { reviewConfirmActions: _newField, ...legacy } = saved.plan as Record<string, unknown>;
+    SqliteAdapter.getInstance().getDb().prepare('UPDATE runs SET plan = ? WHERE id = ?').run(JSON.stringify(legacy), saved.id);
+    ctx.repos.runs.planReport(saved.id, true);
+    expectReview();
   });
 });

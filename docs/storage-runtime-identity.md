@@ -49,6 +49,14 @@ would require separately observed and reconciled bucket IAM desired state;
 that lifecycle is not implemented here. Inspection-only preparation does not
 grant runtime object access.
 
+For `access: s3`, Hypervibe checks for the environment's published key pair.
+If it needs to create a key, the infrastructure preview checks the deploy
+identity's `storage.hmacKeys.create` permission on the target project. Applying
+a saved plan checks again before making changes. If Google reports the
+permission is missing, guided launch previews the project-scoped
+`gcsAccess="s3"` grant for approval. If Google cannot verify access, retry
+the check. [Google Cloud HMAC key creation permissions](https://docs.cloud.google.com/storage/docs/json_api/v1/projects/hmacKeys/create)
+
 Independent contracts:
 
 - [Cloud Run service identity and ADC](https://cloud.google.com/run/docs/securing/service-identity)

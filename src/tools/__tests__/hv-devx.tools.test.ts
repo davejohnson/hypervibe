@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseToolEnvelope } from './tool-result.js';
-import { mkdtempSync, rmSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createMcpCommandRegistrar } from '../../interfaces/mcp/adapter.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { getDb, SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { runPlanReportPath } from '../../adapters/storage/plan-report-files.js';
+import { engineStatePaths } from '../../adapters/engine/opentofu/workspace.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
 import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { RunRepository } from '../../adapters/db/repositories/run.repository.js';
@@ -15,6 +17,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { createToolContext } from '../../application/context.js';
 import { registerHvDevxTools } from '../hv-devx.tools.js';
 import { CommandRegistry } from '../../application/commands.js';
+import { runCli } from '../../interfaces/cli/run.js';
 
 let tempDir: string;
 
@@ -62,6 +65,135 @@ async function seedRuns() {
 }
 
 describe('hv_runs', () => {
+  it('exports an earlier saved plan by its exact ID even when it predates HTML reports', async () => {
+    const { project, environment, older } = await seedRuns();
+    const oldId = '2aa09059-899d-4bab-b8f0-e5b2aba13316';
+    const document = { kind: 'hv_plan', scope: 'full', specRevision: 1, observedFingerprint: null,
+      environmentName: environment.name, actions: [{ id: 'service:original', type: 'create', verified: true,
+        resource: { kind: 'service', name: 'original', provider: 'railway' }, reason: 'Create the original service.' }] };
+    // Insert a pre-report row directly, as an older installed version would have saved it.
+    getDb().prepare(`INSERT INTO runs (id, project_id, environment_id, type, status, plan, receipts, created_at)
+      VALUES (?, ?, ?, 'plan', 'succeeded', ?, '[]', '2024-01-01T00:00:00.000Z')`)
+      .run(oldId, project.id, environment.id, JSON.stringify(document));
+    const newer = new RunRepository().create({ projectId: project.id, environmentId: environment.id, type: 'plan',
+      plan: { ...document, actions: [], specRevision: 2 } });
+    expect(existsSync(runPlanReportPath(oldId))).toBe(false);
+    expect(existsSync(runPlanReportPath(newer.id))).toBe(true);
+    const t = await makeClient();
+    try {
+      const mismatched = await t.call('hv_runs', { action: 'report', runId: oldId, env: 'production' });
+      expect(mismatched).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
+      expect(existsSync(runPlanReportPath(oldId))).toBe(false);
+      const result = await t.call('hv_runs', { action: 'report', runId: oldId });
+      expect(result.data).toEqual({ planId: oldId, htmlPath: runPlanReportPath(oldId) });
+      const html = readFileSync(result.data.htmlPath, 'utf8');
+      expect(html).toContain('service:original');
+      expect(html).toContain(oldId);
+      expect(html).not.toContain(newer.id);
+      expect(getDb().prepare('SELECT plan FROM runs WHERE id = ?').pluck().get(oldId)).toBe(JSON.stringify(document));
+      const registry = new CommandRegistry();
+      registerHvDevxTools(registry, createToolContext());
+      let stdout = '';
+      const exitCode = await runCli(['runs', '--action', 'report', '--run-id', oldId, '--json'], {
+        registry, initialize: false,
+        io: { writeOut: text => { stdout += text; }, writeErr: vi.fn(), readStdin: async () => '',
+          confirm: async () => false, stdinIsTTY: false },
+      });
+      expect(exitCode).toBe(0);
+      expect(JSON.parse(stdout).data).toEqual(result.data);
+      const nonPlan = await t.call('hv_runs', { action: 'report', runId: older.id });
+      expect(nonPlan).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+      const missingScope = await t.call('hv_runs', { action: 'report', runId: 'setup-abc' });
+      expect(missingScope).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    } finally { await t.close(); }
+  });
+
+  it('explains the next steps and cost when reopening a saved Google Cloud setup plan', async () => {
+    const { project, environment } = await seedRuns();
+    // Redacted messages recorded in a 0.1.52 Google Cloud infrastructure report.
+    const warnings = [
+      'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
+      'Database: 1 vCPU, 3.75 GB, about US$50 a month plus storage. New databases start with 14 daily backups and 7 days of point-in-time recovery; existing backup and recovery settings are preserved. Deletion protection is on.',
+      'Services are connected to the database in the next infrastructure plan, once Hypervibe has created its login. Run hv_plan scope="infrastructure" again after this apply.',
+    ];
+    const plan = { kind: 'hv_plan', scope: 'infrastructure-engine', environmentName: environment.name, warnings,
+      actions: [
+        { id: 'database:postgres', type: 'create', verified: true, resource: { kind: 'database', name: 'postgres', provider: 'gcp' } },
+        { id: 'database-credential:postgres', type: 'create', verified: true, resource: { kind: 'secret', name: 'database login', provider: 'gcp' } },
+        { id: 'service:web', type: 'create', verified: true, resource: { kind: 'service', name: 'web', provider: 'gcp' } },
+      ] };
+    const repo = new RunRepository();
+    const saved = repo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan });
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_runs', { action: 'report', runId: saved.id });
+      const html = readFileSync(result.data.htmlPath, 'utf8');
+      expect(html).toContain('Database cost and protection');
+      expect(html).toContain('US$50 a month plus storage');
+      expect(html).toContain('14 daily backups');
+      expect(html).toContain('7 days');
+      expect(html).toContain('Deletion protection is on.');
+      expect(html).toContain('What happens next');
+      expect(html).toContain('your coding agent prepares');
+      expect(html).toContain('need your approval');
+      expect(html).toContain('Releasing the app, copying production data and switching live traffic are separate steps.');
+      expect(html).not.toContain('Warnings (');
+      expect(html).not.toContain('Run hv_plan');
+      expect(html).not.toContain('run hv_deploy');
+      expect(repo.findById(saved.id)?.plan).toEqual(plan);
+    } finally { await t.close(); }
+  });
+
+  it('refreshes the report when saved actions change and rolls back a failed report write', async () => {
+    const { project, environment } = await seedRuns();
+    const repo = new RunRepository();
+    const plan = { kind: 'hv_plan', scope: 'full', environmentName: environment.name, actions: [] };
+    const input = { projectId: project.id, environmentId: environment.id, type: 'plan', plan };
+    const run = repo.create(input);
+    const htmlPath = runPlanReportPath(run.id);
+    expect(readFileSync(htmlPath, 'utf8')).toContain(run.id);
+    const revised = { ...plan, actions: [{ id: 'service:revised', type: 'update',
+      resource: { kind: 'service', name: 'revised', provider: 'railway' }, verified: true, reason: 'Adjust the service.' }] };
+    repo.updatePlan(run.id, revised);
+    expect(readFileSync(htmlPath, 'utf8')).toContain('service:revised');
+    // A regular file in place of the report directory is unwritable as a directory even under privileged CI.
+    const directory = path.dirname(htmlPath);
+    rmSync(directory, { recursive: true });
+    writeFileSync(directory, '');
+    expect(() => repo.updatePlan(run.id, plan)).toThrow();
+    expect(repo.findById(run.id)?.plan).toEqual(revised);
+    expect(() => repo.create(input)).toThrow();
+    expect(repo.findByProjectId(project.id).filter(saved => saved.type === 'plan')).toHaveLength(1);
+  });
+
+  it('exports a saved setup plan only for its exact local project, cloud project, and plan ID', async () => {
+    const { project } = await seedRuns();
+    const other = new ProjectRepository().create({ name: 'other-app' });
+    const gcpProjectId = 'fixture-cloud-project';
+    const planId = 'setup-090357e3-40de-40dc-8072-f9715031bf02';
+    const intent = '1'.repeat(64);
+    const { plans } = engineStatePaths({ provider: 'gcp', projectId: project.id, environmentId: gcpProjectId,
+      partition: 'project-shared' }, tempDir);
+    mkdirSync(plans, { recursive: true });
+    writeFileSync(path.join(plans, `setup-${intent}.json`), JSON.stringify({ intent, planId,
+      configuration: { files: {} }, planned: { actions: [], blockers: [] } }));
+    const t = await makeClient();
+    vi.stubEnv('HYPERVIBE_DATA_DIR', tempDir);
+    try {
+      const input = { action: 'report', runId: planId, gcpProjectId, project: project.name };
+      for (const wrong of [{ project: other.name }, { gcpProjectId: 'other-project' },
+        { runId: 'setup-ea55653f-5c30-4f8e-a106-9070947c6a25' }]) {
+        expect(await t.call('hv_runs', { ...input, ...wrong })).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
+      }
+      const result = await t.call('hv_runs', input);
+      expect(result.data).toEqual({ planId, htmlPath: path.join(plans, `${planId}.html`) });
+      expect(readFileSync(result.data.htmlPath, 'utf8')).toContain(gcpProjectId);
+    } finally {
+      vi.unstubAllEnvs();
+      await t.close();
+    }
+  });
+
   it('lists seeded runs with the latest run surfaced first', async () => {
     const { newer } = await seedRuns();
     const t = await makeClient();

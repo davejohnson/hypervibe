@@ -47,15 +47,29 @@ replace them with remembered permission tables or dashboard procedures.
    a possibly misspelled project selector.
 2. Express infrastructure intent through `hv_spec`, then obtain a plan with
    `hv_plan`. Present the chosen resources, practical changes, costs where known,
-   and consequential actions. Ordinary names and reversible defaults do not need
+   and consequential actions. Link the local browser report returned in
+   `htmlPath` when presenting a saved plan. To open an older plan, use
+   `hv_runs action="report" runId=<planId>`. For a Google Cloud setup plan,
+   also supply its Hypervibe `project` and native `gcpProjectId`. Setup
+   previews still pending at upgrade can be opened. Earlier versions discarded
+   the action list when a preview was confirmed or replaced, so setup plans
+   already consumed that way before the upgrade have no browser report.
+   Ordinary names and reversible defaults do not need
    another question; billing, ownership, spending, adoption, and destructive
    changes retain their required decisions and confirmations.
 3. Apply the exact reviewed plan with `hv_apply`, supplying only its required
    confirmations after authorization. A stale or changed plan needs a fresh
-   review. Follow explicit prerequisite stages before dependent work.
+   review. When a prerequisite stage succeeds and the requested work includes
+   the next stage, prepare its plan yourself and present any changes that need
+   approval. Preparing the preview does not authorize applying it.
 4. Verify with the appropriate Hypervibe status, health, logs, or CI commands.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.
+
+For a dedicated Google Cloud project, set `hosting.gcpProjectId` on the target
+environment or pass `gcpProjectId` when `hv_migrate` proposes it. Use that
+environment name on setup and preparation calls. Other environments can keep
+their existing repository connection.
 
 Google Cloud uses OpenTofu as its only infrastructure engine. Select
 `hosting.provider: "cloudrun"`; Hypervibe chooses the engine automatically. Do
@@ -145,9 +159,16 @@ Plan DNS through `hv_plan`, apply its saved stage, and plan again to continue th
 consumer workflow. Hypervibe manages OpenTofu privately; no separate installation
 or direct record-writing workaround is needed.
 
-Use `environment.domain` for a hosted app or email domain; DNS selection needs
-it. SendGrid records wait for an observed domain authorization. Existing
+Use `environment.domain` and `environment.dns` for the primary hostname.
+On Cloud Run, put additional hostnames on the same public service with
+`environment.domains: [{ domain, dns }]`. Supply each hostname’s exact DNS
+zone and connection scope. Each mapping and certificate has its own readiness
+check. SendGrid records wait for an observed domain authorization. Existing
 records require explicit exact-ID adoption and preservation of unrelated values.
+
+For SendGrid, read the capability evidence in `hv_inspect({})`. The October 15,
+2026 Email Logs check covered one account search and one message timeline.
+Sender, domain and webhook writes remain live-unverified.
 
 Defaults are public DNS, required HTTPS, proxy off and no wildcards; preserve
 existing DNSSEC and CAA policy. Required security settings block when evidence

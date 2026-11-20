@@ -124,7 +124,8 @@ export async function buildImage(target: AwsBuildTarget, source: AwsBuildSource,
   if ('error' in project || (buildWeb && !project.webCommands)) return { error: buildProjectError };
   await new S3Client(options).send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: source.archive, ContentType: 'application/zip' }));
   if (target.deadlineMs && Date.now() >= target.deadlineMs) return { error: 'The release deadline elapsed after uploading source; no build was started.' };
-  const started = await codebuild.send(new StartBuildCommand({
+  let started;
+  try { started = await codebuild.send(new StartBuildCommand({
     projectName: buildProjectArn(target), sourceTypeOverride: 'S3', sourceLocationOverride: `${bucket}/${key}`,
     environmentVariablesOverride: [
       { name: 'IMAGE_TAG', value: tag, type: 'PLAINTEXT' },
@@ -136,7 +137,14 @@ export async function buildImage(target: AwsBuildTarget, source: AwsBuildSource,
       { name: 'DOCKER_BUILDKIT', value: '1', type: 'PLAINTEXT' },
       ...(target.packageTokenParameter ? [{ name: 'NPM_TOKEN', value: target.packageTokenParameter, type: 'PARAMETER_STORE' as const }] : []),
     ],
-  }));
+  })); } catch (error) {
+    // AWS starts some new accounts with a build limit of zero and raises it only on request.
+    const refused = error as { name?: string; message?: string };
+    if (refused.name !== 'AccountLimitExceededException' || !/more than 0 /.test(refused.message ?? '')) throw error;
+    // The quota page for small Linux builds, the size Hypervibe uses. The general support form leads to a chat assistant instead.
+    const quotaUrl = `https://${region}.console.aws.amazon.com/servicequotas/home/services/codebuild/quotas/L-9D07B6EF`;
+    return { error: `AWS does not let this account run builds yet: its limit in ${region} is zero, which is common for a new account. Open ${quotaUrl}, choose "Request increase at account level" and ask for 5 (free), then run this again once AWS approves it.` };
+  }
   const id = started.build?.id;
   if (!id) return { error: 'CodeBuild did not start the build.' };
   const logsUrl = `https://${region}.console.aws.amazon.com/codesuite/codebuild/projects/${target.prefix}-images/build/${encodeURIComponent(id)}/log?region=${region}`;
@@ -201,6 +209,12 @@ export async function releaseWebService(target: AwsReleaseTarget, name: string, 
   let current = await read();
   if (current?.serviceArn !== serviceArn || current.status?.statusCode !== 'ACTIVE') return { service: name, status: 'unknown', message: 'AWS did not confirm the exact active web service before release.' };
   const deadline = target.deadlineMs ?? Date.now() + 20 * 60_000;
+  // An earlier change may have just finished: AWS lists its old configuration for up to a minute afterwards. Give it three.
+  for (const settleBy = Math.min(deadline, Date.now() + 3 * 60_000); (current.activeConfigurations ?? []).length > 1 && Date.now() + pollMs < settleBy;) {
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    current = await read();
+    if (current?.serviceArn !== serviceArn) return { service: name, status: 'unknown', message: 'AWS did not confirm the exact active web service before release.' };
+  }
   if (!running(current)) {
     const configurations = current.activeConfigurations ?? [];
     if (configurations.length !== 1 || !configurations[0]!.primaryContainer) return { service: name, status: 'unknown', message: `${name} is still rolling out an earlier release; try again when it finishes.` };
@@ -209,20 +223,26 @@ export async function releaseWebService(target: AwsReleaseTarget, name: string, 
     await ecs.send(new UpdateExpressGatewayServiceCommand({ serviceArn, primaryContainer: { ...configurations[0]!.primaryContainer, image: imageUri, command } }));
     let deployment: string | undefined;
     let finished = false;
+    let succeeded = false;
     for (let attempt = 0; !finished && Date.now() < deadline; attempt += 1) {
       if (attempt) await new Promise((resolve) => setTimeout(resolve, pollMs));
       current = await read();
       if (current?.serviceArn !== serviceArn) return { service: name, imageUri, status: 'unknown', message: 'AWS did not confirm the exact web service after release.' };
       if (!deployment && current.currentDeployment && current.currentDeployment !== before) deployment = current.currentDeployment;
       if (!deployment) continue;
+      // After a deployment succeeds AWS still lists the old configuration for up to a minute (observed live); wait for it to go.
+      if (succeeded) { finished = running(current); continue; }
       const observed = (await ecs.send(new DescribeServiceDeploymentsCommand({ serviceDeploymentArns: [deployment] }))).serviceDeployments?.[0];
       if (observed?.serviceDeploymentArn !== deployment) continue;
       if (ROLLED_BACK.has(String(observed.status))) {
         return { service: name, imageUri, status: 'failed', message: `The new release of ${name} did not become healthy, so AWS kept the previous one running${observed.statusReason ? ` (${observed.statusReason})` : ''}. Check hv_logs.` };
       }
-      finished = observed.status === 'SUCCESSFUL';
+      succeeded = observed.status === 'SUCCESSFUL';
+      finished = succeeded && running(current);
     }
-    if (!finished || !running(current)) return { service: name, imageUri, status: 'unknown', message: `${name} did not report the new image as fully rolled out before the deadline; it may still be starting.` };
+    if (!finished) return { service: name, imageUri, status: 'unknown', message: succeeded
+      ? `AWS finished deploying ${name} but had not retired the previous version before the deadline; check hv_status in a few minutes.`
+      : `${name} did not report the new image as fully rolled out before the deadline; it may still be starting.` };
   }
   const url = webServiceUrl(current);
   const result: EngineReleaseResult = { service: name, imageUri, status: 'released', message: `Released to ${name}.`, ...(url ? { url } : {}) };

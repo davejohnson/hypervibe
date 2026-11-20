@@ -356,7 +356,7 @@ export class PlanService {
         warnings: [message],
       };
     };
-    const adapterResult = await adapterFactory.getProviderAdapter(provider, project);
+    const adapterResult = await adapterFactory.getProviderAdapter(provider, project, undefined, { environment, hosting: environmentSpec.hosting });
     if (!adapterResult.success || !adapterResult.adapter) {
       return unknownObservation(
         `Cannot observe ${provider}: ${adapterResult.error ?? 'no adapter'}. Mutations that require live state are blocked.`
@@ -477,7 +477,7 @@ export class PlanService {
         )
       ) {
         observed.completeness.databases = 'unknown';
-        const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project);
+        const dbResult = await adapterFactory.getDatabaseAdapter(dbProvider, project, { environment, hosting: environmentSpec.hosting });
         const dbAdapter = dbResult.adapter;
         if (dbResult.success && dbAdapter) {
           try {
@@ -554,7 +554,7 @@ export class PlanService {
           candidate.provider === dbProvider && candidate.externalId === localDatabaseExternalId);
         if (database) {
           try {
-            const result = await adapterFactory.getDatabaseAdapter(dbProvider, project);
+            const result = await adapterFactory.getDatabaseAdapter(dbProvider, project, { environment, hosting: environmentSpec.hosting });
             if (!result.success || !supportsDatabaseCheckpoint(result.adapter)) {
               throw new Error('The database adapter cannot observe recovery checkpoints.');
             }
@@ -1803,7 +1803,7 @@ export class PlanService {
       // Exact, independently observed backup programs have their own repository
       // authority. App API policy, source detachment and release-workflow drift
       // cannot authorize or obstruct this repository-only operation.
-      if (publications.length === 1 || disabled) {
+      if (publications.length === 1 || disabled || scopedBackupProgram.blocked.length > 0) {
         const blocked: EnvironmentPlan['blocked'] = [...scopedBackupProgram.blocked, ...this.providerPreflight(publications.map(action => action.resource.provider))];
         for (const action of scopedBackupProgram.actions) {
           if (action.metadata?.blockedReason) blocked.push({ category: 'prerequisite', provider: action.resource.provider,
@@ -2253,7 +2253,7 @@ export class PlanService {
       ...infrastructureManagedEnvKeys,
       ...reservedSecretKeys,
     ]);
-    const retiredManagedKeys = (environmentSpec.removeEnvVars ?? [])
+    const retiredManagedKeys = [...new Set([...(environmentSpec.removeEnvVars ?? []), ...Object.values(environmentSpec.services).flatMap(service => service.removeEnvVars ?? [])])]
       .filter((key) => managedEnvKeys.has(key));
     if (retiredManagedKeys.length > 0) {
       return {
@@ -2289,6 +2289,7 @@ export class PlanService {
       : undefined;
     const diff = diffEnvironment({
       spec: specForDiff,
+      serviceScopedRemovalsOnly: Boolean(serviceFilter),
       envName: environmentName,
       observed,
       local,
@@ -2344,7 +2345,7 @@ export class PlanService {
     const backupObservation = scope === 'backups' ? await observeBackupPolicy({ spec: environmentSpec, environment,
       components: local.components, project: projectForPlan, adapterFactory }) : undefined;
     const databaseScopeBinding = await planDatabaseScopeBinding({ spec: environmentSpec, environment,
-      components: local.components, project: projectForPlan, adapterFactory });
+      components: local.components, project: projectForPlan, adapterFactory, databaseBindings: this.componentRepo });
     const backupPolicy = backupObservation ? planBackupPolicy(backupObservation, {
       explicitDatabaseBackups: Boolean(environmentSpec.database?.resilience?.backups),
       attempts: environment?.platformBindings.backupPolicyAttempts,
@@ -2387,6 +2388,11 @@ export class PlanService {
         ];
     const sourceWarnings = await this.checkBranchDeploySource(projectForPlan, environmentSpec);
     const domainRegistration = await planCloudflareDomainRegistration({ environmentSpec, environment });
+
+    if (environmentSpec.domainRegistration?.register && domainRegistration.warnings.length
+      && !blocked.some(entry => entry.provider === 'cloudflare')) {
+      blocked.push({ category: 'prerequisite', provider: 'cloudflare', policy: 'hard', reason: domainRegistration.warnings.join(' ') });
+    }
 
     let actions: PlanAction[] = [
       ...(domainRegistration.action ? [domainRegistration.action] : []),
@@ -3097,7 +3103,7 @@ export class PlanService {
       const unfilteredActionIds = new Set(actions.map((action) => action.id));
       actions = actions.filter((action) => {
         if (action.type === 'destroy') return false;
-        if (action.metadata?.operation === 'hostingEnvRemove') return false;
+
         if (action.resource.kind === 'project' || action.resource.kind === 'environment') return true;
         if (action.resource.kind === 'volume') return keep.has(action.resource.name);
         if (action.resource.kind === 'database' || action.resource.kind === 'cache') {

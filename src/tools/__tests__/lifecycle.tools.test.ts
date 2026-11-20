@@ -614,6 +614,18 @@ describe('hv_inspect / hv_import', () => {
         ]),
       }),
     ]));
+    const email = result.data.providers.find((entry: {provider: string}) => entry.provider === 'sendgrid');
+    expect(email.maturity.integration.emailLogs).toMatchObject({
+      access: 'read', status: 'partially-verified', liveEvidence: {verifiedAt: '2026-10-15T04:46:59.262Z',
+        reference: expect.stringContaining('sendgrid-email-logs.md#bounded-live-evidence')},
+    });
+    const other = Object.entries(email.maturity.integration).filter(([key]) => key !== 'emailLogs');
+    expect(other.map(([key]) => key).sort()).toEqual(['connectionScopes', 'domainAuthenticationRead', 'domainAuthenticationWrite',
+      'eventWebhookRead', 'eventWebhookWrite', 'inboundParseRead', 'inboundParseWrite', 'senderIdentityRead', 'senderIdentityWrite']);
+    for (const [, evidence] of other) {
+      expect(evidence).toMatchObject({status: 'live-unverified'});
+      expect(evidence).not.toHaveProperty('liveEvidence');
+    }
     expect(result.data.providers.find((entry: { provider: string }) => entry.provider === 'railway'))
       .toMatchObject({
         maturity: {

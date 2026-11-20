@@ -123,6 +123,21 @@ describe('CodeBuild private package token HTTP contract', () => {
     expect(build.environmentVariablesOverride).toContainEqual({ name: 'IMAGE_TAG', value: awsImageTag('a'.repeat(40)), type: 'PLAINTEXT' });
   });
 
+  // Observed on 2026-11-18 from a week-old AWS account: StartBuild answered HTTP 400 with exactly this type and message.
+  it('explains a new account that AWS does not yet allow to run builds', async () => {
+    const handler = { handle: async (request: { headers: Record<string, string> }) => {
+      const action = request.headers['x-amz-target'];
+      const refused = action?.endsWith('StartBuild');
+      const missing = action?.endsWith('DescribeImages');
+      const result = refused ? { __type: 'AccountLimitExceededException', message: 'Cannot have more than 0 builds in queue for the account' }
+        : missing ? { __type: 'ImageNotFoundException' } : action?.endsWith('BatchGetProjects') ? { projects: [projectFixture(false)] } : {};
+      return { response: { statusCode: refused || missing ? 400 : 200, headers: { 'content-type': 'application/x-amz-json-1.1' }, body: Readable.from([JSON.stringify(result)]) } };
+    } };
+    const result = await buildImage({ ...base, credentials: { accessKeyId: 'test', secretAccessKey: 'test', sessionToken: 'test' } },
+      { commitSha: 'a'.repeat(40), archive: Buffer.from('source') }, { requestHandler: handler });
+    expect(result).toEqual({ error: expect.stringContaining('https://us-west-2.console.aws.amazon.com/servicequotas/home/services/codebuild/quotas/L-9D07B6EF') });
+  });
+
   it.each([[false, false, false], [true, true, false], [true, true, true]])('preserves the source image and limits the web entrypoint change to its own tag (web %s, token %s, cached default %s)', (webCommands, hasToken, cachedDefault) => {
     const directory = mkdtempSync(path.join(os.tmpdir(), 'hv-build-command-'));
     try {

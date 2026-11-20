@@ -1,6 +1,7 @@
 import { credentialTrackingSchema } from './credential.schema.js';
 import { databaseFreshInitializationIntentSchema } from '../ports/database-fresh-initialization.port.js';
 import { z } from 'zod';
+import { GCP_PROJECT_ID_PATTERN } from '../services/gcp-environment-target.js';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
@@ -64,7 +65,13 @@ const DATABASE_ENV_ALIAS_SOURCES = [
 
 export const databaseEnvAliasSourceSchema = z.enum(DATABASE_ENV_ALIAS_SOURCES);
 
+function keyRetiredAnywhere(environment: { removeEnvVars?: string[]; services: Record<string, { removeEnvVars?: string[] }> }, key: string): boolean {
+  return Boolean(environment.removeEnvVars?.includes(key)) || Object.values(environment.services).some(service => service.removeEnvVars?.includes(key));
+}
+
 export const serviceSpecSchema = z.object({
+  removeEnvVars: z.array(applicationEnvVarNameSchema).refine(keys => new Set(keys).size === keys.length,
+    'Service removal keys must be unique.').optional(),
   /** Retained filesystem storage; not object/bucket storage. */
   volume: z.object({
     mountPath: z.string().regex(/^\/(?:[A-Za-z0-9_-][A-Za-z0-9_.-]*)(?:\/[A-Za-z0-9_-][A-Za-z0-9_.-]*)*$/, 'Use a canonical absolute mount path, for example /data'),
@@ -1593,7 +1600,11 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
     provider: z.string().min(1),
     /** Optional desired placement. Omit to use the provider's sensible default. */
     region: z.string().trim().min(1).optional(),
-  }).strict(),
+    /** A dedicated Google Cloud project for this environment. Omit to use the repository connection. */
+    gcpProjectId: z.string().regex(GCP_PROJECT_ID_PATTERN, 'Invalid Google Cloud project ID').optional(),
+  }).strict().refine(hosting => !hosting.gcpProjectId || hosting.provider === 'cloudrun', {
+    path: ['gcpProjectId'], message: 'gcpProjectId requires Cloud Run hosting',
+  }),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
   /** Optional backup intent. Ordinary deployments never require this policy or recovery evidence. */
@@ -1609,6 +1620,8 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   ]).optional(),
   cache: cacheSpecSchema.optional(),
   domain: z.string().min(1).optional(),
+  /** Additional Cloud Run hostnames on the same public service, each with its own DNS authority. */
+  domains: z.array(z.object({ domain: dnsHostnameSchema, dns: dnsSpecSchema }).strict()).optional(),
   /** DNS authority is independent of hosting; an exact existing zone is required. */
   dns: dnsSpecSchema.optional(),
   /** Whether Cloudflare proxies the custom-domain traffic record. Disable temporarily when origin certificate validation is stuck. */
@@ -1659,6 +1672,17 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  if (environment.domains?.length) {
+    if (environment.hosting.provider !== 'cloudrun') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domains'],
+      message: 'Multiple custom domains are currently supported on Google Cloud Run.' });
+    const seen = new Set([environment.domain?.trim().toLowerCase().replace(/\.$/, '')]);
+    for (const [index, item] of environment.domains.entries()) {
+      if (seen.has(item.domain) || !dnsHostnameBelongsToZone(item.domain, item.dns.zone.name) || item.dns.policy?.proxy === 'on') {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domains', index], message: 'Each extra hostname must be unique and use its own DNS-only zone selection.' });
+      }
+      seen.add(item.domain);
+    }
+  }
   if (environment.dns) {
     const dns = environment.dns;
     const hostname = environment.domain?.toLowerCase().replace(/\.$/, '');
@@ -1833,7 +1857,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
           path: ['envFile', 'include'],
         });
       }
-      if (environment.removeEnvVars?.includes(key)) {
+      if (keyRetiredAnywhere(environment, key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `email-managed environment variable "${key}" cannot also be retired`,
@@ -1918,7 +1942,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
         path: ['envFile', 'include'],
       });
     }
-    if (environment.removeEnvVars?.includes(key)) {
+    if (keyRetiredAnywhere(environment, key)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `environment variable "${key}" must be removed by changing database.resilience.replicas`,
@@ -1957,7 +1981,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
           path: ['services', serviceName, 'databaseEnvAliases', alias],
         });
       }
-      if (environment.removeEnvVars?.includes(alias)) {
+      if (environment.removeEnvVars?.includes(alias) || service.removeEnvVars?.includes(alias)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `database alias "${alias}" cannot also be retired`,
@@ -2015,7 +2039,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
         path: ['envVarExceptions'],
       });
     }
-    if (environment.removeEnvVars?.includes(key)) {
+    if (keyRetiredAnywhere(environment, key)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `environment variable exception "${key}" cannot also be retired`,
@@ -2141,7 +2165,7 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
           path: ['envFile', 'include'],
         });
       }
-      if (environment.removeEnvVars?.includes(key)) {
+      if (keyRetiredAnywhere(environment, key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `Stripe-managed environment variable "${key}" cannot also be retired`,
@@ -2542,7 +2566,7 @@ export const projectSpecSchema = z.object({
       if (secret.ownership === 'hypervibe' && secret.replacementPolicy === 'immutable') {
         for (const conflictKey of secret.conflictsWith ?? []) {
           const conflictingSecret = spec.secrets[conflictKey];
-          if (environment.removeEnvVars?.includes(conflictKey)) {
+          if (keyRetiredAnywhere(environment, conflictKey)) {
             ctx.addIssue({
               code: z.ZodIssueCode.custom,
               message: `immutable Hypervibe-owned secret "${key}" cannot retire conflicting key "${conflictKey}" without an explicit credential rewrap workflow`,
@@ -2585,7 +2609,7 @@ export const projectSpecSchema = z.object({
           path: ['environments', environmentName, 'envFile', 'include'],
         });
       }
-      if (environment.removeEnvVars?.includes(key)) {
+      if (keyRetiredAnywhere(environment, key)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           message: `${secretKind} "${key}" cannot also be retired in environment "${environmentName}"`,

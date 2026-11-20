@@ -14,6 +14,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
     {
       project: projectField,
       env: envField,
+      gcpSetupPlanId: z.string().min(1).optional().describe('Exact saved Google project setup plan ID supplied with approval after recovery.'),
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
         .describe('Exact openBillingAccounts[].name the user chose after a needs_billing_choice result.'),
       azureSubscriptionId: z.string().uuid().optional()
@@ -26,7 +27,10 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, azureSubscriptionId, awsAccountId, planId, confirmActions, approveAccess }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, gcpSetupPlanId, azureSubscriptionId, awsAccountId, planId, confirmActions, approveAccess }) => {
+      if (gcpSetupPlanId && (!approveAccess?.includes('gcp-setup') || !billingAccountName)) {
+        return commandError('VALIDATION', 'Use gcpSetupPlanId with the selected billing account and approval for gcp-setup.');
+      }
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = new SpecStore().get(project);
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
@@ -34,6 +38,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       const result = await launchEnvironment(ctx, {
         project, spec: specResult.spec, specRevision: specResult.revision, environmentName,
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
+        ...(gcpSetupPlanId ? { gcpSetupPlanId } : {}),
         ...(billingAccountName ? { billingAccountName } : {}), ...(azureSubscriptionId ? { azureSubscriptionId } : {}), ...(awsAccountId ? { awsAccountId } : {}),
         ...(planId ? { planId } : {}), ...(confirmActions ? { confirmActions } : {}),
         ...(approveAccess ? { approveAccess } : {}),
@@ -71,13 +76,13 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
             next: ['hv_launch'],
           });
         case 'needs_access':
-          return commandSuccess(result, {
-            hint: result.accessId === 'aws-setup'
+          return commandSuccess({ ...result, ...(typeof result.grants.htmlPath === 'string' ? { htmlPath: result.grants.htmlPath } : {}) }, {
+            hint: result.confirmationHint ?? (result.accessId === 'aws-setup'
               ? `Show the account, region and each change in one short list. After the user approves, call hv_launch again with approveAccess including "aws-setup" and awsAccountId ${JSON.stringify(result.grants.accountId)}.`
               : result.accessId === 'azure-setup'
               ? `Show the subscription, region and each change in one short list. After the user approves, call hv_launch again with approveAccess including "azure-setup" and azureSubscriptionId ${JSON.stringify(result.grants.subscriptionId)}.`
-              : `Explain the access in plain language. After the user approves, call hv_launch again with approveAccess including "${result.accessId}" (keep any earlier approvals).`,
-            agentInstruction: { action: 'ask_user', message: 'Ask the user to approve this access. Do not approve it for them.' },
+              : `Explain the access in plain language. After the user approves, call hv_launch again with approveAccess including "${result.accessId}" (keep any earlier approvals).`),
+            agentInstruction: { action: 'ask_user', message: result.confirmationHint ?? 'Ask the user to approve this access. Do not approve it for them.' },
             next: ['hv_launch'],
           });
         case 'needs_confirmation':
@@ -96,7 +101,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
           return commandError('VALIDATION', result.message, {
             details: result.details,
             agentInstruction: { action: 'stop_and_report', message: 'Explain the blocker in plain language and the one next step. Do not work around it with provider CLIs or APIs.' },
-            next: ['hv_spec', 'hv_launch'],
+            next: result.next ?? ['hv_spec', 'hv_launch'],
           });
         case 'live':
           return commandSuccess(result, {

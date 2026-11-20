@@ -76,16 +76,22 @@ export async function recoverNativeEngineDatabaseBinding(project: Project, envir
     const auth = await awsEngineAuthentication(connection);
     const shared = await engine.inspectState({ backend: awsEngineBackend, configuration: { files: {}, resources: {} }, auth, state: state('project-shared'),
       project: document => { const resource = exact(document, 'aws_rds_cluster.postgres'); return { arn: text(resource.arn), host: text(resource.endpoint) }; } });
-    const own = await engine.inspectState({ backend: awsEngineBackend, configuration: { files: {}, resources: {} }, auth, state: state('environment'), project: document => ({ reference: credentialReference(document, provider), ...(resources(document).some(row => row.address === 'aws_secretsmanager_secret.database_query') ? { querySecretArn: projectAwsDatabaseQuerySecret(document, { ...connection, environmentId: environment.id }) } : {}) }) });
-    if (!shared.ok || !shared.present || !own.ok || !own.present || !shared.value.arn.startsWith(`arn:aws:rds:${connection.region}:${connection.accountId}:cluster:`)
+    if (!shared.ok || !shared.present) throw new Error('The shared AWS database state could not be read.');
+    const arn = /^arn:aws:rds:([a-z0-9-]+):(\d{12}):cluster:([a-zA-Z0-9-]+)$/.exec(shared.value.arn);
+    if (!arn || arn[2] !== connection.accountId) throw new Error('The retained database has an unknown AWS account or region.');
+    const region = arn[1]!;
+    if (environment.platformBindings?.provider === 'aws' && (environment.platformBindings.projectId !== connection.accountId
+        || environment.platformBindings.environmentId !== region)) throw new Error('Shared database placement conflicts with the saved environment.');
+    const own = await engine.inspectState({ backend: awsEngineBackend, configuration: { files: {}, resources: {} }, auth, state: state('environment'), project: document => ({ reference: credentialReference(document, provider), ...(resources(document).some(row => row.address === 'aws_secretsmanager_secret.database_query') ? { querySecretArn: projectAwsDatabaseQuerySecret(document, { ...connection, region, environmentId: environment.id }) } : {}) }) });
+    if (!own.ok || !own.present
       || own.value.reference !== `/hypervibe/${environment.id.toLowerCase()}/`) throw new Error('The exact environment and shared database engine states could not be correlated.');
-    const ssm = new SSMClient({ region: connection.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! }, maxAttempts: 1 });
+    const ssm = new SSMClient({ region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! }, maxAttempts: 1 });
     try {
       const name = `${own.value.reference}DATABASE_URL`;
       const result = await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }), { abortSignal: AbortSignal.timeout(30_000) });
       if (result.Parameter?.Name !== name) throw new Error('Parameter identity mismatch.');
       const url = postgres(result.Parameter.Value, shared.value.host);
-      return { clusterArn: shared.value.arn, accountId: connection.accountId, region: connection.region, name: decodeURIComponent(url.pathname.slice(1)), owner: decodeURIComponent(url.username), ...(own.value.querySecretArn ? { querySecretArn: own.value.querySecretArn } : {}) };
+      return { clusterArn: shared.value.arn, accountId: connection.accountId, region, name: decodeURIComponent(url.pathname.slice(1)), owner: decodeURIComponent(url.username), ...(own.value.querySecretArn ? { querySecretArn: own.value.querySecretArn } : {}) };
     } finally { ssm.destroy(); }
   }
   const connection = AzureEngineCredentialsSchema.parse(rawCredentials); const auth = azureEngineAuthentication(connection);

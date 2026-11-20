@@ -1,3 +1,28 @@
+/** Resource Manager returns the subset held by the caller. An empty response object represents an empty set. */
+export async function checkHmacCreateAccess(token: string, projectId: string): Promise<
+  { state: 'granted' } | { state: 'missing' | 'unknown'; message: string }
+> {
+  const permission = 'storage.hmacKeys.create';
+  const unknown = (detail: string) => ({ state: 'unknown' as const,
+    message: `Google Cloud could not verify whether the deploy identity can create S3 access keys in ${projectId} (${detail}). Retry the permission check before changing access.` });
+  try {
+    const result = await fetch(`https://cloudresourcemanager.googleapis.com/v3/projects/${encodeURIComponent(projectId)}:testIamPermissions`, {
+      method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ permissions: [permission] }),
+    });
+    if (!result.ok) return unknown(`HTTP ${result.status}`);
+    const body = await result.json();
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      const permissions = 'permissions' in body ? body.permissions : undefined;
+      if (Object.keys(body).length === 0 || Array.isArray(permissions) && permissions.length === 0) {
+        return { state: 'missing', message: `The deploy identity lacks ${permission} on Google Cloud project ${projectId}.` };
+      }
+      if (Array.isArray(permissions) && permissions.length === 1 && permissions[0] === permission) return { state: 'granted' };
+    }
+    return unknown('unexpected response');
+  } catch { return unknown('request or response could not be read'); }
+}
+
 const hmacKeyUrl = (gcpProjectId: string, accessId: string) => `https://storage.googleapis.com/storage/v1/projects/${gcpProjectId}/hmacKeys/${encodeURIComponent(accessId)}`;
 
 /**

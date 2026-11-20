@@ -7,6 +7,11 @@ import type { IHostingAdapter } from '../ports/hosting.port.js';
 import { supportsDatabaseLifecycle, supportsDatabaseOperations, type IDatabaseAdapter, type IDatabaseOperations } from '../ports/database.port.js';
 import { supportsCacheLifecycle, type ICacheAdapter } from '../ports/cache.port.js';
 import { supportsStorageLifecycle, supportsStorageOperations, type IStorageAdapter, type IStorageOperations } from '../ports/storage.port.js';
+import type { Environment } from '../entities/environment.entity.js';
+import { SpecStore } from '../spec/spec.store.js';
+import type { EnvironmentSpec } from '../spec/spec.schema.js';
+import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
+import { GCP_PROJECT_ID_PATTERN, gcpCredentialsMatchProject, gcpConnectionScope, gcpEnvironmentBindingConflict } from './gcp-environment-target.js';
 import { getProjectScopeHints } from './project-scope.js';
 import { formatConnectionGuidance } from './connection-guidance.js';
 
@@ -19,6 +24,52 @@ export interface AdapterResult<T> {
   error?: string;
   /** Actual verified connection selected, distinct from the requested capability provider. */
   connectionProvider?: string;
+}
+
+interface AdapterEnvironment {
+  environment?: Pick<Environment, 'name' | 'platformBindings'> | null;
+  hosting?: EnvironmentSpec['hosting'];
+  requestedScope?: string;
+  requestedRegion?: string;
+}
+
+export function usesGcpEnvironmentConnection(provider: string): boolean {
+  const sources = providerRegistry.connectionProviders(provider);
+  return sources.includes('cloudrun') || sources.includes('cloudsql');
+}
+
+function gcpTargetForAdapter(provider: string, project?: Project, selection?: AdapterEnvironment) {
+  if (!selection || !usesGcpEnvironmentConnection(provider)) return;
+  const { environment, requestedScope } = selection;
+  const repository = parseGitHubRepoFromRemote(project?.gitRemoteUrl);
+  const hasProjectScope = requestedScope?.includes('#gcp:');
+  const scopedProjectId = hasProjectScope ? requestedScope!.split('#gcp:').at(-1) : undefined;
+  if (hasProjectScope && (!repository || !scopedProjectId || !GCP_PROJECT_ID_PATTERN.test(scopedProjectId)
+    || requestedScope !== gcpConnectionScope(repository, scopedProjectId))) {
+    throw new Error('Select the Hypervibe project whose repository matches the requested Google Cloud connection scope.');
+  }
+  const hosting = selection.hosting ?? (project && environment
+    ? new SpecStore().getForInspection(project)?.spec.environments[environment.name]?.hosting : undefined);
+  const declaredId = hosting?.provider === 'cloudrun' ? hosting.gcpProjectId : undefined;
+  if (declaredId && !repository) throw new Error('An exact GitHub repository is required to select the environment’s Google Cloud connection.');
+  if (requestedScope && declaredId && requestedScope !== gcpConnectionScope(repository!, declaredId)) {
+    throw new Error('The requested scope differs from the environment’s Google Cloud connection.');
+  }
+  if (environment && scopedProjectId && !declaredId) throw new Error('This environment uses its repository-default Google Cloud connection.');
+  const binding = environment?.platformBindings;
+  const boundId = binding?.provider === 'cloudrun' && typeof binding.projectId === 'string' ? binding.projectId : undefined;
+  const projectId = declaredId ?? scopedProjectId ?? boundId;
+  if (!projectId) return;
+  if (!GCP_PROJECT_ID_PATTERN.test(projectId)) throw new Error('The environment has an invalid Google Cloud project binding.');
+  const region = hosting?.provider === 'cloudrun' ? hosting.region ?? 'us-central1'
+    : typeof binding?.environmentId === 'string' ? binding.environmentId : undefined;
+  if (environment && region) {
+    const conflict = gcpEnvironmentBindingConflict(binding, projectId, region);
+    if (conflict) throw new Error(conflict);
+    if (selection.requestedRegion && selection.requestedRegion !== region) throw new Error('The requested region differs from the environment’s Google Cloud region.');
+  }
+  const scope = declaredId || scopedProjectId ? gcpConnectionScope(repository!, projectId) : undefined;
+  return { projectId, scope, region };
 }
 
 /**
@@ -70,17 +121,18 @@ export class AdapterFactory {
    */
   async getDatabaseAdapter(
     providerName: string,
-    project?: Project
+    project?: Project,
+    selection?: AdapterEnvironment
   ): Promise<AdapterResult<IDatabaseAdapter>> {
     const maturityBlock = this.lifecycleMutationBlock<IDatabaseAdapter>(providerName, 'database');
     if (maturityBlock) return maturityBlock;
     const provider = providerRegistry.get(providerName);
     const result = provider?.derivedAdapters?.database
-      ? await this.getDerivedAdapter<IDatabaseAdapter>(providerName, 'database', project)
+      ? await this.getDerivedAdapter<IDatabaseAdapter>(providerName, 'database', project, selection)
       : await this.getAdapter<IDatabaseAdapter>(
           providerName,
           'database',
-          project ? getProjectScopeHints(project) : undefined
+          project ? getProjectScopeHints(project) : undefined, project, selection
         );
     return this.requireLifecyclePort(result, supportsDatabaseLifecycle, providerName, 'database');
   }
@@ -103,22 +155,22 @@ export class AdapterFactory {
   }
 
   /** Access an existing database without selecting a resource lifecycle writer. */
-  async getDatabaseOperations(providerName: string, project?: Project): Promise<AdapterResult<IDatabaseOperations>> {
+  async getDatabaseOperations(providerName: string, project?: Project, selection?: AdapterEnvironment): Promise<AdapterResult<IDatabaseOperations>> {
     const provider = providerRegistry.get(providerName);
     const result = provider?.derivedAdapters?.database
-      ? await this.getDerivedAdapter<IDatabaseOperations>(providerName, 'database', project)
-      : await this.getAdapter<IDatabaseOperations>(providerName, 'database', project ? getProjectScopeHints(project) : undefined);
+      ? await this.getDerivedAdapter<IDatabaseOperations>(providerName, 'database', project, selection)
+      : await this.getAdapter<IDatabaseOperations>(providerName, 'database', project ? getProjectScopeHints(project) : undefined, project, selection);
     if (!result.success || !result.adapter) return result;
     return supportsDatabaseOperations(result.adapter) ? result
       : { success: false, error: `${providerName} does not implement database operations.` };
   }
 
   /** Transfer or inspect objects in an already-bound bucket without provisioning authority. */
-  async getStorageOperations(providerName: string, project?: Project): Promise<AdapterResult<IStorageOperations>> {
+  async getStorageOperations(providerName: string, project?: Project, selection?: AdapterEnvironment): Promise<AdapterResult<IStorageOperations>> {
     const provider = providerRegistry.get(providerName);
     const result = provider?.derivedAdapters?.storage
-      ? await this.getDerivedAdapter<IStorageOperations>(providerName, 'storage', project)
-      : await this.getAdapter<IStorageOperations>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined);
+      ? await this.getDerivedAdapter<IStorageOperations>(providerName, 'storage', project, selection)
+      : await this.getAdapter<IStorageOperations>(providerName, 'storage', project ? getProjectScopeHints(project) : undefined, project, selection);
     if (!result.success || !result.adapter) return result;
     return supportsStorageOperations(result.adapter) ? result
       : { success: false, error: `${providerName} does not implement storage operations.` };
@@ -141,12 +193,13 @@ export class AdapterFactory {
   async getProviderAdapter(
     providerName: string,
     project?: Project,
-    scopeHints?: string[]
+    scopeHints?: string[],
+    selection?: AdapterEnvironment
   ): Promise<AdapterResult<IProviderAdapter>> {
     return this.getAdapter<IProviderAdapter>(
       providerName,
       undefined,
-      scopeHints ?? (project ? getProjectScopeHints(project) : undefined)
+      scopeHints ?? (project ? getProjectScopeHints(project) : undefined), project, selection
     );
   }
 
@@ -218,7 +271,9 @@ export class AdapterFactory {
   private async getAdapter<T>(
     providerName: string,
     expectedCategory?: string,
-    scopeHints?: string[]
+    scopeHints?: string[],
+    project?: Project,
+    selection?: AdapterEnvironment
   ): Promise<AdapterResult<T>> {
     // Check if provider is registered
     const provider = providerRegistry.get(providerName);
@@ -237,16 +292,23 @@ export class AdapterFactory {
       };
     }
 
-    // Look up connection
+    let target: ReturnType<typeof gcpTargetForAdapter>;
+    try {
+      target = gcpTargetForAdapter(providerName, project, selection);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Could not resolve the environment’s Google Cloud project.' };
+    }
     const connectionCandidates = providerRegistry.connectionProviders(providerName)
-      .map((connectionProvider) => this.connectionRepo.findBestMatchFromHints(connectionProvider, scopeHints))
+      .map((connectionProvider) => target?.scope
+        ? this.connectionRepo.findByProviderAndScope(connectionProvider, target.scope)
+        : this.connectionRepo.findBestMatchFromHints(connectionProvider, scopeHints))
       .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
     const connection = connectionCandidates.find((candidate) => candidate.status === 'verified')
       ?? connectionCandidates[0];
     if (!connection) {
       return {
         success: false,
-        error: `No connection found for ${providerName}. ${formatConnectionGuidance(providerName)}`,
+        error: `No connection found for ${providerName}${target ? ` in Google Cloud project ${target.projectId}` : ''}. ${formatConnectionGuidance(providerName)}`,
       };
     }
 
@@ -259,8 +321,14 @@ export class AdapterFactory {
 
     // Decrypt credentials and create adapter
     try {
-      const credentials = this.secretStore.decryptObject(connection.credentialsEncrypted);
+      const credentials = this.secretStore.decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+      if (target && !gcpCredentialsMatchProject(credentials, target.projectId, { allowLegacyKey: !target.scope })) {
+        return { success: false, error: `The selected ${providerName} connection does not identify Google Cloud project ${target.projectId}.` };
+      }
       const adapter = await providerRegistry.createAdapter<T>(providerName, credentials);
+      if (target?.region && providerName === 'cloudrun') {
+        await (adapter as IHostingAdapter).configureTarget?.({ region: target.region });
+      }
 
       return { success: true, adapter, connectionProvider: connection.provider };
     } catch (error) {
@@ -274,7 +342,8 @@ export class AdapterFactory {
   private async getDerivedAdapter<T>(
     providerName: string,
     capability: 'database' | 'cache' | 'storage',
-    project?: Project
+    project?: Project,
+    selection?: AdapterEnvironment
   ): Promise<AdapterResult<T>> {
     const provider = providerRegistry.get(providerName);
     const derive = provider?.derivedAdapters?.[capability];
@@ -284,7 +353,7 @@ export class AdapterFactory {
     const base = await this.getAdapter<IProviderAdapter>(
       providerName,
       provider.metadata.category,
-      project ? getProjectScopeHints(project) : undefined
+      project ? getProjectScopeHints(project) : undefined, project, selection
     );
     if (!base.success || !base.adapter) {
       return { success: false, error: base.error || `No ${providerName} adapter available` };

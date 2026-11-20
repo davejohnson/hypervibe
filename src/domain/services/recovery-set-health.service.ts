@@ -21,7 +21,7 @@ export interface ManagedRecoveryObservation {
   manifest?: RecoverySetManifest;
   status: 'healthy' | 'unhealthy' | 'unknown';
   reasonCodes: RecoverySetReason[];
-  /** No hourly byte audit is implied by a successful inventory observation. */
+  /** Compares current object revisions with the revisions verified during the backup. */
   evidence: 'inventory-and-prior-restore';
 }
 interface CompleteExecution { manifest: RecoverySetManifest; execution: Execution; owned: StorageObjectRecord[] }

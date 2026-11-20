@@ -8,6 +8,8 @@ import { AuditRepository } from '../../../adapters/db/repositories/audit.reposit
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { getSecretStore, SecretStore } from '../../../adapters/secrets/secret-store.js';
+import type { OpenTofuEngine } from '../../../adapters/engine/opentofu/engine.js';
+import { executeGcpProjectSetup, gcpSetupBackend } from '../../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import '../../../adapters/providers/gcp/cloudsql.adapter.js';
 import {
@@ -138,7 +140,7 @@ function makeDependencies(
     getDefaultAdminAccessToken: vi.fn(async () => ADMIN_TOKEN),
     createClient: vi.fn(() => client),
     prepareCloud: vi.fn(async () => ({ success: true })),
-    setupProject: vi.fn(async () => ({ success: true, mode: 'confirm' as const, planId: 'saved-setup', actions: [] })),
+    setupProject: vi.fn(async () => ({ success: true, mode: 'confirm' as const, planId: 'saved-setup', htmlPath: '/reports/saved-setup.html', actions: [] })),
     verifyPreparation: vi.fn(async () => {}),
     sleep: vi.fn(async (_milliseconds: number) => {}),
     verifyProvider: vi.fn(async (_provider, credentials) => ({
@@ -195,11 +197,167 @@ describe('runGcpBootstrap', () => {
     expect(dependencies.prepareCloud).not.toHaveBeenCalled();
   });
 
+  it('offers a scoped project repair using fresh Google identity and unlinked billing evidence', async () => {
+    const selection = { project: seedProject(), environment: 'production', environmentProjectId: GCP_PROJECT_ID, gcpProjectId: GCP_PROJECT_ID,
+      region: 'europe-west1', billingAccountName: BILLING_ACCOUNT };
+    const unlinked = { ...linkedBilling, billingEnabled: false, billingAccountName: '' };
+    const client = makeClient({ getProjectBillingInfo: vi.fn(async () => unlinked) });
+    const token = 'repair-verified-project';
+    const dependencies = makeDependencies(client);
+    vi.mocked(dependencies.setupProject).mockResolvedValueOnce({ success: false, mode: 'preview', error: 'Protected project needs recovery.',
+      projectRecovery: { token, projectId: GCP_PROJECT_ID, projectNumber: '123456789', previousPlanId: 'setup-prior' } });
+    const result = await runGcpBootstrap(selection, dependencies);
+    expect(result).toMatchObject({ success: false, projectRecovery: { recoverProjectState: token, previousPlanId: 'setup-prior',
+      retryCall: { project: selection.project.name, environment: 'production', region: selection.region, billingAccountName: BILLING_ACCOUNT,
+        gcpProjectId: GCP_PROJECT_ID, recoverProjectState: token, action: 'bootstrap', adminAuth: 'default' } } });
+    const evidence = { projectId: GCP_PROJECT_ID, projectNumber: '123456789', scope: SCOPE + '#gcp:' + GCP_PROJECT_ID };
+    expect(dependencies.setupProject).toHaveBeenCalledWith(expect.objectContaining({ observedUnlinkedProject: evidence, confirm: false }));
+    vi.mocked(dependencies.setupProject).mockResolvedValueOnce({ success: true, mode: 'preview', requiresPlanId: true, planId: 'setup-fresh', actions: [] });
+    const preview = await runGcpBootstrap({ ...selection, recoverProjectState: token }, dependencies);
+    expect(preview).toMatchObject({ success: true, mode: 'preview', requiresConfirmation: true, requiresPlanId: true, planId: 'setup-fresh',
+      confirmCall: { project: selection.project.name, environment: 'production', region: selection.region, billingAccountName: BILLING_ACCOUNT,
+        gcpProjectId: GCP_PROJECT_ID, gcpSetupPlanId: 'setup-fresh', confirm: true } });
+    expect(dependencies.setupProject).toHaveBeenLastCalledWith(expect.objectContaining({ observedUnlinkedProject: evidence, recoverProjectState: token, confirm: false }));
+    expect(client.getProjectBillingInfo).toHaveBeenCalledTimes(2);
+    expect(client.updateProjectBillingInfo).not.toHaveBeenCalled();
+    expect(client.createServiceAccountKey).not.toHaveBeenCalled();
+  });
+
+  it('provides fresh linked billing evidence on preview and confirmation after an external billing change', async () => {
+    const selection = { project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT };
+    const dependencies = makeDependencies(makeClient());
+    const observedLinkedProject = { scope: SCOPE, projectId: GCP_PROJECT_ID, projectNumber: '123456789', billingAccountName: BILLING_ACCOUNT };
+    for (const update of [{}, { confirm: true, gcpSetupPlanId: 'approved-setup' }]) {
+      await runGcpBootstrap({ ...selection, ...update }, dependencies);
+      const call = vi.mocked(dependencies.setupProject).mock.lastCall![0];
+      expect(call).toMatchObject({ observedLinkedProject });
+      expect(call).not.toHaveProperty('observedUnlinkedProject');
+    }
+  });
+
+  it('confirms the saved billing plan through the executor only with its exact ID and fresh matching Google identity', async () => {
+    const address = 'google_project.hypervibe';
+    const selection = { project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT };
+    const unlinked = { ...linkedBilling, billingEnabled: false, billingAccountName: '' };
+    let billing = unlinked;
+    const client = makeClient({ getProjectBillingInfo: vi.fn(async () => billing) });
+    const plan = vi.fn<OpenTofuEngine['plan']>(async input => {
+      const before = { id: 'projects/' + GCP_PROJECT_ID, project_id: GCP_PROJECT_ID, number: '123456789', deletion_policy: 'PREVENT', billing_account: '' };
+      const change = { actions: ['update'], before, after: { ...before, billing_account: BILLING_ACCOUNT.split('/')[1] }, after_unknown: {} };
+      const accepted = input.verifyPlannedChanges?.({ resource_changes: [{ address, mode: 'managed', type: 'google_project', name: 'hypervibe',
+        provider_name: 'registry.opentofu.org/hashicorp/google', change }] });
+      if (!accepted) return { ok: false, stage: 'plan', error: 'Billing change did not match the preview.' };
+      const segment = { id: input.planId, engine: 'opentofu' as const, planDigest: 'plan', configurationDigest: 'config', engineVersion: '1.13.9', providerVersions: {} };
+      return { ok: true, segment, segmentId: input.planId, blockers: [], unmanagedDeletes: [], planFile: 'fixture.tfplan', actions: [{
+        id: 'project-setup:' + address, type: 'update', verified: true, resource: { kind: 'project', provider: 'gcp', name: 'Project billing' },
+        reason: 'Attach billing', diff: [{ field: 'google_project.billing_account' }], metadata: { engineSegment: { ...segment, addresses: [address] } },
+      }] };
+    });
+    const apply = vi.fn(async () => {
+      billing = linkedBilling;
+      return { outcomes: { [address]: 'succeeded' as const }, diagnostics: [] };
+    });
+    const dependencies = makeDependencies(client, { setupProject: params => executeGcpProjectSetup(gcpSetupBackend, { ...params, dataDir: tempDir }, { engine: { plan, apply } }) });
+    const preview = await runGcpBootstrap(selection, dependencies);
+    expect(preview).toMatchObject({ success: true, requiresPlanId: true });
+    const confirm = { ...selection, confirm: true };
+    for (const gcpSetupPlanId of [undefined, 'setup-before-repair']) {
+      expect((await runGcpBootstrap({ ...confirm, gcpSetupPlanId }, dependencies)).success).toBe(false);
+    }
+    const approved = { ...confirm, gcpSetupPlanId: preview.confirmCall!.gcpSetupPlanId };
+    vi.mocked(client.getProject).mockResolvedValueOnce({ ...observedProject, name: 'projects/999' });
+    expect((await runGcpBootstrap(approved, dependencies)).success).toBe(false);
+    expect(apply).not.toHaveBeenCalled();
+    expect(await runGcpBootstrap(approved, dependencies)).toMatchObject({ success: true });
+    expect(apply).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['existing billing', observedProject, linkedBilling],
+    ['disabled but still assigned', observedProject, { ...linkedBilling, billingEnabled: false }],
+    ['invalid project number', { ...observedProject, name: 'projects/0' }, { ...linkedBilling, billingEnabled: false, billingAccountName: '' }],
+    ['unknown project', null, null],
+    ['unknown billing', observedProject, null],
+  ] as const)('blocks local project repair for %s', async (_reason, project, billing) => {
+    const client = makeClient({ getProject: vi.fn(async () => project), getProjectBillingInfo: vi.fn(async () => billing) });
+    const dependencies = makeDependencies(client);
+    const result = await runGcpBootstrap({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT,
+      recoverProjectState: 'repair-verified-project' }, dependencies);
+    expect(result.success).toBe(false);
+    expect(dependencies.setupProject).not.toHaveBeenCalled();
+    expect(client.createServiceAccountKey).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('reports a project as active after a failed apply only if a new Google read confirms it (%s)', async active => {
+    const getProject = vi.fn<GcpBootstrapClientPort['getProject']>().mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(active ? observedProject : null);
+    const client = makeClient({ getProject });
+    const dependencies = makeDependencies(client);
+    vi.mocked(dependencies.setupProject).mockResolvedValue({ success: false, mode: 'confirm', error: 'Billing quota exceeded' });
+    const result = await runGcpBootstrap({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT,
+      confirm: true }, dependencies);
+    expect(result).toMatchObject({ success: false, error: 'Billing quota exceeded', partialProgress: { project: active ? 'observed-active' : 'not-started' } });
+    expect(client.getProject).toHaveBeenCalledTimes(2);
+    expect(client.createServiceAccountKey).not.toHaveBeenCalled();
+  });
+
   it('requires the exact preview ID on confirmation before accessing Google', async () => {
     const dependencies = makeDependencies(makeClient());
     const result = await runGcpBootstrap({ project: seedProject(), confirm: true }, dependencies);
     expect(result.success).toBe(false);
     expect(dependencies.getDefaultAdminAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('previews and confirms a dedicated production project while preserving both repository staging connections', async () => {
+    const project = seedProject();
+    const connections = new ConnectionRepository();
+    const providers = ['cloudrun', 'cloudsql'];
+    const staging = connections.upsertVerifiedBatch(providers.map(provider => ({
+      provider, scope: SCOPE, credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'staging-project' }),
+    })));
+    const dependencies = makeDependencies(makeClient());
+    const selection = { project, environment: 'production', environmentProjectId: GCP_PROJECT_ID };
+    const preview = await runGcpBootstrap(selection, dependencies);
+    expect(preview).toMatchObject({ success: true, target: { projectId: GCP_PROJECT_ID } });
+
+    const confirm = { ...selection, gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT, confirm: true };
+    const result = await runGcpBootstrap(confirm, dependencies);
+    expect(result).toMatchObject({ success: true, partialProgress: { credential: 'created' } });
+    expect(providers.map(provider => connections.findByProviderAndScope(provider, SCOPE))).toEqual(staging);
+    for (const provider of providers) {
+      const dedicated = connections.findByProviderAndScope(provider, SCOPE + '#gcp:' + GCP_PROJECT_ID);
+      expect(dedicated?.status).toBe('verified');
+      expect(getSecretStore().decryptObject(dedicated!.credentialsEncrypted)).toMatchObject({ projectId: GCP_PROJECT_ID });
+    }
+    expect(dependencies.verifyPreparation).toHaveBeenCalledWith(project, ADMIN_TOKEN, GCP_PROJECT_ID,
+      SERVICE_ACCOUNT_EMAIL, RUNTIME_SERVICE_ACCOUNT_EMAIL, undefined, GCP_PROJECT_ID);
+    expect(dependencies.setupProject).toHaveBeenCalledWith(expect.objectContaining({
+      authenticationScope: SCOPE + '#gcp:' + GCP_PROJECT_ID,
+    }));
+    const retry = await runGcpBootstrap(confirm, dependencies);
+    expect(retry).toMatchObject({ success: true, partialProgress: { credential: 'reused' } });
+    expect(connections.findAll()).toHaveLength(4);
+  });
+
+  it('rejects a requested project that differs from the selected environment before accessing Google', async () => {
+    const dependencies = makeDependencies(makeClient());
+    const result = await runGcpBootstrap({ project: seedProject(), environment: 'production', environmentProjectId: 'production-project',
+      gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT, confirm: true }, dependencies);
+    expect(result.success).toBe(false);
+    expect(dependencies.getDefaultAdminAccessToken).not.toHaveBeenCalled();
+    expect(new ConnectionRepository().findAll()).toHaveLength(0);
+  });
+
+  it('retains the environment and region when ADC recovery directs the user to restart discovery', async () => {
+    const dependencies = makeDependencies(makeClient(), { getDefaultAdminAccessToken: vi.fn(async () => {
+      throw new Error('Could not load the default credentials');
+    }) });
+    const result = await runGcpBootstrap({ project: seedProject(), environment: 'production', region: 'europe-west1',
+      environmentProjectId: GCP_PROJECT_ID }, dependencies);
+    expect(result.recovery).toMatchObject({
+      retryCall: { environment: 'production', gcpProjectId: GCP_PROJECT_ID, region: 'europe-west1' },
+      retryCommand: expect.stringContaining('environment="production"'),
+    });
   });
 
   it.each(['matching', 'conflicting', 'global'] as const)(
@@ -598,9 +756,11 @@ describe('runGcpBootstrap', () => {
   it('verifies exact identities after saved engine setup and never invokes bootstrap infrastructure writes', async () => {
     const client = makeClient();
     const dependencies = makeDependencies(client);
-    const result = await runGcpBootstrap({ project: seedProject(), gcpProjectId: GCP_PROJECT_ID,
-      billingAccountName: BILLING_ACCOUNT, confirm: true }, dependencies);
-    expect(result.success).toBe(true);
+    const target = { project: seedProject(), gcpProjectId: GCP_PROJECT_ID, billingAccountName: BILLING_ACCOUNT };
+    for (const confirm of [false, true]) {
+      const result = await runGcpBootstrap({ ...target, confirm }, dependencies);
+      expect(result).toMatchObject({ success: true, planId: 'saved-setup', htmlPath: '/reports/saved-setup.html' });
+    }
     expect(dependencies.setupProject).toHaveBeenCalledWith(expect.objectContaining({ confirm: true,
       contribution: expect.objectContaining({ id: 'bootstrap' }) }));
     expect(client.enableService).not.toHaveBeenCalled();

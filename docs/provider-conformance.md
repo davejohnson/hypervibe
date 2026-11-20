@@ -34,7 +34,7 @@ provider status or assert that a live run has passed.
 | Profile | Declared disposable resources | Release and verification |
 | --- | --- | --- |
 | `gcp-engine` | One public Cloud Run web service and its public-invoker IAM member | Committed local fixture archive through the installed Hypervibe release path; exact JSON body and `create`/`update` revision; encrypted engine-state identity projection and exact Cloud Run GET after teardown |
-| `aws-engine`, `azure-engine` | One testing environment: public web service, worker and PostgreSQL database, plus whatever the project shares between testing environments (network, app environment, database cluster or server, registry) | Committed local fixture through `hv_plan` → `hv_apply` → `hv_deploy`; exact JSON body with the `create`/`update` revision, a database write from the web service and one from the worker; the database must refuse a connection from the test computer; `hv_plan scope="teardown"`; then everything in the dedicated account is compared with what was there before the run. **Written 2026-11-17; never run against either cloud.** |
+| `aws-engine`, `azure-engine` | One testing environment: public web service, always-on worker, on-demand worker, scheduled job, file storage and PostgreSQL database, plus whatever the project shares between testing environments (network, app environment, database cluster or server, registry) | Committed local fixture through `hv_plan` → `hv_apply` → `hv_deploy`; exact JSON body with the `create`/`update` revision, a database write from the web service, recent ones from the worker, the scheduled job and the on-demand worker, and a file written to storage and read back; the database must refuse a connection from the test computer; `hv_plan scope="teardown"`; between create and update a second environment with its own web service and database is added, must answer from its own database on the same shared server or cluster, and is removed again while the first keeps answering with no pending changes; then everything in the dedicated account is compared with what was there before the run. **Azure: two passing runs on 2026-11-18 in West US 2, at d4cf72a0 without and at 2cdcb6a9 with storage, the scheduled job and the on-demand worker; one passing run with the second environment on 2026-11-19 at 3cec56fd, after an attempt whose two environment names were cut to the same cloud name (fixed in #773, not yet run live). AWS: the second environment has not been run; one passing run on 2026-11-19 in us-east-1, with the changes in b129c5a6, after seven attempts that found a zero build limit and two ordering faults.** |
 | `railway` | Web service, PostgreSQL, Redis, object bucket, associated volumes, PostgreSQL-backed queue wiring | Prepared repository and managed GitHub workflow, exact commit and release artifact; exact JSON revision and SQL probe; complete native project service/volume/bucket inventory before teardown and after deletion |
 
 The GCP profile is deliberately **web-only**. It does not prove Cloud SQL,
@@ -58,15 +58,22 @@ dedicated account, and after teardown the account must match that record:
 - **Azure:** every resource in the project's resource group, whatever its tags.
 - **AWS:** in the connection's region, networks, their endpoints and NAT gateways,
   database clusters, instances and kept snapshots, container clusters, image
-  repositories and buckets. A network cannot be deleted while anything is attached,
-  so its absence also covers load balancers, tasks and network interfaces. Not
-  covered: log groups, Parameter Store entries, Secrets Manager secrets waiting out
-  their recovery window, and IAM roles (Hypervibe's own teardown checks the roles).
+  repositories and buckets; schedules, state machines and event rules (scheduled
+  jobs and the on-demand worker's waker); Parameter Store entries and log groups.
+  The fixture uses the account's default network, which is always there, so the
+  check also lists network interfaces (held by any load balancer, container or
+  database still attached) and security groups. Not covered: Secrets Manager secrets (the
+  deploy role may not list them) and IAM roles (Hypervibe's own teardown checks the
+  roles). The checks beyond the first sentence were
+  added after the passing run of 2026-11-19; a read with them that day, after eight
+  runs, found only the default network, its default security group and one AWS-managed rule.
 
 This needs an account or subscription that holds nothing else that changes during
 the run; another project created there mid-run reads as a leftover. Neither profile
-proves moving an older project to the current layout, storage, scheduled jobs,
-on-demand workers or CI releases.
+proves moving an older project to the current layout, a second environment sharing
+the project's pieces, CI releases, or that an on-demand worker starts only when work
+is queued and stops afterwards: the fixture sees that queued work gets done, not what
+started the worker.
 
 Legacy GCP adapter lifecycle registrations are planned: GCP live deployment uses
 the separate OpenTofu engine profile. Cloud SQL resilience/restore-drill workflows
@@ -203,9 +210,9 @@ npm run test:providers:fixtures
 ```
 
 Set `HYPERVIBE_LIVE_REGION` to place the environment somewhere other than the
-connection's region. Azure needs this for a new pay-as-you-go subscription: East US 2
-refused the database size there on 2026-11-13 and again on 2026-11-18 (`westus2` worked
-the first time).
+connection's region. The Azure test connection was set up in East US 2, which
+refused the database size on 2026-11-13 and again on 2026-11-18 (`westus2` worked the
+first time), so its runs set `westus2`. New connections default to `westus2`.
 
 A run confirms every action of each plan it makes. Unlike the GCP profile it does
 not wait for a person to approve one plan ID, so that it can run unattended: the

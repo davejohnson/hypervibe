@@ -1,9 +1,12 @@
+import { dnsZoneScopeForDomain } from '../domain/services/domain-scope.js';
 import { classifyWakerReadError, type WakerReadFailure } from './waker-read-error.js';
-import { publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
+import { checkHmacCreateAccess, publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
 import { repositorySourceArchive } from './repository-source.js';
 import { healthCheckFailed, strictHealthCheck } from '../domain/services/release-health.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
-import { domainServiceFor, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
+import { statSync } from 'node:fs';
+import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
+import { domainServiceFor, environmentDomains, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
@@ -20,7 +23,7 @@ import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
 import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
-import { S3_COMPATIBLE_SECRET_KEYS, iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey, iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -46,12 +49,14 @@ import type { EngineAuthentication, EngineReleaseResult, EngineStateIdentity } f
 export type { EngineReleaseResult } from '../domain/ports/infrastructure-engine.port.js';
 import { engineSegmentOf } from '../domain/ports/infrastructure-engine.port.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
+import { gcpInfrastructureNotes } from '../domain/plan/gcp-infrastructure-notes.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Service } from '../domain/entities/service.entity.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { gcpEnvironmentBindingConflict, gcpCredentialsMatchProject, gcpConnectionScope } from '../domain/services/gcp-environment-target.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import {
@@ -62,7 +67,8 @@ import {
   DOMAIN_DNS_OPERATION, DOMAIN_DNS_REMOVE_OPERATION, DOMAIN_READY_OPERATION, DOMAIN_VERIFY_OPERATION,
   executeDomainAction, planDomain, observeDomainMapping, type DomainPlanActions,
 } from './infrastructure-engine-domain.js';
-import { getDnsBindingIdentity, getDnsBindingSelection, getDnsOwnedDomain, hasOwnedDnsRecords, prepareDnsEnginePlan } from './dns-engine.js';
+import { getDnsBindingIdentity, getDnsBindingSelection, gcpDomainDnsOwner, ownedGcpDnsDomains, onlyGoogleProofRemains, hasOwnedDnsRecords, prepareDnsEnginePlan } from './dns-engine.js';
+import { planRegistrarStage, applyRegistrarStage } from './registrar-stage.js';
 import { persistDnsPlanRun } from './dns-hosting.js';
 import { verifyDnsTrafficAbsent } from './dns-absence.js';
 import { verifyGcpDomainEngineOwnership } from './gcp-domain-ownership.js';
@@ -137,7 +143,7 @@ export interface EngineBinding {
   database?: { instanceName: string; connectionName?: string };
   domains?: string[];
   /** Retained before attempting a mapping, including cancellation before DNS starts. */
-  domainClaims?: Record<string, { zone: DnsZoneIdentity; connectionScope?: string }>;
+  domainClaims?: Record<string, { zone: DnsZoneIdentity; connectionScope?: string; owner?: string }>;
   storage?: string[];
   cache?: { instanceName: string };
   queues?: string[];
@@ -162,7 +168,7 @@ export interface EngineBinding {
   /** Non-secret credential metadata bound to an acknowledged exact Secret Manager version. */
   secretMetadata?: Record<string, { gcpProjectId: string; version: string; labels: Record<string, string> }>;
   /** Keyless CI release trust granted for this exact repository. */
-  ci?: { repository: string; provider: string; releaseIdentity: string };
+  ci?: { repository: string; trust?: string; provider: string; releaseIdentity: string };
   /** Current copy evidence is cleared before replacement; prior evidence is historical only. */
   migration?: MigrationCopyEvidence & {
     from: string;
@@ -189,19 +195,33 @@ export interface EngineContext {
   state: EngineStateIdentity;
 }
 
-/**
- * The Google Cloud connection scoped to exactly this project's repository.
- * Global or other projects' connections are never used: they point at someone
- * else's Google Cloud project, and an engine environment must live in its own.
- */
-export async function engineGcpAdapter(project: Pick<Project, 'gitRemoteUrl'>): Promise<CloudRunAdapter | undefined> {
+export async function engineGcpAdapter(project: Pick<Project, 'gitRemoteUrl'>, environmentProjectId?: string): Promise<CloudRunAdapter | undefined> {
   const repository = parseGitHubRepoFromRemote(project.gitRemoteUrl);
   if (!repository) return undefined;
-  const connection = new ConnectionRepository().findByProviderAndScope('cloudrun', repository);
+  const scope = gcpConnectionScope(repository, environmentProjectId);
+  const connection = new ConnectionRepository().findByProviderAndScope('cloudrun', scope);
   if (!connection || connection.status !== 'verified') return undefined;
+  const credentials = getSecretStore().decryptObject<Record<string, unknown>>(connection.credentialsEncrypted);
+  if (environmentProjectId && !gcpCredentialsMatchProject(credentials, environmentProjectId)) return undefined;
   const adapter = new CloudRunAdapter();
-  await adapter.connect(getSecretStore().decryptObject(connection.credentialsEncrypted));
+  await adapter.connect(credentials);
   return adapter;
+}
+
+function gcpEnvironmentState(environment: Environment): EngineStateIdentity {
+  return { provider: 'gcp', projectId: environment.projectId, environmentId: environment.id, partition: 'environment' };
+}
+
+/** Older releases could leave private state behind before recording its Google project. */
+export function gcpUnboundStateConflict(environment: Environment | null, selectedProjectId?: string): string | undefined {
+  if (!selectedProjectId || !environment || environment.platformBindings.projectId) return;
+  const paths = engineStatePaths(gcpEnvironmentState(environment));
+  try {
+    if (!statSync(paths.statePath, { throwIfNoEntry: false })) return;
+  } catch {
+    return `Cannot check the existing OpenTofu state for ${environment.name}. Restore access to its private state before selecting a Google Cloud project.`;
+  }
+  return `Environment ${environment.name} has existing OpenTofu state with no recorded Google Cloud project. Recover its original project binding or choose a fresh migration target.`;
 }
 
 export async function resolveEngineContext(
@@ -211,18 +231,25 @@ export async function resolveEngineContext(
   environmentName: string
 ): Promise<EngineContext | { blocked: string }> {
   const environmentSpec = spec.environments[environmentName]!;
-  const adapter = await engineGcpAdapter(project);
+  const environmentProjectId = environmentSpec.hosting.gcpProjectId;
+  const region = environmentSpec.hosting.region ?? DEFAULT_REGION;
+  const existing = ctx.repos.environments.findByProjectAndName(project.id, environmentName);
+  if (environmentProjectId) {
+    const conflict = gcpEnvironmentBindingConflict(existing?.platformBindings, environmentProjectId, region)
+      ?? gcpUnboundStateConflict(existing, environmentProjectId);
+    if (conflict) return { blocked: conflict };
+  }
+  const adapter = await engineGcpAdapter(project, environmentProjectId);
   if (!adapter) {
+    if (environmentProjectId) return { blocked: `Run hv_launch for ${environmentName} to connect its selected Google Cloud project ${environmentProjectId}.` };
     return { blocked: 'This project has no Google Cloud connection of its own yet. Run hv_launch (or hv_connections action="bootstrap") to set one up.' };
   }
-  const region = environmentSpec.hosting.region ?? DEFAULT_REGION;
   adapter.configureTarget({ region });
   const connection = adapter.engineConnection();
   if (!connection.runtimeServiceAccountEmail) {
     return { blocked: 'The GCP connection has no separate runtime identity. Re-run the GCP bootstrap so services never run as the deployment identity.' };
   }
-  const environment = ctx.repos.environments.findByProjectAndName(project.id, environmentName)
-    ?? ctx.repos.environments.create({ projectId: project.id, name: environmentName });
+  const environment = existing ?? ctx.repos.environments.create({ projectId: project.id, name: environmentName });
   const bindings = environment.platformBindings as { provider?: string; projectId?: string; environmentId?: string; engine?: { kind?: string } };
   if (bindings.projectId && (bindings.projectId !== connection.projectId || bindings.environmentId !== region)) {
     return { blocked: `Environment ${environmentName} is bound to ${bindings.projectId}/${bindings.environmentId}, not ${connection.projectId}/${region}. Hypervibe will not move it implicitly.` };
@@ -244,7 +271,7 @@ export async function resolveEngineContext(
     region,
     runtimeServiceAccountEmail: connection.runtimeServiceAccountEmail,
     auth,
-    state: { provider: 'gcp', projectId: project.id, environmentId: environment.id, partition: 'environment' },
+    state: gcpEnvironmentState(environment),
   };
 }
 
@@ -442,12 +469,17 @@ async function storedVersionHolding(token: string, gcpProjectId: string, secretI
 }
 
 /** Writes a version only after the approved engine has created the owned container. */
-export async function writeSecretVersion(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined> {
+export async function writeSecretVersion(
+  token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string,
+  beforeWrite?: () => ActionResult | undefined,
+): Promise<ActionResult | undefined> {
   const observed = await observeSecret(token, gcpProjectId, secretId);
   if (observed.state === 'unknown') {
     // An earlier write may have been stored without Hypervibe hearing back. If the stored value is
     // the one being written now, record that version instead of adding another.
     const held = await storedVersionHolding(token, gcpProjectId, secretId, labels, value);
+    const blocked = beforeWrite?.();
+    if (blocked) return blocked;
     if (held.state === 'stored' && recordSecretVersionMetadata(gcpProjectId, secretId, held.version, labels)) return undefined;
     return { success: false, status: 'blocked', message: observed.reason };
   }
@@ -457,6 +489,8 @@ export async function writeSecretVersion(token: string, gcpProjectId: string, se
   }
   const environment = new EnvironmentRepository().findById(labels['hv-environment'] ?? '');
   if (!environment) return { success: false, status: 'blocked', message: 'The secret environment cannot be verified locally.' };
+  const blocked = beforeWrite?.();
+  if (blocked) return blocked;
   // A lost addVersion acknowledgement must not let an old generation describe a new value.
   const currentBinding = (environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
   new EnvironmentRepository().updatePlatformBindings(environment.id, { engine: { ...currentBinding, secretMetadata: {
@@ -697,6 +731,45 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   return engine.plan(ctx, params);
 }
 
+function storageS3AccessMessage(message: string, environmentName: string): string {
+  return `${message} Run hv_launch env=${JSON.stringify(environmentName)} to review S3 access, or preview hv_connections provider="cloudrun" action="prepare" environment=${JSON.stringify(environmentName)} gcsAccess="s3" for this project.`;
+}
+
+/** Inspect the owned key pair before asking Google about access to create another. */
+export async function observeStorageS3Access(token: string, context: EngineContext, environmentName: string, spec: EnvironmentSpec): Promise<
+  { state: 'ready'; ready: string[]; pending: string[]; secretIds: string[]; versions: Record<string, string> }
+  | { state: 'needs_access' | 'blocked'; message: string }
+> {
+  const ready: string[] = [];
+  const pending: string[] = [];
+  const secretIds: string[] = [];
+  const versions: Record<string, string> = {};
+  for (const [storageName, storage] of Object.entries(spec.storage ?? {})) {
+    if (storage.access !== 's3') continue;
+    let complete = true;
+    for (const key of S3_COMPATIBLE_SECRET_KEYS) {
+      const secretKey = `${storageName}_${key}`;
+      const secretId = engineSecretId(environmentName, secretKey);
+      secretIds.push(secretId);
+      const observed = await observeSecret(token, context.gcpProjectId, secretId);
+      if (observed.state === 'unknown') return { state: 'blocked', message: observed.reason };
+      if (observed.state === 'present' && (observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labelValue(context.environment.id))) {
+        return { state: 'blocked', message: `Secret Manager already has ${secretId}, but its ownership does not match this environment.` };
+      }
+      if (observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.latestVersion) versions[secretKey] = observed.value.latestVersion;
+      else complete = false;
+    }
+    if (complete) ready.push(storageName);
+    else pending.push(storageName);
+  }
+  if (pending.length) {
+    const access = await checkHmacCreateAccess(token, context.gcpProjectId);
+    if (access.state === 'missing') return { state: 'needs_access', message: storageS3AccessMessage(access.message, environmentName) };
+    if (access.state === 'unknown') return { state: 'blocked', message: access.message };
+  }
+  return { state: 'ready', ready, pending, secretIds, versions };
+}
+
 /** Google Cloud's plan: Cloud Run, Cloud SQL, storage, queues, Redis and custom domains. */
 export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   project: Project;
@@ -710,17 +783,24 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (problems.length) return { blocked: problems };
   const context = await resolveEngineContext(ctx, project, spec, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
-  if (Object.keys(environmentSpec!.storage ?? {}).length && !isCloudPreparedForStorage(ctx.repos.projects.findById(project.id) ?? project)) {
+  const preparation = ctx.repos.projects.findById(project.id) ?? project;
+  const environmentProjectId = environmentSpec!.hosting.gcpProjectId;
+  if (Object.keys(environmentSpec!.storage ?? {}).length && !isCloudPreparedForStorage(preparation, environmentProjectId)) {
     return { blocked: [ENGINE_STORAGE_ACCESS_BLOCKER] };
   }
-  if (environmentSpec!.cache && !isCloudPreparedForCache(ctx.repos.projects.findById(project.id) ?? project)) {
+  if (environmentSpec!.cache && !isCloudPreparedForCache(preparation, environmentProjectId)) {
     return { blocked: [ENGINE_CACHE_ACCESS_BLOCKER] };
   }
-  if (Object.values(environmentSpec!.services).some((service) => service.onDemand) && !isCloudPreparedForWorkerWake(ctx.repos.projects.findById(project.id) ?? project)) {
+  if (Object.values(environmentSpec!.services).some((service) => service.onDemand) && !isCloudPreparedForWorkerWake(preparation, environmentProjectId)) {
     return { blocked: [ENGINE_WORKER_ACCESS_BLOCKER] };
   }
-  if (Object.keys(environmentSpec!.queues ?? {}).length && !isCloudPreparedForQueues(ctx.repos.projects.findById(project.id) ?? project, 'cloudrun')) {
+  if (Object.keys(environmentSpec!.queues ?? {}).length && !isCloudPreparedForQueues(preparation, 'cloudrun', environmentProjectId)) {
     return { blocked: ['Queues need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["queues"], or run hv_connections provider="cloudrun" action="prepare" queueAccess="lifecycle" (preview, then confirm).'] };
+  }
+
+  if (environmentSpec!.domainRegistration?.register) {
+    const registration = await planRegistrarStage(ctx, project, context.environment, environmentSpec!, params.specRevision);
+    if (registration) return registration;
   }
 
   // Hypervibe-owned secrets: explicit, observed, tri-state.
@@ -811,26 +891,10 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (missingKeys.length && !outsideContainersMissing) {
     return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)], missingOutsideKeys: missingKeys };
   }
-  // S3-compatible bucket access: Hypervibe-owned access keys, published before services are wired.
-  const s3Storage = Object.entries(environmentSpec!.storage ?? {}).filter(([, storage]) => storage.access === 's3').map(([name]) => name);
-  const s3Ready: string[] = [];
-  const s3SecretIds: string[] = [];
-  for (const storageName of s3Storage) {
-    let ready = true;
-    for (const key of S3_COMPATIBLE_SECRET_KEYS) {
-      const secretKey = `${storageName}_${key}`;
-      const secretId = engineSecretId(environmentName, secretKey);
-      s3SecretIds.push(secretId);
-      const observed = await observeSecret(token, context.gcpProjectId, secretId);
-      if (observed.state === 'unknown') return { blocked: [observed.reason] };
-      if (observed.state === 'present' && observed.value.labels['hv-environment'] !== labels['hv-environment']) {
-        return { blocked: [`Secret Manager already has ${secretId}, but it is not owned by this Hypervibe environment.`] };
-      }
-      if (observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.latestVersion) secretVersions[secretKey] = observed.value.latestVersion;
-      else ready = false;
-    }
-    if (ready) s3Ready.push(storageName);
-  }
+  const credentials = await observeStorageS3Access(token, context, environmentName, environmentSpec!);
+  if (credentials.state !== 'ready') return { blocked: [credentials.message] };
+  const { ready: s3Ready, pending: pendingS3Storage, secretIds: s3SecretIds } = credentials;
+  Object.assign(secretVersions, credentials.versions);
   const existing = await listEngineSecrets(token, context.gcpProjectId, context.environment.id);
   if (existing.state === 'unknown') return { blocked: [existing.reason] };
   const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : []),
@@ -858,37 +922,59 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const anyService = Object.keys(environmentSpec!.services).length > 0;
 
   // DNS and hosting use separate saved engine stages: proof, claim, traffic, readiness.
-  const desiredDomain = environmentSpec!.domain?.trim().toLowerCase().replace(/\.$/, '');
-  const domainService = desiredDomain ? domainServiceFor(environmentSpec!) : undefined;
+  const desiredDomains = environmentDomains(environmentSpec!);
+  const domainService = desiredDomains.length ? domainServiceFor(environmentSpec!) : undefined;
   const domainContext = { adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region,
     ...(domainService ? { serviceName: serviceResourceName(context, environmentName, domainService) } : {}) };
-  let domainActions: DomainPlanActions = { before: [], after: [] };
-  if (desiredDomain && domainService) {
-    if (!environmentSpec!.dns) return { blocked: ['Set environment.dns to the exact DNS provider and zone for this custom domain. Hosting and DNS can use different providers.'] };
-    domainActions = await planDomain(domainContext, desiredDomain, environmentSpec!.services[domainService]!.healthCheckPath ?? '/', environmentSpec!.dns.zone.name);
-    if (domainActions.blocked) return { blocked: [domainActions.blocked] };
-    if (domainActions.mappingPresent) {
-      const observed = await observeDomainMapping(domainContext, desiredDomain);
-      const ownership = await verifyGcpDomainEngineOwnership(context, desiredDomain, observed);
+  const domainPlans = new Map<string, DomainPlanActions>();
+  const domainClaims = { ...engineBinding.domainClaims };
+  const ownerFor = (domain: string) => gcpDomainDnsOwner(context.environment, domain, environmentSpec!.domain,
+    domainClaims[domain] && (domainClaims[domain].owner ?? 'gcp-domain'));
+  const addressNames = new Set<string>();
+  for (const domain of new Set([...desiredDomains.map(item => item.domain), ...(engineBinding.domains ?? []), ...Object.keys(engineBinding.domainClaims ?? {})])) {
+    const address = domainEngineKey(domain, ownerFor(domain) !== 'gcp-domain');
+    if (addressNames.has(address)) return { blocked: ['Two Cloud Run hostnames share a legacy engine address. Preserve the current claims until the addresses are migrated.'] };
+    addressNames.add(address);
+  }
+  const proofOwners = new Map<string, string>();
+  for (const { domain, dns } of desiredDomains) {
+    if (!dns || !domainService) return { blocked: [`Select the DNS provider and exact zone for ${domain} and one public web service.`] };
+    const owner = ownerFor(domain);
+    domainClaims[domain] = { zone: dnsZoneIdentity(dns), connectionScope: dns.connectionScope, owner };
+    const actions = await planDomain(domainContext, domain, environmentSpec!.services[domainService]!.healthCheckPath ?? '/', dns.zone.name);
+    if (actions.blocked) return { blocked: [actions.blocked] };
+    domainPlans.set(domain, actions);
+    if (actions.mappingPresent) {
+      const observed = await observeDomainMapping(domainContext, domain);
+      const ownership = await verifyGcpDomainEngineOwnership(context, domain, observed, owner !== 'gcp-domain');
       if (!ownership.ready) return { blocked: [ownership.reason ?? 'The live domain mapping is not owned by the saved engine state.'] };
     }
-    if (!domainActions.ownershipPresent || domainActions.mappingPresent) {
-      const prepared = await prepareDnsEnginePlan({ ctx, project, environment: context.environment, environmentSpec: environmentSpec!,
-        owner: 'gcp-domain', domain: desiredDomain, records: domainActions.dnsRecords ?? [], retainExistingTypes: ['TXT'] });
+    if (!actions.ownershipPresent && actions.verificationDomain) {
+      // Google verifies a registrable domain once. Use one reviewed TXT contribution across sibling hostnames.
+      const first = proofOwners.get(actions.verificationDomain);
+      if (first) {
+        actions.before = domainPlans.get(first)!.before;
+        continue;
+      }
+      proofOwners.set(actions.verificationDomain, domain);
+    }
+    if (!actions.ownershipPresent || actions.mappingPresent) {
+      const prepared = await prepareDnsEnginePlan({ ctx, project, environment: context.environment, environmentSpec: { ...environmentSpec!, domain, dns },
+        owner, domain, records: actions.dnsRecords ?? [], retainExistingTypes: ['TXT'] });
       if (prepared.blocked) return { blocked: prepared.blocked };
       if (!prepared.ready) return persistDnsPlanRun(ctx, { project, environment: context.environment, environmentName,
-        specRevision: params.specRevision, prepared, source: { kind: 'gcp-domain', environmentName, domain: desiredDomain,
+        specRevision: params.specRevision, prepared, source: { kind: 'gcp-domain', environmentName, domain,
           gcpProjectId: context.gcpProjectId, region: context.region, serviceName: domainContext.serviceName,
-          sourceFingerprint: domainActions.sourceFingerprint, remove: false } });
+          sourceFingerprint: actions.sourceFingerprint, remove: false } });
     }
   }
-  const ownedDomain = getDnsOwnedDomain(context.environment, 'gcp-domain');
-  const retiredDomains = [...new Set([...(engineBinding.domains ?? []), ...(ownedDomain ? [ownedDomain] : []), ...unfinishedDomainRemovals(context.environment.id)])]
-    .filter((domain) => domain !== desiredDomain).sort();
+  const unfinished = unfinishedDomainRemovals(context.environment.id);
+  const retiredDomains = [...new Set([...(engineBinding.domains ?? []), ...ownedGcpDnsDomains(context.environment), ...unfinished])]
+    .filter(domain => !domainPlans.has(domain)).sort();
   const cancelledDomainProofs: Record<string, { zoneFingerprint: string; connectionId: string }> = {};
-  const domainClaims = { ...engineBinding.domainClaims };
   for (const domain of retiredDomains) {
-    if (!getDnsBindingIdentity(context.environment)) {
+    const owner = ownerFor(domain);
+    if (!getDnsBindingIdentity(context.environment, owner)) {
       const selected = engineBinding.domainClaims?.[domain];
       if (!selected) return { blocked: ['The retired domain has no verified engine DNS ownership or saved initial DNS selection. Explicitly adopt its exact DNS records before removing the hosting claim.'] };
       const absence = await verifyDnsTrafficAbsent({ ctx, project, domain, ...selected });
@@ -896,9 +982,13 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       cancelledDomainProofs[domain] = absence;
       continue;
     }
-    if (!hasOwnedDnsRecords(context.environment, 'gcp-domain')) {
-      const selected = getDnsBindingSelection(context.environment)!;
-      domainClaims[domain] = selected;
+    const proofName = dnsZoneScopeForDomain(domain);
+    const keepProof = desiredDomains.some(item => dnsZoneScopeForDomain(item.domain) === proofName);
+    const proofOnly = keepProof && onlyGoogleProofRemains(ctx, context.environment, owner, proofName);
+    if (proofOnly && !engineBinding.domains?.includes(domain) && !engineBinding.domainClaims?.[domain] && !unfinished.includes(domain)) continue;
+    if (!hasOwnedDnsRecords(context.environment, owner) || proofOnly) {
+      const selected = getDnsBindingSelection(context.environment, owner)!;
+      domainClaims[domain] = { ...selected, owner };
       const absence = await verifyDnsTrafficAbsent({ ctx, project, domain, ...selected });
       if (!absence.ready) return { blocked: [absence.reason] };
       cancelledDomainProofs[domain] = absence;
@@ -907,7 +997,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     const mapping = await observeDomainMapping(domainContext, domain);
     if (mapping.state === 'unknown') return { blocked: [mapping.reason] };
     const prepared = await prepareDnsEnginePlan({ ctx, project, environment: context.environment, environmentSpec: environmentSpec!,
-      owner: 'gcp-domain', domain, records: [], remove: true });
+      owner, domain, records: [], remove: true, ...(keepProof ? { retainExistingTypes: ['TXT'] as const } : {}) });
     if (prepared.blocked) return { blocked: prepared.blocked };
     if (!prepared.ready) return persistDnsPlanRun(ctx, { project, environment: context.environment, environmentName,
       specRevision: params.specRevision, prepared, source: { kind: 'gcp-domain', environmentName, domain,
@@ -948,8 +1038,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       ...(queue.ackDeadlineSeconds ? { ackDeadlineSeconds: queue.ackDeadlineSeconds } : {}),
     })),
     retiredQueues: (engineBinding.queues ?? []).filter((name) => !environmentSpec!.queues?.[name]),
-    ...(desiredDomain && domainService ? { domains: [{ domain: desiredDomain, service: domainService }] } : {}),
+    ...(domainService ? { domains: desiredDomains.map(({ domain }) => ({ domain, service: domainService })) } : {}),
     ...(retiredDomains.length ? { retiredDomains } : {}),
+    extraDomains: [...desiredDomains.map(item => item.domain), ...retiredDomains].filter(domain => ownerFor(domain) !== 'gcp-domain'),
     runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
     storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
@@ -995,7 +1086,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   let imageRepository: { planId: string; state: EngineStateIdentity } | undefined;
   let imageRepositoryActions: PlanAction[] = [];
   if (repository.state === 'absent') {
-    imageRepository = { planId: crypto.randomUUID(), state: imageRepositoryState(project.id, context.region) };
+    imageRepository = { planId: crypto.randomUUID(), state: imageRepositoryState(project.id, context.region, environmentProjectId) };
     const repositoryPlanned = await engine.plan({ backend: gcpEngineBackend, configuration: imageRepositoryConfiguration(context.gcpProjectId, context.region),
       auth: context.auth, state: imageRepository.state, planId: imageRepository.planId });
     if (!repositoryPlanned.ok) return { blocked: [redactEngineOutput(repositoryPlanned.error, context.auth.redact)] };
@@ -1004,17 +1095,19 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     if (!imageRepositoryActions.length) imageRepository = undefined;
   }
 
-  const domainPrerequisites = domainActions.before.filter((a) => a.type !== 'noop').map((a) => a.id);
-  const serviceActions = planned.actions.map((action) => {
-    if (action.type !== 'create' && action.type !== 'update' && action.type !== 'replace') return action;
-    const extra = action.id.startsWith('domain:') ? domainPrerequisites : [];
+  const domainBefore = [...new Map([...domainPlans.values()].flatMap(plan => plan.before).map(action => [action.id, action])).values()];
+  const serviceActions = planned.actions.map(action => {
+    if (!action.id.startsWith('domain:') || !['create', 'update', 'replace'].includes(action.type)) return action;
+    const extra = domainPlans.get(action.resource.name)?.before.filter(before => before.type !== 'noop').map(before => before.id) ?? [];
     return extra.length ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...extra] } : action;
   });
-  const engineDomainAction = desiredDomain ? serviceActions.find((a) => a.id === `domain:${desiredDomain}`) : undefined;
-  const domainAfter = (domainActions.mappingPresent ? domainActions.after : []).map((action) => action.type !== 'noop' && engineDomainAction && engineDomainAction.type !== 'noop'
-    ? { ...action, dependsOn: [engineDomainAction.id] } : action);
+  const domainAfter = [...domainPlans.entries()].flatMap(([domain, plan]) => {
+    const mapping = serviceActions.find(action => action.id === `domain:${domain}` && action.type !== 'noop');
+    return plan.mappingPresent ? plan.after.map(action => mapping && action.type !== 'noop' ? { ...action, dependsOn: [mapping.id] } : action) : [];
+  });
   const forgottenDomains: PlanAction[] = [];
   for (const domain of retiredDomains.filter(name => !serviceActions.some(action => action.id === `domain:${name}` && action.type !== 'noop'))) {
+    if (!engineBinding.domains?.includes(domain) && !engineBinding.domainClaims?.[domain] && !unfinished.includes(domain)) continue;
     const observed = await observeDomainMapping(domainContext, domain);
     if (observed.state !== 'absent') return { blocked: [observed.state === 'unknown' ? observed.reason : 'The retired mapping remains present without a corresponding engine removal action. Preserve its state and refresh the plan.'] };
     if (!cancelledDomainProofs[domain]) return { blocked: ['The cancelled domain still needs verified DNS cleanup before its ownership receipt can be retired.'] };
@@ -1053,7 +1146,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       secretId: databaseSecretId, iamUser: wakeUser },
   }] : [];
   const cacheAction = serviceActions.find((action) => action.id === 'cache:redis');
-  const s3CredentialActions: PlanAction[] = s3Storage.filter((name) => !s3Ready.includes(name)).map((storageName) => {
+  const s3CredentialActions: PlanAction[] = pendingS3Storage.map((storageName) => {
     const bucketAction = serviceActions.find((action) => action.id === `storage:${storageName}`);
     return {
       id: `storage-s3-key:${storageName}`, type: 'create', verified: true,
@@ -1075,16 +1168,16 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
   // The complete engine segment creates containers before operational value writes.
-  const actions = [...imageRepositoryActions, ...domainActions.before, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
+  const actions = [...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const warnings = [
-    'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
+    gcpInfrastructureNotes.release,
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
     ...(databaseShape && databaseAction && databaseAction.type !== 'noop' ? [databaseShape.summary] : []),
     ...(cacheSpec && !cacheReady && anyService
-      ? ['Services are connected to Redis in the next infrastructure plan, once Hypervibe has published its URL.'] : []),
+      ? [gcpInfrastructureNotes.redis] : []),
     ...(databaseSpec && !databaseCredentialReady && anyService
-      ? ['Services are connected to the database in the next infrastructure plan, once Hypervibe has created its login. Run hv_plan scope="infrastructure" again after this apply.']
+      ? [gcpInfrastructureNotes.database]
       : []),
   ];
   const observedGenerations = await serviceGenerations(token, context, environmentName);
@@ -1095,9 +1188,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
       ...(imageRepository ? { imageRepository } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
-      domainClaims: { ...domainClaims, ...(desiredDomain && environmentSpec!.dns ? {
-        [desiredDomain]: { zone: dnsZoneIdentity(environmentSpec!.dns), connectionScope: environmentSpec!.dns.connectionScope },
-      } : {}) }, cancelledDomainProofs,
+      domainClaims, cancelledDomainProofs,
     } });
 }
 
@@ -1109,7 +1200,7 @@ export async function verifyGcpDnsSource(ctx: CommandContext, project: Project, 
   const fail = (reason: string) => ({ ready: false, reason });
   if (typeof source.environmentName !== 'string' || typeof source.domain !== 'string') return fail('The saved Google DNS source is incomplete.');
   const environmentSpec = spec.environments[source.environmentName];
-  if (!environmentSpec || source.remove !== (environmentSpec.domain !== source.domain)) return fail('The custom-domain intent changed after review.');
+  if (!environmentSpec || source.remove !== !environmentDomains(environmentSpec).some(item => item.domain === source.domain)) return fail('The custom-domain intent changed after review.');
   const context = await resolveEngineContext(ctx, project, spec, source.environmentName);
   if ('blocked' in context) return fail(context.blocked);
   if (source.gcpProjectId !== context.gcpProjectId || source.region !== context.region) return fail('The Google project or region changed after review.');
@@ -1121,7 +1212,11 @@ export async function verifyGcpDnsSource(ctx: CommandContext, project: Project, 
   if (observed.state === 'unknown') return fail(observed.reason);
   const fingerprint = observed.state === 'present' ? observed.sourceFingerprint : 'absent';
   if (fingerprint !== source.sourceFingerprint) return fail('The Google domain mapping changed after DNS planning. Run hv_plan again.');
-  if (observed.state === 'present') return verifyGcpDomainEngineOwnership(context, source.domain, observed);
+  if (observed.state === 'present') {
+    const saved = (context.environment.platformBindings.engine as EngineBinding | undefined)?.domainClaims?.[source.domain];
+    const owner = gcpDomainDnsOwner(context.environment, source.domain, environmentSpec.domain, saved && (saved.owner ?? 'gcp-domain'));
+    return verifyGcpDomainEngineOwnership(context, source.domain, observed, owner !== 'gcp-domain');
+  }
   return { ready: true };
 }
 
@@ -1161,9 +1256,30 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   planId: string;
   confirmActions: string[];
 }): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
-  const loaded = new ConvergeExecutor().loadPlan(params.planId);
+  const executor = new ConvergeExecutor();
+  const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
+  if (loaded.document.scope === 'domain-registration') {
+    return applyRegistrarStage(ctx, executor, loaded, params.project, params.spec.environments[loaded.document.environmentName], params.specRevision, params.confirmActions);
+  }
   return cloudEngineForPlan(loaded.document as PlanRunDocument & { engine?: Record<string, unknown> }, params.spec).apply(ctx, params);
+}
+
+/** The environment state path survives retries. Pin its cloud target before dispatching its first approved write. */
+function claimGcpApplyTarget(ctx: CommandContext, context: EngineContext, selectedProjectId?: string): string | undefined {
+  const repo = ctx.repos.environments;
+  const current = repo.findById(context.environment.id);
+  if (!current) return 'The reviewed environment no longer exists. Run hv_plan again.';
+  const bindings = current.platformBindings;
+  const conflict = gcpEnvironmentBindingConflict(bindings, context.gcpProjectId, context.region)
+    ?? gcpUnboundStateConflict(current, selectedProjectId);
+  if (conflict) return conflict;
+  const target = { provider: 'cloudrun', projectId: context.gcpProjectId, environmentId: context.region, region: context.region };
+  if (Object.entries(target).every(([key, value]) => bindings[key] === value)) return;
+  if (!repo.replacePlatformBindingsIfUnchanged(current, { ...bindings, ...target })) {
+    return 'The environment bindings changed before apply. Run hv_plan again.';
+  }
+  repo.syncRepoBindingsForId(current.id);
 }
 
 /** Applies a reviewed Google Cloud plan. */
@@ -1194,6 +1310,15 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
   const token = await context.adapter.engineAccessToken();
 
+  if (document.actions.some(action => action.type !== 'noop' && action.metadata?.operation === ENGINE_STORAGE_S3_KEY_OPERATION)) {
+    const access = await checkHmacCreateAccess(token, context.gcpProjectId);
+    if (access.state !== 'granted') return { kind: 'blocked', reason: access.state === 'missing' ? storageS3AccessMessage(access.message, environmentName) : access.message };
+  }
+  const claimTarget = () => claimGcpApplyTarget(ctx, context, params.spec.environments[environmentName]?.hosting.gcpProjectId);
+  const applyToTarget = (change: () => Promise<ActionResult> | ActionResult): Promise<ActionResult> | ActionResult => {
+    const conflict = claimTarget();
+    return conflict ? { success: false, status: 'blocked', message: conflict } : change();
+  };
   const result = await executor.execute({
     planRunId: params.planId,
     currentSpecRevision: params.specRevision,
@@ -1207,20 +1332,27 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         const selected = reviewed.domainClaims?.[domain];
         const expected = reviewed.cancelledDomainProofs?.[domain];
         const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-        if (!selected || !expected || hasOwnedDnsRecords(current, 'gcp-domain')) return { success: false, status: 'blocked', message: 'The cancelled domain still needs exact DNS cleanup evidence.' };
+        const owner = selected?.owner ?? 'gcp-domain';
+        const proofName = dnsZoneScopeForDomain(domain);
+        const retainedProof = environmentDomains(params.spec.environments[environmentName]!).some(item => dnsZoneScopeForDomain(item.domain) === proofName)
+          && onlyGoogleProofRemains(ctx, current, owner, proofName);
+        if (!selected || !expected || hasOwnedDnsRecords(current, owner) && !retainedProof) return { success: false, status: 'blocked', message: 'The cancelled domain still needs exact DNS cleanup evidence.' };
         const observed = await observeDomainMapping({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, domain);
         if (observed.state !== 'absent') return { success: false, status: 'blocked', message: 'The cancelled mapping is present or unknown. Its ownership is retained.' };
         const absence = await verifyDnsTrafficAbsent({ ctx, project: params.project, domain, ...selected, expected });
         if (!absence.ready) return { success: false, status: 'blocked', message: absence.reason };
         const saved = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
         const claims = { ...saved.domainClaims }; delete claims[domain];
-        ctx.repos.environments.updatePlatformBindings(current.id, { engine: { ...saved, domains: (saved.domains ?? []).filter(value => value !== domain), domainClaims: claims } });
-        return { success: true, message: 'Verified the cancelled domain is absent and finished its cleanup.' };
+        return applyToTarget(() => {
+          ctx.repos.environments.updatePlatformBindings(current.id, { engine: { ...saved, domains: (saved.domains ?? []).filter(value => value !== domain), domainClaims: claims } });
+          return { success: true, message: 'Verified the cancelled domain is absent and finished its cleanup.' };
+        });
       }
-      if (operation === ENGINE_SECRET_OPERATION) return ensureSecret(token, action);
+      if (operation === ENGINE_SECRET_OPERATION) return applyToTarget(() => ensureSecret(token, action));
       if (operation === 'gcpSecretManagerDelete') return { success: false, status: 'blocked', message: 'Secret containers are managed by OpenTofu. Run hv_plan again.' };
       if (typeof operation === 'string' && DOMAIN_OPERATIONS.has(operation)) {
-        const result = await executeDomainAction({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, action);
+        const execute = () => executeDomainAction({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, action);
+        const result = await (operation === DOMAIN_VERIFY_OPERATION ? applyToTarget(execute) : execute());
         if (operation === DOMAIN_DNS_REMOVE_OPERATION && result.success) {
           const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
           const binding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
@@ -1231,19 +1363,19 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         }
         return result;
       }
-      if (operation === ENGINE_CACHE_CREDENTIAL_OPERATION) return ensureCacheCredential(token, action);
-      if (operation === ENGINE_STORAGE_S3_KEY_OPERATION) return ensureStorageS3Key(token, action);
+      if (operation === ENGINE_CACHE_CREDENTIAL_OPERATION) return applyToTarget(() => ensureCacheCredential(token, action));
+      if (operation === ENGINE_STORAGE_S3_KEY_OPERATION) return applyToTarget(() => ensureStorageS3Key(token, action));
       if (operation === ENGINE_DATABASE_CREDENTIAL_OPERATION) {
         if ((action.metadata as { instanceName?: string }).instanceName !== reviewed.database?.instanceName) {
           return { success: false, status: 'blocked', message: 'Database target changed; re-run hv_plan.' };
         }
-        return executeDatabaseCredential(token, JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>, action);
+        return applyToTarget(() => executeDatabaseCredential(token, JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>, action));
       }
       if (operation === ENGINE_WORKER_WAKE_GRANT_OPERATION) {
         if ((action.metadata as { instanceName?: string }).instanceName !== reviewed.database?.instanceName) {
           return { success: false, status: 'blocked', message: 'Database target changed; re-run hv_plan.' };
         }
-        const granted = await grantWorkerWakeRead(token, JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>, action);
+        const granted = await applyToTarget(() => grantWorkerWakeRead(token, JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>, action));
         if (granted.success) {
           const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
           const binding = (current.platformBindings as { engine?: EngineBinding }).engine ?? {};
@@ -1255,10 +1387,13 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
     },
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
+      const stop = (reason: string) => ({ outcomes: Object.fromEntries(addresses.map(address => [address, 'not_started' as const])), diagnostics: [reason] });
       if (reviewed.imageRepository && segment.id === `opentofu:${reviewed.imageRepository.planId}`) {
-        if (JSON.stringify(reviewed.imageRepository.state) !== JSON.stringify(imageRepositoryState(params.project.id, context.region))) {
-          return { outcomes: Object.fromEntries(addresses.map((address) => [address, 'not_started' as const])), diagnostics: ['The reviewed image repository targets a different region. Re-run hv_plan.'] };
+        if (JSON.stringify(reviewed.imageRepository.state) !== JSON.stringify(imageRepositoryState(params.project.id, context.region, params.spec.environments[environmentName]?.hosting.gcpProjectId))) {
+          return stop('The reviewed image repository targets a different Google Cloud project or region. Re-run hv_plan.');
         }
+        const conflict = claimTarget();
+        if (conflict) return stop(conflict);
         const outcome = await engine.apply({ backend: gcpEngineBackend, auth: context.auth, state: reviewed.imageRepository.state,
           planId: reviewed.imageRepository.planId, segment: { ...segment, addresses }, approvedAddresses: addresses });
         return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
@@ -1273,21 +1408,30 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
       for (const member of members.filter(action => action.id.startsWith('domain:'))) {
         const domain = member.resource.name;
         const observed = await observeDomainMapping({ adapter: context.adapter, gcpProjectId: context.gcpProjectId, region: context.region }, domain);
-        const stop = (reason: string) => ({ outcomes: Object.fromEntries(addresses.map(address => [address, 'not_started' as const])), diagnostics: [reason] });
         if (observed.state === 'unknown') return stop(observed.reason);
         if (member.type === 'create' && observed.state !== 'absent') return stop('A domain mapping appeared after review. No creation or adoption is authorized.');
         if (observed.state === 'present') {
-          const ownership = await verifyGcpDomainEngineOwnership(context, domain, observed);
+          const ownership = await verifyGcpDomainEngineOwnership(context, domain, observed,
+            (reviewed.domainClaims?.[domain]?.owner ?? 'gcp-domain') !== 'gcp-domain');
           if (!ownership.ready) return stop(ownership.reason ?? 'The exact mapping is not owned by this engine state.');
         }
         if (member.type === 'destroy') {
-          const selected = reviewed.domainClaims?.[domain] ?? getDnsBindingSelection(context.environment);
+          const selected = reviewed.domainClaims?.[domain] ?? getDnsBindingSelection(context.environment, gcpDomainDnsOwner(context.environment, domain, params.spec.environments[environmentName]?.domain));
           const expected = reviewed.cancelledDomainProofs?.[domain];
           if (!selected || !expected) return stop('Domain removal needs reviewed native and public DNS absence. Run hv_plan again.');
           const absence = await verifyDnsTrafficAbsent({ ctx, project: params.project, domain, ...selected, expected });
           if (!absence.ready) return stop(absence.reason);
         }
       }
+      for (const member of members.filter((entry) => entry.id.startsWith('secret-container:'))) {
+        const observed = await observeSecret(token, context.gcpProjectId, member.resource.name);
+        const changed = observed.state === 'unknown'
+          || (observed.state === 'present' && (member.type === 'create' || observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labelValue(context.environment.id)))
+          || (observed.state === 'absent' && member.type !== 'create' && member.type !== 'destroy');
+        if (changed) return stop(`Secret container ${member.resource.name} changed identity or ownership after planning. Run hv_plan again.`);
+      }
+      const conflict = claimTarget();
+      if (conflict) return stop(conflict);
       const attemptingDomains = members.filter(member => member.id.startsWith('domain:') && member.type !== 'destroy').map(member => member.resource.name);
       if (attemptingDomains.length) {
         const environment = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
@@ -1295,13 +1439,6 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...saved, kind: 'opentofu',
           domains: [...new Set([...(saved.domains ?? []), ...attemptingDomains])],
           domainClaims: { ...saved.domainClaims, ...reviewed.domainClaims } } });
-      }
-      for (const member of members.filter((entry) => entry.id.startsWith('secret-container:'))) {
-        const observed = await observeSecret(token, context.gcpProjectId, member.resource.name);
-        const changed = observed.state === 'unknown'
-          || (observed.state === 'present' && (member.type === 'create' || observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labelValue(context.environment.id)))
-          || (observed.state === 'absent' && member.type !== 'create' && member.type !== 'destroy');
-        if (changed) return { outcomes: Object.fromEntries(addresses.map((address) => [address, 'not_started' as const])), diagnostics: [`Secret container ${member.resource.name} changed identity or ownership after planning. Run hv_plan again.`] };
       }
       // Record the attempted database identity first, so an interrupted create is found, not duplicated.
       if (reviewed.cache?.instanceName && members.some((member) => member.id === 'cache:redis' && member.type !== 'destroy')) {
@@ -1415,10 +1552,6 @@ async function recordServiceBindings(
     };
   }
   ctx.repos.environments.updatePlatformBindings(current.id, {
-    provider: 'cloudrun',
-    projectId: context.gcpProjectId,
-    environmentId: context.region,
-    region: context.region,
     engine: JSON.parse(JSON.stringify(engine)) as EngineBinding,
     services,
   });

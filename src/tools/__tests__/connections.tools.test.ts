@@ -11,6 +11,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { ProjectRepository } from '../../adapters/db/repositories/project.repository.js';
+import { EnvironmentRepository } from '../../adapters/db/repositories/environment.repository.js';
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
@@ -30,8 +31,10 @@ vi.mock('../../domain/services/gcp-bootstrap.service.js', async (original) => {
 });
 
 import { runGcpBootstrap } from '../../domain/services/gcp-bootstrap.service.js';
+import * as cloudPrepare from '../../domain/services/cloud-prepare.execute.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../../application/context.js';
+import { runCli } from '../../interfaces/cli/run.js';
 
 let tempDir: string;
 const githubTokenEnvironmentNames = [
@@ -239,6 +242,31 @@ describe('hv_connections', () => {
     } finally { await t.close(); }
   });
 
+  it('returns an exact token label and read-only package permissions for a single missing GitHub role', async () => {
+    const project = new ProjectRepository().create({ name: 'package-app', defaultPlatform: 'railway' });
+    const t = await makeClient();
+    const input = { provider: 'github', action: 'describe', role: 'packageReadToken', project: project.name, environment: 'staging' };
+    const setup = (await t.call('hv_connections', input)).data.connectionSetup;
+    expect(setup.roles).toHaveLength(1);
+    expect(setup.tokenType).not.toMatch(/repo|workflow/i);
+    expect(setup.requiredPermissions).toEqual(['read:packages']);
+    expect(setup.roles[0].tokenLabel).toBe('package-app / staging: HYPERVIBE_GITHUB_PACKAGES_TOKEN (read:packages)');
+    expect(new URL(setup.recommendedSetupUrl).searchParams.get('description')).toBe(setup.roles[0].tokenLabel);
+    expect(new URL(setup.recommendedSetupUrl).searchParams.get('scopes')).toBe('read:packages');
+    expect((await t.call('hv_connections', input)).data.connectionSetup).toEqual(setup);
+    await t.close();
+  });
+
+  it('labels SendGrid management and send-only runtime roles in the public setup prompt', async () => {
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'sendgrid', action: 'describe' });
+    expect(result.data.connectionSetup.roles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sourceVariable: 'HYPERVIBE_SENDGRID_API_KEY', destinationRole: 'provider-management', issuer: 'SendGrid' }),
+      expect.objectContaining({ sourceVariable: 'SENDGRID_API_KEY', destinationRole: 'application-runtime', permissions: ['mail.send'] }),
+    ]));
+    await t.close();
+  });
+
   it('describes scoped credential forms without resolving credentials or writing connection state', async () => {
     const project = new ProjectRepository().create({ name: 'storefront', defaultPlatform: 'railway', gitRemoteUrl: 'git@github.com:acme/storefront.git' });
     const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Provider access must not occur during describe'));
@@ -410,6 +438,67 @@ describe('hv_connections', () => {
     await t.close();
   });
 
+  it('offers only a local project repair when a bootstrap preview needs recovery', async () => {
+    const project = new ProjectRepository().create({ name: 'recovery-app', defaultPlatform: 'cloudrun', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    const input = { provider: 'cloudrun', action: 'bootstrap', project: project.name, gcpProjectId: 'example-project',
+      region: 'europe-west1', adminAuth: 'default', billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' };
+    const recoverProjectState = 'repair-verified-project';
+    const retryCall = { ...input, recoverProjectState };
+    const failedPreview = { success: false, mode: 'preview' as const, error: 'Project setup requires local recovery.',
+      projectRecovery: { projectId: input.gcpProjectId, projectNumber: '123456', previousPlanId: 'setup-prior', recoverProjectState, retryCall } };
+    vi.mocked(runGcpBootstrap).mockResolvedValueOnce(failedPreview);
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_connections', input);
+      expect(result.error.code).toBe('CONFIRM_REQUIRED');
+      expect(result.confirmation.retryInput).toEqual(retryCall);
+      expect(result.error.details.projectRecovery.recoverProjectState).toBe(recoverProjectState);
+      expect(result.hint).toContain('--recover-project-state');
+      expect(result.agentInstruction.action).toBe('ask_user');
+      const confirmCall = { ...input, gcpSetupPlanId: 'fresh-preview', confirm: true as const };
+      const freshPreview = { success: true, mode: 'preview' as const, planId: 'fresh-preview', requiresPlanId: true as const, confirmCall, requiresConfirmation: true };
+      vi.mocked(runGcpBootstrap).mockResolvedValue(freshPreview);
+      const preview = await t.call('hv_connections', retryCall);
+      expect(preview.data.planId).toBe('fresh-preview');
+      expect(runGcpBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ recoverProjectState, confirm: undefined }));
+      expect(preview.hint).toContain('omit recoverProjectState');
+      expect(preview.hint).toContain('--gcp-setup-plan-id fresh-preview');
+      expect(preview.confirmation.retryInput).toEqual(confirmCall);
+      expect(preview.agentInstruction.message).toContain('fresh-preview');
+      vi.mocked(runGcpBootstrap).mockResolvedValueOnce(failedPreview);
+      const output: string[] = [];
+      const cli = await runCli(['connections', '--project', project.name, '--provider', 'cloudrun', '--action', 'bootstrap',
+        '--gcp-project-id', input.gcpProjectId, '--billing-account-name', input.billingAccountName, '--region', input.region, '--admin-auth', 'default'], {
+        initialize: false, io: { stdinIsTTY: true, confirm: async () => true, readStdin: async () => '',
+          writeErr: line => output.push(line), writeOut: line => output.push(line) },
+      });
+      expect(cli).toBe(0);
+      expect(output.join(' ')).toContain('--recover-project-state ' + recoverProjectState);
+      expect(runGcpBootstrap).toHaveBeenLastCalledWith(expect.objectContaining({ gcpProjectId: input.gcpProjectId, recoverProjectState, confirm: undefined }));
+      vi.mocked(runGcpBootstrap).mockResolvedValueOnce(freshPreview).mockResolvedValueOnce({ success: true, mode: 'confirm' });
+      const prompt = vi.fn(async () => true);
+      const reviewed = await runCli(['connections', '--input', '-'], {
+        initialize: false, io: { stdinIsTTY: true, confirm: prompt, readStdin: async () => JSON.stringify(retryCall),
+          writeErr: line => output.push(line), writeOut: line => output.push(line) },
+      });
+      expect(reviewed).toBe(0);
+      expect(prompt).toHaveBeenCalledWith(expect.stringContaining('fresh-preview'));
+      const last = vi.mocked(runGcpBootstrap).mock.lastCall![0];
+      expect(last).toMatchObject({ gcpSetupPlanId: 'fresh-preview', confirm: true, gcpProjectId: input.gcpProjectId });
+      expect(last).not.toHaveProperty('recoverProjectState');
+      vi.mocked(runGcpBootstrap).mockClear().mockResolvedValue(freshPreview);
+      prompt.mockClear();
+      const noninteractive = await runCli(['connections', '--input', '-', '--json'], {
+        initialize: false, io: { stdinIsTTY: true, confirm: prompt, readStdin: async () => JSON.stringify(retryCall),
+          writeOut: line => output.push(line), writeErr: line => output.push(line) },
+      });
+      expect(noninteractive).toBe(0);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(runGcpBootstrap).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(output.at(-1)!).confirmation.retryInput).toEqual(confirmCall);
+    } finally { await t.close(); }
+  });
+
   it('previews the exact setup plan after billing selection without applying it', async () => {
     const project = new ProjectRepository().create({ name: 'gcp-selected-billing', defaultPlatform: 'cloudrun', gitRemoteUrl: 'git@github.com:owner/repo.git' });
     vi.mocked(runGcpBootstrap).mockResolvedValue({ success: true, mode: 'preview', planId: 'saved-project-plan', actions: [],
@@ -421,6 +510,49 @@ describe('hv_connections', () => {
       expect(result.ok).toBe(true);
       expect(result.data.planId).toBe('saved-project-plan');
       expect(runGcpBootstrap).toHaveBeenCalledWith(expect.objectContaining({ region: 'europe-west1', billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', confirm: undefined }));
+    } finally { await t.close(); }
+  });
+
+  it('binds bootstrap and prepare to the declared environment project and rejects conflicting or missing selections', async () => {
+    const project = new ProjectRepository().create({ name: 'scoped-gcp', defaultPlatform: 'cloudrun', gitRemoteUrl: 'https://github.com/owner/repo.git' });
+    new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
+      staging: { hosting: { provider: 'cloudrun' }, services: {} },
+      railway: { hosting: { provider: 'railway' }, services: {} },
+      production: { hosting: { provider: 'cloudrun', region: 'us-central1', gcpProjectId: 'dedicated-production' }, services: {} },
+    } });
+    const selected = new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new ConnectionRepository().upsertVerifiedBatch([{ provider: 'cloudrun', scope: 'owner/repo',
+      credentialsEncrypted: getSecretStore().encryptObject({ projectId: 'staging-project' }) }]);
+    vi.mocked(runGcpBootstrap).mockResolvedValue({ success: true, mode: 'preview' });
+    const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview' });
+    const t = await makeClient();
+    try {
+      for (const action of ['bootstrap', 'prepare']) {
+        const params = { provider: 'cloudrun', project: project.name, action, ...(action === 'bootstrap' ? { adminAuth: 'default' } : {}) };
+        const run = action === 'bootstrap' ? vi.mocked(runGcpBootstrap) : prepare;
+        const preview = await t.call('hv_connections', { ...params, environment: 'production' });
+        expect(preview.ok).toBe(true);
+        expect(run).toHaveBeenCalledWith(expect.objectContaining({ environmentProjectId: 'dedicated-production' }));
+        run.mockClear();
+        for (const selection of [{ environment: 'production', gcpProjectId: 'staging-project' },
+          { environment: 'railway' }, { environment: 'production', region: 'us-west1' },
+          { environment: 'unknown', gcpProjectId: 'staging-project' }, { environment: 'staging', gcpProjectId: 'dedicated-production' },
+          { gcpProjectId: 'dedicated-production' }, { gcpProjectId: 'some-other-project' }]) {
+          const refused = await t.call('hv_connections', { ...params, ...selection, confirm: true, adminAuth: 'default',
+            ...(action === 'bootstrap' ? { billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' } : {}) });
+          expect(refused.error?.code).toBe('VALIDATION');
+        }
+        for (const binding of [{ projectId: 'staging-project' }, { projectId: 'dedicated-production', region: 'europe-west1' }]) {
+          new EnvironmentRepository().update(selected.id, { platformBindings: binding });
+          const refused = await t.call('hv_connections', { ...params, environment: 'production' });
+          expect(refused.error?.code).toBe('VALIDATION');
+        }
+        new EnvironmentRepository().update(selected.id, { platformBindings: {} });
+        expect(run).not.toHaveBeenCalled();
+        const legacy = await t.call('hv_connections', { ...params, environment: 'staging' });
+        expect(legacy.ok).toBe(true);
+        expect(run.mock.lastCall?.[0].environmentProjectId).toBeUndefined();
+      }
     } finally { await t.close(); }
   });
 
@@ -462,6 +594,16 @@ describe('hv_connections', () => {
   it('rejects incomplete or unsafe GCP bootstrap calls before provider access', async () => {
     const t = await makeClient();
     const cases = [
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', gcpSetupPlanId: 'cloud-plan' },
+      { provider: 'cloudrun', action: 'prepare', project: 'app', confirm: true, gcpSetupPlanId: 'cloud-plan' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', gcpProjectId: 'vibe-project', billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC',
+        confirm: true, recoverProjectState: 'repair', gcpSetupPlanId: 'cloud-plan' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', recoverProjectState: 'repair', gcpProjectId: 'vibe-project',
+        billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC', confirm: true },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', recoverProjectState: 'repair', gcpProjectId: 'vibe-project' },
+      { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', recoverProjectState: 'repair',
+        billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },
+      { provider: 'cloudflare', action: 'connect', scope: 'app.example', recoverProjectState: 'repair' },
       { provider: 'railway', action: 'bootstrap', gcpProjectId: 'vibe-project' },
       { provider: 'cloudrun', action: 'bootstrap' },
       { provider: 'cloudrun', action: 'bootstrap', project: 'app', adminAuth: 'default', confirm: true, billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' },
@@ -714,6 +856,10 @@ describe('hv_connections', () => {
     });
 
     expect(result.ok).toBe(true);
+    expect(result.data.configuredRoles).toEqual([
+      { issuer: 'GitHub', sourceField: 'HYPERVIBE_GITHUB_TOKEN', destinationRole: 'provider-management', connectionField: 'apiToken', scope: 'global' },
+      { issuer: 'GitHub', sourceField: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN', destinationRole: 'package-read', connectionField: 'packageReadToken', scope: 'global' },
+    ]);
     expect(JSON.stringify(result)).not.toContain('gh-api-token');
     expect(JSON.stringify(result)).not.toContain('gh-package-token');
 
@@ -724,7 +870,7 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('accepts NODE_AUTH_TOKEN when a GitHub credentials ref names another supported alias', async () => {
+  it('preserves role boundaries when only a package token exists and management access is requested', async () => {
     process.env.NODE_AUTH_TOKEN = 'gh-combined-token';
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
@@ -738,24 +884,14 @@ describe('hv_connections', () => {
       credentialsRef: 'env:HYPERVIBE_GITHUB_TOKEN',
     });
 
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toContain('HYPERVIBE_GITHUB_TOKEN');
+    expect(new ConnectionRepository().findByProvider('github')).toBeNull();
     expect(JSON.stringify(result)).not.toContain('gh-combined-token');
-    const connection = new ConnectionRepository().findByProvider('github')!;
-    const decrypted = getSecretStore().decryptObject<{
-      apiToken: string;
-      packageReadToken?: string;
-    }>(connection.credentialsEncrypted);
-    expect(decrypted.apiToken).toBe('gh-combined-token');
-    expect(decrypted.packageReadToken).toBe('gh-combined-token');
-    expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
-      credentialsRef: 'env:HYPERVIBE_GITHUB_TOKEN',
-      credentialsResolution: { apiToken: { resolvedRef: 'env:NODE_AUTH_TOKEN', sourceKey: 'NODE_AUTH_TOKEN' } },
-    });
-    expect(result.data).not.toHaveProperty('credentialsResolution');
     await t.close();
   });
 
-  it('maps both GitHub credential roles from one supported dotenv alias', async () => {
+  it('preserves an explicit mapping of both roles to one existing dotenv source', async () => {
     const readSource = vi.spyOn(envParser, 'parseEnvFile');
     const envPath = path.join(tempDir, '.env');
     writeFileSync(envPath, 'NODE_AUTH_TOKEN=gh-combined-dotenv-token\n');
@@ -770,8 +906,8 @@ describe('hv_connections', () => {
       provider: 'github',
       credentialsRef: `dotenv:${envPath}`,
       credentialsMap: {
-        apiToken: 'HYPERVIBE_GITHUB_TOKEN',
-        packageReadToken: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN',
+        apiToken: 'NODE_AUTH_TOKEN',
+        packageReadToken: 'NODE_AUTH_TOKEN',
       },
     });
 
@@ -787,7 +923,7 @@ describe('hv_connections', () => {
     expect(readSource).toHaveBeenCalledTimes(1);
     expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
       credentialsRef: `dotenv:${envPath}`,
-      credentialsMap: { apiToken: 'HYPERVIBE_GITHUB_TOKEN', packageReadToken: 'HYPERVIBE_GITHUB_PACKAGES_TOKEN' },
+      credentialsMap: { apiToken: 'NODE_AUTH_TOKEN', packageReadToken: 'NODE_AUTH_TOKEN' },
       credentialsResolution: {
         apiToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' },
         packageReadToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' },
@@ -796,15 +932,15 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('records the resolved dotenv fragment without replacing the declared alias', async () => {
+  it('records an explicitly mapped legacy dotenv source without renaming it', async () => {
     const envPath = path.join(tempDir, '.env');
     writeFileSync(envPath, 'NODE_AUTH_TOKEN=synthetic-alias-credential\n');
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({ success: true, login: 'reader' });
     const t = await makeClient();
-    const result = await t.call('hv_connections', { provider: 'github', credentialsRef: `dotenv:${envPath}#HYPERVIBE_GITHUB_TOKEN` });
+    const result = await t.call('hv_connections', { provider: 'github', credentialsRef: `dotenv:${envPath}#NODE_AUTH_TOKEN` });
     expect(result.ok).toBe(true);
     expect(new AuditRepository().findByAction('connection.created')[0]?.details).toMatchObject({
-      credentialsRef: `dotenv:${envPath}#HYPERVIBE_GITHUB_TOKEN`,
+      credentialsRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`,
       credentialsResolution: { apiToken: { resolvedRef: `dotenv:${envPath}#NODE_AUTH_TOKEN`, sourceKey: 'NODE_AUTH_TOKEN' } },
     });
     expect(JSON.stringify(result)).not.toContain('synthetic-alias-credential');
@@ -839,7 +975,7 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('blocks ambiguous GitHub alias fallback without exposing either token', async () => {
+  it('requires an explicitly requested GitHub source even when both other roles exist', async () => {
     process.env.HYPERVIBE_GITHUB_TOKEN = 'gh-api-token';
     process.env.HYPERVIBE_GITHUB_PACKAGES_TOKEN = 'gh-package-token';
 
@@ -850,15 +986,14 @@ describe('hv_connections', () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.error.message).toContain('accepted aliases');
-    expect(result.error.message).toContain('Set NODE_AUTH_TOKEN explicitly');
+    expect(result.error.message).toContain('NODE_AUTH_TOKEN');
     expect(JSON.stringify(result)).not.toContain('gh-api-token');
     expect(JSON.stringify(result)).not.toContain('gh-package-token');
     expect(new ConnectionRepository().findByProvider('github')).toBeNull();
     await t.close();
   });
 
-  it('stores the verified GitHub login for package pull credential sync', async () => {
+  it('records the verified GitHub login without assigning the management token to package pulls', async () => {
     vi.spyOn(GitHubAdapter.prototype, 'verify').mockResolvedValue({
       success: true,
       login: 'davejohnson',
@@ -879,7 +1014,7 @@ describe('hv_connections', () => {
     const decrypted = getSecretStore().decryptObject<{ apiToken: string; login?: string; packageReadToken?: string }>(connection.credentialsEncrypted);
     expect(decrypted.apiToken).toBe('gh-token');
     expect(decrypted.login).toBe('davejohnson');
-    expect(decrypted.packageReadToken).toBe('gh-token');
+    expect(decrypted.packageReadToken).toBeUndefined();
     await t.close();
   });
 
@@ -1050,9 +1185,12 @@ describe('hv_connections', () => {
     const project = new ProjectRepository().create({ name: 'connection-list-app', defaultPlatform: 'railway' });
     const t = await makeClient();
 
+    new ConnectionRepository().create({ provider: 'github', scope: 'acme/saved', credentialsEncrypted: 'fixture' });
     const listed = await t.call('hv_connections', { project: project.name });
     expect(listed.ok).toBe(true);
     expect(listed.data.project).toEqual({ id: project.id, name: project.name });
+    expect(listed.data.connections).toEqual([{ provider: 'github', scope: 'acme/saved', status: 'pending', lastVerifiedAt: null }]);
+    expect(listed.data.availableProviders.deployment).toContainEqual(expect.objectContaining({ name: 'github' }));
 
     const unknown = await t.call('hv_connections', { project: 'does-not-exist' });
     expect(unknown.ok).toBe(false);
@@ -1065,6 +1203,19 @@ describe('hv_connections', () => {
     });
     expect(unknown.agentInstruction.action).toBe('continue');
     await t.close();
+  });
+
+  it.each([
+    { view: 'requirements' },
+    { environment: 'production' },
+    { view: 'requirements', provider: 'github', action: 'describe' },
+  ])('rejects an ambiguous requirements or catalog request %j', async args => {
+    const t = await makeClient();
+    try {
+      expect(await t.call('hv_connections', args)).toMatchObject({ ok: false, error: { code: 'VALIDATION' } });
+    } finally {
+      await t.close();
+    }
   });
 
   it('lists only when no operation parameters are supplied', async () => {
