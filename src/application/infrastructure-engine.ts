@@ -1561,9 +1561,6 @@ async function recordServiceBindings(
   const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const services = { ...((current.platformBindings as { services?: Record<string, Record<string, unknown>> }).services ?? {}) };
   let engine: EngineBinding = { ...((current.platformBindings as { engine?: EngineBinding }).engine ?? {}), kind: 'opentofu' };
-  // What the engine created is written down even when reading a service's address fails (live 2026-11-20: the
-  // network dropped here, nothing was recorded, and later plans refused to remove what the apply had created).
-  try {
   for (const member of members) {
     const addresses = engineSegmentOf(member)?.addresses ?? [];
     if (!addresses.every((address) => outcomes[address] === 'succeeded')) continue;
@@ -1631,16 +1628,18 @@ async function recordServiceBindings(
     }
     // A change to only a workload's companions (for example a worker's waker) keeps its binding.
     if (!addresses.some((address) => address.startsWith('google_cloud_run_v2_service.'))) continue;
-    services[name] = { ...services[name], serviceId: resource };
-    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource);
-    if (observed.state === 'present' && typeof observed.value.uri === 'string') services[name] = { serviceId: resource, url: observed.value.uri };
+    // A failed read of the address must not stop the record of what the engine created (live 2026-11-20: the network
+    // dropped here, nothing was recorded, and later plans refused to remove what the apply had created).
+    const previous = services[name];
+    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource).catch(() => undefined);
+    const url = observed?.state === 'present' && typeof observed.value.uri === 'string' ? observed.value.uri
+      : previous?.serviceId === resource && typeof previous.url === 'string' ? previous.url : undefined;
+    services[name] = { serviceId: resource, ...(url ? { url } : {}) };
   }
-  } finally {
-    ctx.repos.environments.updatePlatformBindings(current.id, {
-      engine: JSON.parse(JSON.stringify(engine)) as EngineBinding,
-      services,
-    });
-  }
+  ctx.repos.environments.updatePlatformBindings(current.id, {
+    engine: JSON.parse(JSON.stringify(engine)) as EngineBinding,
+    services,
+  });
 }
 
 // ---------------------------------------------------------------- Release (image only)

@@ -93,12 +93,23 @@ describe('resources left only in engine state by an apply that was cut off', () 
     expect(f.enginePlan).toHaveBeenCalledTimes(2);
   });
 
+  it('leaves a workload the spec still has to the ordinary plan', async () => {
+    const f = fixture(); cutOff(f);
+    const kept = params(f);
+    kept.spec.environments.staging!.services.worker = { workloadKind: 'worker', startCommand: 'node worker.js' } as never;
+    const planned = await planInfrastructureEngine(f.ctx, kept);
+    if ('blocked' in planned) throw new Error(planned.blocked.join('; '));
+    // Declared by the spec, so it is managed and was never an unmanaged delete; only the bucket is retired.
+    expect(f.configurations.at(-1)!.resources['google_storage_bucket.storage_files']).toMatchObject({ actionId: 'storage:files', dataBearing: true });
+    expect(f.configurations.at(-1)!.resources['google_cloud_run_v2_worker_pool.worker']).toMatchObject({ actionId: 'service:worker' });
+  });
+
   it('still blocks when the state holds something that is not a workload, bucket or queue', async () => {
     const f = fixture(); cutOff(f, ['google_compute_network.other']);
     expect(await planInfrastructureEngine(f.ctx, params(f))).toMatchObject({ blocked: [expect.stringContaining('google_compute_network.other')] });
   });
 
-  it('never retires a workload or bucket the spec still has', () => {
+  it('names only workloads, buckets and queues by their own address, never their companions or the database', () => {
     expect(strayStateResources(['google_cloud_run_v2_service.web', 'google_cloud_run_v2_job.nightly_report', 'google_cloud_run_v2_service_iam_member.web_public',
       'google_storage_bucket.storage_user_files', 'google_pubsub_topic.queue_jobs', 'google_sql_database_instance.db']))
       .toEqual({ queues: ['jobs'], services: ['web', 'nightly-report'], storage: ['user-files'] });
