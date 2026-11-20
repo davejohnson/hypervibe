@@ -32,10 +32,11 @@ import { generatedContainerDockerfile } from '../domain/services/generated-conta
 import { gcpEnvironmentBindingConflict } from '../domain/services/gcp-environment-target.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
-import { isCloudPreparedForRegion, isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForStorageS3, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
+import { isCloudPreparedForRegion, isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
 import {
   applyInfrastructureEngine,
   gcpUnboundStateConflict,
+  observeStorageS3Access,
   ENGINE_PLAN_SCOPE,
   type InfrastructurePlanResult,
   isEngineManaged,
@@ -448,7 +449,7 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       ready: isCloudPreparedForStorage, options: { gcsAccess: 'lifecycle' as const },
       description: 'Let Hypervibe manage the app storage buckets and let the app read and write its files.' },
     { id: 'storage-s3' as const, needed: Object.values(environmentSpec.storage ?? {}).some((storage) => storage.access === 's3'),
-      ready: isCloudPreparedForStorageS3, options: { gcsAccess: 's3' as const },
+      options: { gcsAccess: 's3' as const },
       description: 'Let Hypervibe manage S3-compatible credentials for the app storage.' },
     { id: 'memorystore' as const, needed: Boolean(environmentSpec.cache),
       ready: isCloudPreparedForCache, options: { memorystoreAccess: 'lifecycle' as const },
@@ -460,13 +461,28 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       ready: (project: Project, projectId?: string) => isCloudPreparedForQueues(project, 'cloudrun', projectId), options: { queueAccess: 'lifecycle' as const },
       description: 'Let Hypervibe manage Pub/Sub queues and let the app send and receive messages.' },
   ];
+  const storageS3Access = async () => {
+    const context = await resolveEngineContext(ctx, params.project, params.spec, params.environmentName);
+    if ('blocked' in context) return { state: 'blocked' as const, message: context.blocked };
+    return observeStorageS3Access(await context.adapter.engineAccessToken(), context, params.environmentName, environmentSpec);
+  };
   for (const request of accessRequests) {
-    if (!request.needed || request.ready(ctx.repos.projects.findById(params.project.id) ?? params.project, environmentProjectId)) continue;
+    if (!request.needed) continue;
+    if (request.id === 'storage-s3') {
+      const access = await storageS3Access();
+      if (access.state === 'ready') continue;
+      if (access.state === 'blocked') return { status: 'blocked', message: access.message };
+    } else if (request.ready(ctx.repos.projects.findById(params.project.id) ?? params.project, environmentProjectId)) continue;
     const confirm = approvedAccess.has(request.id);
     const result = await runCloudPrepare({ ...preparationTarget, region, project: params.project, provider: 'cloudrun',
       gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), ...request.options, adminAuth: 'default', confirm });
     if (!result.success) return { status: 'blocked', message: String(result.error ?? 'Google Cloud access setup failed.'), details: result };
     if (!confirm) return { status: 'needs_access', accessId: request.id, access: request.description, grants: result };
+    if (request.id === 'storage-s3') {
+      const verified = await storageS3Access();
+      if (verified.state === 'blocked') return { status: 'blocked', message: verified.message };
+      if (verified.state === 'needs_access') return { status: 'blocked', message: 'The S3 access grant is not yet effective for the deploy identity. Retry after the Google Cloud permission takes effect.' };
+    }
   }
   return undefined;
 }
