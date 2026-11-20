@@ -1,3 +1,4 @@
+import { awsAccountSignInUrl } from '../adapters/providers/aws/aws-account-id.js';
 import type { PlanReport } from '../domain/plan/plan-report.js';
 import { GCP_PROJECT_ID_PATTERN } from '../domain/services/gcp-environment-target.js';
 
@@ -11,26 +12,6 @@ const guid = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i;
 const azureGroup = /^[\p{L}\p{Nd}_.()-]{1,90}$/u;
 const billingId = /^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/;
 
-function awsSignIn(accountId: string, partition?: string, region?: string): string | undefined {
-  if (typeof accountId !== 'string' || !/^\d{12}$/.test(accountId)) return;
-  // Match the AWS SDK's region families. Isolated and sovereign partitions
-  // have their own endpoints and must never fall through to commercial AWS.
-  let regionalPartition: string | undefined;
-  if (region !== undefined) {
-    if (typeof region !== 'string') return;
-    if (/^us-gov-[a-z]+-\d+$/.test(region)) regionalPartition = 'aws-us-gov';
-    else if (/^cn-[a-z]+-\d+$/.test(region)) regionalPartition = 'aws-cn';
-    else if (/^(us|eu|ap|sa|ca|me|af|il|mx)-[a-z]+-\d+$/.test(region)) regionalPartition = 'aws';
-    else return;
-    if (partition !== undefined && partition !== regionalPartition) return;
-  }
-  switch (partition ?? regionalPartition) {
-    case 'aws': return `https://${accountId}.signin.aws.amazon.com/console/`;
-    case 'aws-cn': return `https://${accountId}.signin.amazonaws.cn/console/`;
-    case 'aws-us-gov': return `https://${accountId}.signin.amazonaws-us-gov.com/`;
-  }
-}
-
 export function cloudFacts(report: PlanReport): CloudFact[] {
   const target = report.cloudTarget;
   const facts: CloudFact[] = [];
@@ -43,7 +24,7 @@ export function cloudFacts(report: PlanReport): CloudFact[] {
       break;
     }
     case 'aws': {
-      const href = awsSignIn(target.accountId, target.partition, target.region);
+      const href = awsAccountSignInUrl(target.accountId, target.partition, target.region);
       facts.push({ label: href ? 'AWS account (IAM user sign-in)' : 'AWS account', value: target.accountId, href });
       break;
     }
