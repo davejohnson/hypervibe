@@ -13,6 +13,10 @@ an explicit blocker; they never select the removed handwritten lifecycle.
 
 - Environment state owns the app's Cloud Run, database, cache, storage, queue,
   domain-mapping and secret-container resources.
+- With `hosting.gcpRuntimeSecretGrants: "per-secret"`, environment state also
+  owns individual Secret Accessor grants for the selected app runtime identity
+  on the owned secrets referenced by its workloads. Each grant change requires
+  confirmation. Project-shared IAM has a separate approval and lifecycle.
 - Project-shared state owns setup prerequisites: project/billing, APIs,
   service accounts, IAM, private build storage, image repositories and CI trust.
   Named contributions retain previously approved setup when another environment

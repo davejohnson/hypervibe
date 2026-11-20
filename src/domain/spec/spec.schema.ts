@@ -1602,8 +1602,12 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
     region: z.string().trim().min(1).optional(),
     /** A dedicated Google Cloud project for this environment. Omit to use the repository connection. */
     gcpProjectId: z.string().regex(GCP_PROJECT_ID_PATTERN, 'Invalid Google Cloud project ID').optional(),
+    /** Prepare explicit access on each secret the app consumes before project IAM is narrowed separately. */
+    gcpRuntimeSecretGrants: z.literal('per-secret').optional(),
   }).strict().refine(hosting => !hosting.gcpProjectId || hosting.provider === 'cloudrun', {
     path: ['gcpProjectId'], message: 'gcpProjectId requires Cloud Run hosting',
+  }).refine(hosting => !hosting.gcpRuntimeSecretGrants || hosting.provider === 'cloudrun', {
+    path: ['gcpRuntimeSecretGrants'], message: 'gcpRuntimeSecretGrants requires Cloud Run hosting',
   }),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),

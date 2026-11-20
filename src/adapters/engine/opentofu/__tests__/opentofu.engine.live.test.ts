@@ -4,19 +4,22 @@
  * needs no cloud account; the Cloud Run validation step downloads the pinned
  * Google provider and verifies its checksum.
  */
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { EngineConfiguration, EngineStateIdentity, InfrastructureEngineBackend } from '../../../../domain/ports/infrastructure-engine.port.js';
-import { buildCloudRunConfiguration, gcpEngineBackend } from '../../../providers/gcp/tofu/gcp-engine.backend.js';
+import { buildCloudRunConfiguration, gcpEngineBackend, secretEngineKey } from '../../../providers/gcp/tofu/gcp-engine.backend.js';
 import { buildArtifactRegistryConfiguration } from '../../../providers/gcp/tofu/gcp-project.backend.js';
 import { OpenTofuEngine } from '../engine.js';
 import { ensureEngineBinary } from '../install.js';
 import { buildCiReleaseConfiguration } from '../../../providers/gcp/tofu/gcp-ci.backend.js';
 import { buildGcpBootstrapConfiguration, buildGcpPreparationConfiguration, defaultGcpPreparationInput, gcpSetupBackend } from '../../../providers/gcp/tofu/gcp-setup.backend.js';
 import { composeGcpProjectConfiguration } from '../../../../domain/services/gcp-project-setup.service.js';
-import { engineStatePaths, fileDigest, loadOrCreateStatePassphrase } from '../workspace.js';
+import { engineProcessEnv, runTofu } from '../runner.js';
+import { engineStatePaths, fileDigest, loadOrCreateStatePassphrase, materializeWorkingDirectory } from '../workspace.js';
 
 const SECRET = 'hv-representative-secret-7f3a9c';
 const cipher = { encrypt: (v: string) => Buffer.from(v).toString('base64'), decrypt: (v: string) => Buffer.from(v, 'base64').toString() };
@@ -105,6 +108,79 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
       }],
     });
     expect(await engine.validate(gcpEngineBackend, configuration)).toEqual({ ok: true });
+  }, 300_000);
+
+  it('plans an explicitly reviewed grant only on the owned secret consumed by Cloud Run', async () => {
+    const projectId = 'synthetic-project';
+    const environmentId = 'env-staging';
+    const runtimeServiceAccountEmail = `runtime@${projectId}.iam.gserviceaccount.com`;
+    const consumed = 'staging-api-key';
+    const unused = 'staging-unused';
+    const input = {
+      projectId, environmentId, region: 'us-central1', runtimeServiceAccountEmail,
+      services: [{ logicalName: 'web', resourceName: 'web-staging', workload: 'web' as const,
+        initialImage: `us-docker.pkg.dev/${projectId}/app/web@sha256:${'a'.repeat(64)}`, public: false,
+        runtimeServiceAccountEmail, secretEnv: { API_KEY: { secretId: consumed, version: '1' } },
+      }],
+      secrets: [consumed, unused].map(secretId => ({ secretId, labels: { 'managed-by': 'hypervibe', 'hv-environment': environmentId } })),
+    };
+    const legacy = buildCloudRunConfiguration(input);
+    const optIn = buildCloudRunConfiguration({ ...input, gcpRuntimeSecretGrants: 'per-secret' });
+    const address = `google_secret_manager_secret_iam_member.${secretEngineKey(consumed)}`;
+    const env: Record<string, string> = {};
+    for (const key of ['TF_PLUGIN_CACHE_DIR', 'TF_CLI_CONFIG_FILE']) if (process.env[key]) env[key] = process.env[key];
+    const exec = promisify(execFile);
+    const prepare = async (configuration: EngineConfiguration) => {
+      const work = materializeWorkingDirectory({ parent: dataDir, configuration, requirements: gcpEngineBackend.providerRequirements });
+      fs.writeFileSync(path.join(work, 'secret-access.tftest.hcl'), 'mock_provider "google" {}\nrun "app" { command = apply }\n');
+      const init = await runTofu({ kind: 'init' }, { binary, workingDirectory: work, env, redact: [], timeoutMs: 300_000 });
+      expect(init.exitCode, init.stderr || init.stdout).toBe(0);
+      const result = await exec(binary, ['test', '-json', '-verbose'], { cwd: work, env: engineProcessEnv(env), timeout: 300_000 });
+      const events = result.stdout.trim().split('\n').map(line => JSON.parse(line));
+      type MockResource = { mode: string; type: string; name: string; schema_version: number; values: Record<string, unknown> };
+      const resources: MockResource[] = events.find(event => event.type === 'test_state').test_state.values.root_module.resources;
+      // Rebuild native state from the mock apply's public JSON. The next run can now
+      // plan the other generated configuration against the same installed app.
+      const state = path.join(work, 'mock.tfstate');
+      fs.writeFileSync(state, JSON.stringify({ version: 4, serial: 1, resources: resources.map(resource => ({
+        mode: resource.mode, type: resource.type, name: resource.name, provider: 'provider["registry.opentofu.org/hashicorp/google"]',
+        instances: [{ schema_version: resource.schema_version, attributes: resource.values }],
+      })) }));
+      return { work, state, resources };
+    };
+    const planTransition = async (work: string, state: string) => {
+      const planFile = path.join(work, 'transition.tfplan');
+      // Skip refresh; planning only needs the synthetic state and static access token.
+      const offline = engineProcessEnv({ ...env, GOOGLE_OAUTH_ACCESS_TOKEN: 'synthetic', GCE_METADATA_HOST: '127.0.0.1:1',
+        HTTPS_PROXY: 'http://127.0.0.1:1', HTTP_PROXY: 'http://127.0.0.1:1', NO_PROXY: '' });
+      await exec(binary, ['plan', '-no-color', '-refresh=false', `-state=${state}`, `-out=${planFile}`], { cwd: work, env: offline, timeout: 300_000 });
+      const shown = await runTofu({ kind: 'show-plan', planFile }, { binary, workingDirectory: work, env, redact: [] });
+      expect(shown.exitCode, shown.stderr).toBe(0);
+      const changes: Array<{ address: string; type: string; change: { actions: string[]; after: Record<string, string> | null } }> =
+        JSON.parse(shown.stdout).resource_changes;
+      return changes.filter(resource => resource.change.actions.some(action => action !== 'no-op'));
+    };
+    const changedGrants = async (previous: { work: string; state: string }, nextWork: string) => {
+      // Mock state invents computed values such as labels. Check the provider's
+      // normalizations are identical with or without changing the secret setting.
+      const baseline = await planTransition(previous.work, previous.state);
+      const changed = await planTransition(nextWork, previous.state);
+      const isGrant = (resource: { type: string }) => resource.type.includes('_iam_');
+      expect(changed.filter(resource => !isGrant(resource))).toEqual(baseline.filter(resource => !isGrant(resource)));
+      return changed.filter(isGrant);
+    };
+    const existing = await prepare(legacy);
+    expect(existing.resources.filter(resource => resource.type.includes('_iam_'))).toEqual([]);
+    const enabled = await prepare(optIn);
+    const grants = await changedGrants(existing, enabled.work);
+    expect(grants.map(grant => grant.address)).toEqual([address]);
+    expect(grants[0]!.change).toMatchObject({ actions: ['create'], after: {
+      project: projectId, secret_id: consumed, role: 'roles/secretmanager.secretAccessor', member: `serviceAccount:${runtimeServiceAccountEmail}`,
+    } });
+    expect(optIn.resources[address]).toMatchObject({ requiresConfirm: true });
+    const rollback = await changedGrants(enabled, existing.work);
+    expect(rollback.map(grant => [grant.address, grant.change.actions])).toEqual([[address, ['delete']]]);
+    expect(legacy.resources[address]).toMatchObject({ requiresConfirm: true });
   }, 300_000);
 
   it('validates Cloud Run wired to engine-managed Cloud SQL', async () => {

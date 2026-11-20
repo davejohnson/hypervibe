@@ -180,6 +180,25 @@ sign-in, credential values, image builds/releases, logs, health, SQL and object
 transfer operations. Existing Railway infrastructure continues through its
 retained lifecycle.
 
+### Prepare the target app's secret access
+
+In the target environment's existing Cloud Run hosting settings, set
+`gcpRuntimeSecretGrants` to `"per-secret"` with `hv_spec`. Run `hv_plan` with
+`scope="infrastructure"` and review each `secret-runtime-access:` action. It
+names the Google secret and the service account that will receive Secret
+Accessor on that secret's enabled versions. Confirm the desired actions with `hv_apply`. The environment owns
+these grants, so removing a secret reference from every workload or removing
+the setting produces a reviewed removal.
+
+Only secrets referenced by a service, worker, scheduled job or release job
+qualify. A build-only token, an empty import slot or a container merely found
+in the project receives no grant from this preparation. Existing direct grants
+outside the environment's engine state block implicit adoption. Hypervibe also
+preserves an existing grant if its local apply record cannot confirm the
+original secret, including after an interrupted apply. Project-wide
+grants still apply, and the private transfer still needs its own reviewed job
+and isolated credentials.
+
 ## Flow exercised by the early GCP implementation
 
 1. `hv_spec` with `environments.<env>.hosting = { provider: "cloudrun" }`.

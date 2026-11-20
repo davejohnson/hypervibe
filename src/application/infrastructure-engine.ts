@@ -11,6 +11,7 @@ import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.j
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
+import { runtimeSecretGrantReviewer, runtimeSecretGrantChanges, type RuntimeSecretGrant, type ReviewedRuntimeSecretGrant } from '../adapters/providers/gcp/gcp-runtime-secret-grants.js';
 import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import {
   cloudRunGet, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type JobRunResult, type PendingJobRun, type WorkloadKind,
@@ -166,6 +167,8 @@ export interface EngineBinding {
   pendingImportedSecrets?: string[];
   /** Container identities tracked in the environment engine state. */
   secrets?: string[];
+  /** Local ownership evidence for the native generation of each confirmed per-secret IAM member. */
+  runtimeSecretGrantOrigins?: Record<string, Pick<ReviewedRuntimeSecretGrant, 'name' | 'createTime'>>;
   /** Non-secret credential metadata bound to an acknowledged exact Secret Manager version. */
   secretMetadata?: Record<string, { gcpProjectId: string; version: string; labels: Record<string, string> }>;
   /** Keyless CI release trust granted for this exact repository. */
@@ -333,6 +336,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   return {
     projectId: context.gcpProjectId,
     region: context.region,
+    ...(environmentSpec.hosting.gcpRuntimeSecretGrants ? { gcpRuntimeSecretGrants: environmentSpec.hosting.gcpRuntimeSecretGrants } : {}),
     services,
     ...(command && primary ? { releaseJob: {
       ...primary, logicalName: 'release', resourceName: context.resourceNameFor('release-command'), workload: 'worker' as const,
@@ -1017,6 +1021,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     importedSecrets,
     secretVersions,
   });
+  if (input.gcpRuntimeSecretGrants && input.services.some(service => Object.keys(service.secretEnv ?? {}).some(isBuildTokenKey))) {
+    return { blocked: ['A workload references a build-only package token. Its runtime identity cannot receive a grant on that token.'] };
+  }
   const configure = (adopt?: { databaseInstance?: string; buckets?: string[] }) => buildCloudRunConfiguration({
     adopt: { ...adopt, secrets: adoptSecrets },
     secrets: containers, retiredSecrets,
@@ -1053,9 +1060,13 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
   let planId = crypto.randomUUID();
+  let grantChanges: RuntimeSecretGrant[] = [];
   const planEnvironment = (adopt?: { databaseInstance?: string; buckets?: string[] }) => planWithCloudRunRevisionMinimums(input.services,
     verifyPlannedChanges => engine.plan({ backend: gcpEngineBackend, configuration: configure(adopt), auth: context.auth,
-      state: context.state, planId, verifyPlannedChanges }));
+      state: context.state, planId, verifyPlannedChanges: shown => {
+        grantChanges = runtimeSecretGrantChanges(shown, context.gcpProjectId, context.runtimeServiceAccountEmail);
+        return verifyPlannedChanges(shown);
+      } }));
   let planned = await planEnvironment();
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   // A create for something that already exists means engine state lost track of it (for example,
@@ -1081,6 +1092,19 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
   if (planned.blockers.length) return { blocked: planned.blockers };
+  const grantActions = planned.actions.filter(action => action.id.startsWith('secret-runtime-access:') && action.type !== 'noop');
+  if (grantActions.length !== grantChanges.length || !grantActions.every(action =>
+    grantChanges.some(grant => action.id === `secret-runtime-access:${grant.secretId}`))) {
+    return { blocked: ['The engine changes could not be matched to the reviewed secret grants.'] };
+  }
+  const runtimeGrants: Record<string, ReviewedRuntimeSecretGrant> = {};
+  const reviewGrant = runtimeSecretGrantReviewer(token, context.gcpProjectId, context.environment.id);
+  for (const grant of grantChanges) {
+    const checked = await reviewGrant(grant);
+    if ('blocked' in checked) return { blocked: [checked.blocked] };
+    if (grant.before && !sameGrantOrigin(engineBinding, checked)) return { blocked: [originalSecretRequired(grant.secretId)] };
+    runtimeGrants[`secret-runtime-access:${grant.secretId}`] = checked;
+  }
 
   // Releases push to the repository in this environment's region; project setup made only one.
   const repository = await observeImageRepository(token, context.gcpProjectId, context.region);
@@ -1099,6 +1123,11 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
 
   const domainBefore = [...new Map([...domainPlans.values()].flatMap(plan => plan.before).map(action => [action.id, action])).values()];
   const serviceActions = planned.actions.map(action => {
+    const grant = runtimeGrants[action.id];
+    if (grant) {
+      const changes = [grant.before && `remove Secret Accessor from ${grant.before}`, grant.after && `grant Secret Accessor to ${grant.after}`].filter(Boolean);
+      return { ...action, reason: `On ${grant.name}, ${changes.join(' and ')}.` };
+    }
     if (!action.id.startsWith('domain:') || !['create', 'update', 'replace'].includes(action.type)) return action;
     const extra = domainPlans.get(action.resource.name)?.before.filter(before => before.type !== 'noop').map(before => before.id) ?? [];
     return extra.length ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...extra] } : action;
@@ -1187,6 +1216,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
     engine: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
+      ...(Object.keys(runtimeGrants).length ? { runtimeGrants } : {}),
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
       ...(imageRepository ? { imageRepository } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
@@ -1296,6 +1326,7 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
+    runtimeGrants?: Record<string, ReviewedRuntimeSecretGrant>;
     imageRepository?: { planId: string; state: EngineStateIdentity };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
@@ -1425,6 +1456,19 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
           if (!absence.ready) return stop(absence.reason);
         }
       }
+      const grantMembers = members.filter(entry => entry.id.startsWith('secret-runtime-access:'));
+      const reviewGrant = runtimeSecretGrantReviewer(token, context.gcpProjectId, context.environment.id);
+      const binding = (ctx.repos.environments.findById(context.environment.id)?.platformBindings.engine as EngineBinding | undefined) ?? {};
+      for (const member of grantMembers) {
+        const grant = reviewed.runtimeGrants?.[member.id];
+        if (!grant || grant.secretId !== member.resource.name || member.id !== `secret-runtime-access:${grant.secretId}` || (grant.after && grant.after !== `serviceAccount:${context.runtimeServiceAccountEmail}`)) {
+          return stop('The runtime identity differs from the reviewed secret access plan. Run hv_plan again.');
+        }
+        if (grant.before && !sameGrantOrigin(binding, grant)) return stop(originalSecretRequired(grant.secretId));
+        const checked = await reviewGrant(grant);
+        if ('blocked' in checked) return stop(checked.blocked);
+        if (checked.name !== grant.name || checked.createTime !== grant.createTime) return stop('The secret was replaced after access was reviewed. Run hv_plan again.');
+      }
       for (const member of members.filter((entry) => entry.id.startsWith('secret-container:'))) {
         const observed = await observeSecret(token, context.gcpProjectId, member.resource.name);
         const changed = observed.state === 'unknown'
@@ -1469,11 +1513,19 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         backend: gcpEngineBackend, auth: context.auth, state: context.state, planId: reviewed.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses,
       });
-      await recordServiceBindings(ctx, context, environmentName, members, outcome.outcomes, token, reviewed.database?.instanceName);
+      await recordServiceBindings(ctx, context, environmentName, members, outcome.outcomes, token, reviewed.database?.instanceName, reviewed.runtimeGrants);
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
   return { kind: 'executed', envName: environmentName, result };
+}
+
+function sameGrantOrigin(binding: EngineBinding, grant: ReviewedRuntimeSecretGrant): boolean {
+  const saved = binding.runtimeSecretGrantOrigins?.[grant.secretId];
+  return saved?.name === grant.name && saved?.createTime === grant.createTime;
+}
+function originalSecretRequired(id: string): string {
+  return `The local record does not identify the original secret for the existing grant on ${id}. Its access must be preserved.`;
 }
 
 async function recordServiceBindings(
@@ -1483,7 +1535,8 @@ async function recordServiceBindings(
   members: PlanAction[],
   outcomes: Record<string, string>,
   token: string,
-  databaseInstanceName?: string
+  databaseInstanceName?: string,
+  runtimeGrants?: Record<string, ReviewedRuntimeSecretGrant>
 ): Promise<void> {
   const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const services = { ...((current.platformBindings as { services?: Record<string, Record<string, unknown>> }).services ?? {}) };
@@ -1491,6 +1544,14 @@ async function recordServiceBindings(
   for (const member of members) {
     const addresses = engineSegmentOf(member)?.addresses ?? [];
     if (!addresses.every((address) => outcomes[address] === 'succeeded')) continue;
+    if (member.id.startsWith('secret-runtime-access:')) {
+      const grant = runtimeGrants![member.id]!;
+      const origins = { ...engine.runtimeSecretGrantOrigins };
+      if (member.type === 'destroy') delete origins[grant.secretId];
+      else origins[grant.secretId] = { name: grant.name, createTime: grant.createTime };
+      engine.runtimeSecretGrantOrigins = origins;
+      continue;
+    }
     if (member.id.startsWith('secret-container:')) {
       const remaining = (engine.secrets ?? []).filter((id) => id !== member.resource.name);
       const secretMetadata = { ...engine.secretMetadata };
