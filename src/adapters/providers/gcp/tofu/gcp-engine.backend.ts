@@ -114,6 +114,7 @@ export interface GcpCloudRunEngineInput {
   /** Containers only. Secret values and versions never enter engine configuration or state. */
   secrets?: Array<{ secretId: string; labels: Record<string, string> }>;
   retiredSecrets?: string[];
+  gcpRuntimeSecretGrants?: 'per-secret';
   /** Cloud SQL Postgres owned by the engine. Users and passwords stay with Hypervibe. */
   database?: GcpCloudSqlInput;
   /** A database this environment previously created that is no longer desired. */
@@ -809,6 +810,32 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   for (const secretId of input.retiredSecrets ?? []) {
     resources[`google_secret_manager_secret.${secretEngineKey(secretId)}`] ??= { actionId: `secret-container:${secretId}`, kind: 'secret', name: secretId, dataBearing: true };
   }
+  const runtimeGrants: Record<string, unknown> = {};
+  // Keep address mappings through de-selection, opt-out and container retirement.
+  for (const id of [...(input.secrets ?? []).map(secret => secret.secretId), ...(input.retiredSecrets ?? [])]) {
+    resources[`google_secret_manager_secret_iam_member.${secretEngineKey(id)}`] = {
+      actionId: `secret-runtime-access:${id}`, kind: 'secret', name: id, requiresConfirm: true,
+    };
+  }
+  if (input.gcpRuntimeSecretGrants === 'per-secret') {
+    const consumers = input.services.map(service => ({
+      service, workload: service.workload === 'web' ? services : service.workload === 'worker' ? workerPools : jobs, key: engineKey(service.logicalName),
+    }));
+    if (input.releaseJob) consumers.push({ service: input.releaseJob, workload: jobs, key: RELEASE_JOB_KEY });
+    for (const { service, workload, key } of consumers) {
+      const ids = [...new Set(Object.values(service.secretEnv ?? {}).map(ref => ref.secretId))].sort();
+      if (!ids.length) continue;
+      if (service.runtimeServiceAccountEmail !== input.runtimeServiceAccountEmail) throw new Error('The secret consumer must use the bound runtime identity.');
+      const dependencies = ids.map(id => {
+        const secretKey = secretEngineKey(id);
+        if (!secretContainers[secretKey]) throw new Error('Runtime secret access requires a container owned by the same environment.');
+        runtimeGrants[secretKey] = { project: input.projectId, secret_id: `\${google_secret_manager_secret.${secretKey}.secret_id}`,
+          role: 'roles/secretmanager.secretAccessor', member: `serviceAccount:${service.runtimeServiceAccountEmail}` };
+        return `google_secret_manager_secret_iam_member.${secretKey}`;
+      });
+      Object.assign(workload[key] as object, { depends_on: dependencies });
+    }
+  }
   const imports: Record<string, string> = {};
   for (const secretId of input.adopt?.secrets ?? []) {
     if (!(input.secrets ?? []).some((entry) => entry.secretId === secretId)) throw new Error('Only a desired secret container can be adopted.');
@@ -827,7 +854,8 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     ...(Object.keys(imports).length ? { imports } : {}),
     files: {
       ...(Object.keys(imports).length ? { 'imports.tf.json': { import: Object.entries(imports).map(([to, id]) => ({ to, id })) } } : {}),
-      'secrets.tf.json': Object.keys(secretContainers).length ? { resource: { google_secret_manager_secret: secretContainers } } : {},
+      'secrets.tf.json': Object.keys(secretContainers).length ? { resource: { google_secret_manager_secret: secretContainers,
+        ...(Object.keys(runtimeGrants).length ? { google_secret_manager_secret_iam_member: runtimeGrants } : {}) } } : {},
       'provider.tf.json': { provider: { google: [{ project: input.projectId, region: input.region }] } },
       // An environment with no services is valid desired state (teardown); OpenTofu rejects an empty resource block.
       'jobs.tf.json': Object.keys(jobs).length || Object.keys(schedules).length ? {

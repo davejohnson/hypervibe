@@ -105,7 +105,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
     definitions[key] = taskDefinition(worker);
     services[key] = {
       name: worker.resourceName, cluster: '${aws_ecs_cluster.main.id}', task_definition: `\${aws_ecs_task_definition.${key}.arn}`, launch_type: 'FARGATE',
-      desired_count: worker.pendingWorkQuery ? 0 : 1, network_configuration: network,
+      desired_count: worker.paused || worker.pendingWorkQuery ? 0 : 1, network_configuration: network,
       // The waker owns the task count of on-demand workers.
       ...(worker.pendingWorkQuery ? { lifecycle: [{ ignore_changes: ['desired_count'] }] } : {}),
     };

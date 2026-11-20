@@ -96,6 +96,8 @@ export const serviceSpecSchema = z.object({
    * workers are already always on unless onDemand is set.
    */
   alwaysOn: z.boolean().optional(),
+  /** Hold a fixed-size Cloud Run worker pool or ECS worker service at zero configured instances. */
+  workerPaused: z.boolean().optional(),
   /**
    * Run a background worker only while it has work: it scales to zero when
    * idle and starts within about a minute of new work. pendingWorkQuery is one
@@ -1602,8 +1604,12 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
     region: z.string().trim().min(1).optional(),
     /** A dedicated Google Cloud project for this environment. Omit to use the repository connection. */
     gcpProjectId: z.string().regex(GCP_PROJECT_ID_PATTERN, 'Invalid Google Cloud project ID').optional(),
+    /** Prepare explicit access on each secret the app consumes before project IAM is narrowed separately. */
+    gcpRuntimeSecretGrants: z.literal('per-secret').optional(),
   }).strict().refine(hosting => !hosting.gcpProjectId || hosting.provider === 'cloudrun', {
     path: ['gcpProjectId'], message: 'gcpProjectId requires Cloud Run hosting',
+  }).refine(hosting => !hosting.gcpRuntimeSecretGrants || hosting.provider === 'cloudrun', {
+    path: ['gcpRuntimeSecretGrants'], message: 'gcpRuntimeSecretGrants requires Cloud Run hosting',
   }),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
@@ -1951,6 +1957,10 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
     }
   }
   for (const [serviceName, service] of Object.entries(environment.services)) {
+    if (service.workerPaused !== undefined && (!['cloudrun', 'aws'].includes(environment.hosting.provider) || service.workloadKind !== 'worker' || service.onDemand)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['services', serviceName, 'workerPaused'],
+        message: 'workerPaused requires a fixed-size Google Cloud or AWS worker. On-demand workers have a separate wake-up mechanism.' });
+    }
     for (const alias of Object.keys(service.databaseEnvAliases ?? {})) {
       databaseAliasKeys.add(alias);
       if (!environment.database) {

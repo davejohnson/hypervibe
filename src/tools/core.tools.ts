@@ -1065,7 +1065,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               ...row?.runtime, ...(row?.reason ? { reason: row.reason } : {}) };
           });
           const workers = workloads.filter(row => row.kind === 'worker').map(row => ({ ...row,
-            mode: envSpec.services[row.service]!.onDemand ? 'on-demand' : 'always-on' }));
+            mode: envSpec.services[row.service]!.workerPaused ? 'pause-requested' : envSpec.services[row.service]!.onDemand ? 'on-demand' : 'always-on',
+            ...(row.desired !== undefined ? { instances: row.desired } : {}) }));
           return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers, workloads, ...retained, ...(database ? { database } : {}) }, {
             warnings: workloads.filter(row => row.activity === 'unknown').map(row => `Current activity for ${row.service} is unknown.`),
             hint: 'Run hv_health for deployment health or hv_plan scope="infrastructure" for drift.',

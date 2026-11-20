@@ -82,6 +82,13 @@ struct DashboardStatusEvidenceTests {
     }
 
     @Test
+    func requestedPauseDistinguishesTheObservedWorkerCount() {
+        let worker = WorkerObservation(service: "queue", mode: "pause-requested", instances: 1, wakerState: nil, lastWakeAt: nil,
+                                       pendingWork: nil, pendingWorkReadFailed: false)
+        #expect(worker.configurationSummary == "Pause requested · 1 configured instance")
+    }
+
+    @Test
     func failedAlwaysOnWorkerReportsTheWorkloadNotAWakeUpCheck() throws {
         let worker = WorkerObservation(service: "mailer", mode: "always-on", instances: 1, wakerState: nil, lastWakeAt: nil,
                                        pendingWork: nil, pendingWorkReadFailed: false, activity: "failed", running: 0)
