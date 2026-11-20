@@ -17,6 +17,24 @@ The application pause and forwarding flow below is a separate capability.
 Follow [the private transfer implementation](https://github.com/davejohnson/hypervibe/issues/747)
 and [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
 
+For a prepared Railway source and Cloud Run destination, preview the copy
+account and its empty global Secret Manager container with
+`hv_connections` action `prepare`, provider `cloudrun`,
+`migrationAccess="empty-transfer-slot"`, the project, the Railway
+`migrationSourceEnvironment` and the destination `environment`. Review the
+saved HTML plan. To create the listed resources, repeat that request with
+`confirm=true` and the exact `gcpSetupPlanId`. The third action gives the
+copy account Secret Accessor on that container. Hypervibe retains these
+resources in the target's managed project setup.
+
+Keep the container empty while the app can read secrets at project scope.
+Any later permission review must identify the transfer container by its recorded
+native identity and exclude it from app grants. Before publishing a Railway
+credential, verify that the app is denied on the exact transfer slot, that the
+copy job can read it, and that the app cannot read the staged database dump.
+Credential publication, dump isolation and single-use job execution still
+require a separate reviewed workflow.
+
 For a production rehearsal, include files with known contents and eligible
 queued work. Check every referenced object, run one worker against the target,
 then write a new record there and verify that a restored copy contains it.

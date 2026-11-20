@@ -1,3 +1,4 @@
+import { emptySlotWarning } from '../providers/gcp/tofu/transfer-slot.js';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,6 +46,7 @@ function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
     target: scope.gcpProjectId, scope: 'Google Cloud project setup', createdAt: source.createdAt,
     actions: source.planned.actions, blocked: source.planned.blockers, approval: 'whole-plan',
   });
+  if (report.actions.some(action => action.id.startsWith('transfer-slot:') && action.type !== 'noop')) report.warnings.push(emptySlotWarning);
   if (report.actions.length !== source.planned.actions.length) throw new Error('The saved Google Cloud setup actions could not be read.');
 
   const changed = new Map(report.actions.filter(action => action.type !== 'noop')

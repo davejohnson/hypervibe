@@ -5,6 +5,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.client.js';
 import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/providers/gcp/google-browser-signin.js';
+import { providerRegistry } from '../registry/provider.registry.js';
 import { GoogleAuth } from 'google-auth-library';
 import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import { getGcpProjectSetupContribution, runGcpProjectSetup } from './gcp-project-setup.service.js';
@@ -130,6 +131,9 @@ export async function runCloudPrepare(params: {
   memorystoreAccess?: MemorystorePrepareAccess;
   queueAccess?: QueuePrepareAccess;
   workerAccess?: WorkerPrepareAccess;
+  migrationAccess?: 'empty-transfer-slot';
+  migrationSourceEnvironment?: string;
+  gcpSetupPlanId?: string;
   defaultAdminAccessTokenProvider?: () => Promise<string>;
   confirm?: boolean;
 }): Promise<Record<string, unknown> & { success: boolean }> {
@@ -164,6 +168,27 @@ export async function runCloudPrepare(params: {
   });
   if (!resolved.success) {
     return { success: false, error: resolved.error };
+  }
+
+  if (params.migrationAccess) {
+    if (!params.environmentName || !params.migrationSourceEnvironment || params.environmentName === params.migrationSourceEnvironment ||
+      !resolved.runtimeServiceAccountEmail || gcsAccess || memorystoreAccess || queueAccess || workerAccess || deployServiceAccountEmail ||
+      adminCredentialsJson || adminAccessToken || (confirm !== !!params.gcpSetupPlanId)) {
+      return { success: false, error: 'Select distinct source and target environments for the transfer slot. Confirm only with the saved migration setup plan ID.' };
+    }
+    const capability = providerRegistry.get(provider)?.emptyTransferSlot;
+    if (!capability) return { success: false, error: 'This provider cannot prepare an empty transfer slot.' };
+    return capability.prepare({
+      project,
+      sourceEnvironment: params.migrationSourceEnvironment,
+      targetEnvironment: params.environmentName,
+      targetProjectId: resolved.gcpProjectId,
+      region: params.region ?? 'us-central1',
+      runtimeEmail: resolved.runtimeServiceAccountEmail,
+      deployEmail: resolved.deployServiceAccountEmail,
+      token: params.defaultAdminAccessTokenProvider ?? getExistingAdminAccessToken,
+      planId: params.gcpSetupPlanId,
+    });
   }
 
   const member = `serviceAccount:${resolved.deployServiceAccountEmail}`;
@@ -470,26 +495,26 @@ export async function runCloudPrepare(params: {
   }
 }
 
-/**
- * One-time admin access for GCP setup. Uses an existing local Google login
- * (Application Default Credentials) silently when present; otherwise opens a
- * browser sign-in, so users never need gcloud or terminal commands.
- */
+async function getExistingAdminAccessToken(): Promise<string> {
+  const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+  const client = await auth.getClient();
+  const result = await client.getAccessToken();
+  const token = typeof result === 'string' ? result : result.token;
+  if (!token) throw new Error('Google Application Default Credentials did not supply an access token.');
+  return token;
+}
+
+/** Ordinary GCP setup offers browser sign-in when existing credentials are unavailable. */
 export async function getDefaultAdminAccessToken(): Promise<string> {
   try {
-    const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-    const client = await auth.getClient();
-    const result = await client.getAccessToken();
-    const token = typeof result === 'string' ? result : result.token;
-    if (token) return token;
+    return await getExistingAdminAccessToken();
   } catch {
-    // No local Google login; fall through to browser sign-in.
+    const oauthClient = configuredGoogleOAuthClient();
+    if (!oauthClient) {
+      throw new Error('Google sign-in is not available: no local Google login was found and this Hypervibe build has no Google sign-in client configured.');
+    }
+    return signInWithGoogle({ client: oauthClient });
   }
-  const oauthClient = configuredGoogleOAuthClient();
-  if (!oauthClient) {
-    throw new Error('Google sign-in is not available: no local Google login was found and this Hypervibe build has no Google sign-in client configured.');
-  }
-  return signInWithGoogle({ client: oauthClient });
 }
 
 function resolveGcpBootstrapTarget(params: {

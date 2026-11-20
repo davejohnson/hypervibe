@@ -16,6 +16,9 @@ import {
   type GcpProjectRecovery, type ObservedLinkedProject, type ObservedUnlinkedProject, type RecoveryBinding,
 } from './project-state-recovery.js';
 
+import type { TransferSlotEvidence } from '../gcp-transfer-slot-evidence.js';
+import { transferSlot, verifyTransferSlotPlan, matchesTransferState, type TransferSlotReview } from './transfer-slot.js';
+
 export interface GcpProjectSetupContribution { id: string; configuration: EngineConfiguration }
 export interface GcpProjectSetupParams {
   projectId: string;
@@ -26,6 +29,10 @@ export interface GcpProjectSetupParams {
   authenticationScope?: string;
   contribution: GcpProjectSetupContribution;
   confirm?: boolean;
+  /** Current Google metadata and the exact transfer pair selected for empty-slot setup. */
+  transferSlotReview?: TransferSlotReview;
+  /** Re-read the empty secret, its policy and the enabled account after native apply. */
+  observeTransferAfterApply?: () => Promise<TransferSlotEvidence>;
   dataDir?: string;
   /** Explicitly reviewed removals/imports; never inferred from engine output. */
   allowDestroyAddresses?: string[];
@@ -235,12 +242,28 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
   try {
     const manifestFile = path.join(paths.root, 'setup-manifest.json');
     const existing = readJson<SetupManifest>(manifestFile, { contributions: {} });
+    const review = params.transferSlotReview;
+    const slot = review && transferSlot(review.target);
+    const previousSlot = slot && existing.contributions[slot.id];
+    if (review && slot) {
+      if (params.gcpProjectId !== review.target.projectId || params.contribution.id !== slot.id ||
+        digest(params.contribution.configuration) !== digest(slot.configuration) ||
+        previousSlot && digest(previousSlot) !== digest(slot.configuration) ||
+        Object.entries(existing.contributions).some(([owner, config]) => owner !== slot.id && Object.values(slot.addresses).some(address => config.resources[address]))) {
+        return fail('The transfer setup belongs to a different project or owner.');
+      }
+      if (!previousSlot && (review.evidence.account || review.evidence.secret || review.evidence.directAccessor)) {
+        return fail('A transfer resource already exists without a matching approved setup. Hypervibe cannot adopt it.');
+      }
+      if (params.confirm && !params.gcpSetupPlanId) return fail('Supply the exact saved plan ID for this empty migration slot.');
+    }
     const manifest = { contributions: { ...existing.contributions, [params.contribution.id]: params.contribution.configuration } };
     const configuration = composeGcpProjectConfiguration(manifest.contributions);
     // Retain deleted address mappings, so a specifically approved removal is representable.
     const previous = existing.contributions[params.contribution.id];
     Object.assign(configuration.resources, previous?.resources, params.contribution.configuration.resources);
     const intent = digest({ gcpProjectId: params.gcpProjectId, contribution: params.contribution,
+      ...(review ? { transferSlotReview: review } : {}),
       authenticationScope: params.authenticationScope ?? 'google-project-admin',
       destroy: params.allowDestroyAddresses ?? [], imports: params.allowImportAddresses ?? [], existing: params.existingResourceAddresses ?? [] });
     const previewFile = path.join(paths.plans, `setup-${intent}.json`);
@@ -264,7 +287,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
         return fail('Preview the current project and billing account again to obtain a plan-bound Google Cloud setup confirmation.');
       }
       if ((preview.requiresPlanId || params.gcpSetupPlanId !== undefined) && params.gcpSetupPlanId !== preview.planId) {
-        return fail('Preview the current Google Cloud setup, review its billing change, and confirm with the gcpSetupPlanId from that preview.');
+        return fail(slot ? 'Confirm with the exact saved plan ID for this empty migration slot.' : 'Preview the current Google Cloud setup, review its billing change, and confirm with the gcpSetupPlanId from that preview.');
       }
       if (preview.requiresPlanId && (!binding || !(preview.observedUnlinkedProject && observed && digest(preview.observedUnlinkedProject) === digest(observed))
         && !(preview.observedLinkedProject && linked && digest(preview.observedLinkedProject) === digest(linked)))) {
@@ -287,9 +310,22 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       if (!binary.ok) return fail(binary.error);
       engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), dataDir: params.dataDir });
     }
+    if (slot && params.confirm && (!params.observeTransferAfterApply || !engine.inspectState)) {
+      return fail('Confirming the migration slot requires fresh Google metadata and access to its private engine state.');
+    }
+    if (slot && review && previousSlot) {
+      const current = await engine.inspectState?.({ backend, configuration, auth: params.auth, state,
+        project: raw => matchesTransferState(raw, slot, review.evidence) });
+      if (!current?.ok || !current.present || !current.value) return fail('The original transfer resources could not be matched to private engine state. No changes are authorized.');
+    }
     if (!params.confirm) {
+      let verifiedTransfer = false;
       let verifiedBilling = false;
       const planInput = { backend, configuration, auth: params.auth, state, planId: saved.planId,
+        ...(slot && review ? { verifyPlannedChanges: (document: unknown) => {
+          verifiedTransfer = verifyTransferSlotPlan(document, slot, review.evidence);
+          return verifiedTransfer;
+        } } : {}),
         ...(bootstrap ? { verifyPlannedChanges: (document: unknown) => {
           const valid = verifyBootstrapBillingPlan(document, params.gcpProjectId, selectedAccount, observed ?? linked, !!linked);
           verifiedBilling = valid && !!(observed ?? linked);
@@ -320,6 +356,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
         if (observed) saved.observedUnlinkedProject = observed;
         if (linked) saved.observedLinkedProject = linked;
       }
+      if (slot && (!verifiedTransfer || planned.unmanagedDeletes.length)) return fail('The native plan did not match the empty transfer resources reviewed.');
       const allowed = new Set([...Object.keys(params.contribution.configuration.resources), ...Object.keys(previous?.resources ?? {})]);
       const destroy = new Set(params.allowDestroyAddresses ?? []);
       const imports = new Set(params.allowImportAddresses ?? []);
@@ -357,6 +394,25 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
         return fail(applied.diagnostics.join(' ') || 'Project setup has not converged. Preview again to inspect the remaining work.');
       }
     } else writeJson(manifestFile, saved.manifest);
+    if (slot && review) {
+      // A new provider object can reuse exactly the name and labels just created.
+      // Read back the live identity and compare it to the stored result of this apply.
+      const unverified = 'The empty migration slot could not be matched to its private engine state after apply. Preview its current setup again.';
+      try {
+        const after = await params.observeTransferAfterApply!();
+        const { account, secret } = after;
+        if (after.projectNumber !== review.evidence.projectNumber || after.directAccessor !== true
+          || !account || !/^[1-9][0-9]*$/.test(account.uniqueId) || account.description !== slot.description
+          || account.email !== slot.accountEmail || account.name !== 'projects/' + params.gcpProjectId + '/serviceAccounts/' + slot.accountEmail
+          || !secret?.createTime || secret.name !== 'projects/' + after.projectNumber + '/secrets/' + slot.secretId
+          || !Object.entries(slot.labels).every(([key, value]) => secret.labels[key] === value)
+          || review.evidence.account && review.evidence.account.uniqueId !== account.uniqueId
+          || review.evidence.secret && review.evidence.secret.createTime !== secret.createTime) return fail(unverified);
+        const observed = await engine.inspectState!({ backend, configuration, auth: params.auth, state,
+          project: raw => matchesTransferState(raw, slot, after) });
+        if (!observed.ok || !observed.present || observed.value !== true) return fail(unverified);
+      } catch { return fail(unverified); }
+    }
     fs.unlinkSync(previewFile);
     if (saved.requiresPlanId && hardenPrivateFile(marker)) fs.unlinkSync(marker);
     return { success: true, mode, planId: saved.planId, actions: saved.planned.actions, ...report };

@@ -5,12 +5,17 @@ import path from 'path';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import { GoogleAuth } from 'google-auth-library';
+import * as googleSignIn from '../../../adapters/providers/gcp/google-browser-signin.js';
 import { runCloudPrepare, verifyAndRecordBootstrapPreparation } from '../cloud-prepare.execute.js';
 import { getCloudPreparation, getCloudPrepareProfile, isCloudPrepared } from '../cloud-prepare.js';
 
 const setup = vi.hoisted(() => vi.fn(async (_params: unknown) => ({ success: true, mode: 'preview', planId: 'saved-setup', htmlPath: undefined as string | undefined, actions: [] as unknown[], error: undefined as string | undefined })));
-vi.mock('../gcp-project-setup.service.js', () => ({ runGcpProjectSetup: setup, getGcpProjectSetupContribution: () => undefined }));
+vi.mock('../gcp-project-setup.service.js', () => ({ runGcpProjectSetup: setup, getGcpProjectSetupContribution: () => undefined,
+  hasGcpProjectSetup: () => true }));
 vi.mock('google-auth-library', () => ({ GoogleAuth: class {
   async getClient() { return { getAccessToken: async () => ({ token: 'private-admin-token' }) }; }
 } }));
@@ -38,7 +43,7 @@ describe('runCloudPrepare', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function seedProject() {
+  function seedProject(runtimeServiceAccountEmail?: string) {
     const projectRepo = new ProjectRepository();
     const connectionRepo = new ConnectionRepository();
     const project = projectRepo.create({
@@ -51,6 +56,7 @@ describe('runCloudPrepare', () => {
       scope: 'davejohnson/hls-property-care',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'hls-property-care',
+        runtimeServiceAccountEmail,
         region: 'us-central1',
         credentials: JSON.stringify({
           type: 'service_account',
@@ -103,6 +109,35 @@ describe('runCloudPrepare', () => {
     expect(result.success).toBe(false);
     expect(authorize).not.toHaveBeenCalled();
     expect(setup).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('requires existing Google credentials for an empty transfer slot without browser sign-in (confirm=%s)', async confirm => {
+    const project = seedProject(RUNTIME_SERVICE_ACCOUNT_EMAIL);
+    const environments = new EnvironmentRepository();
+    environments.create({ projectId: project.id, name: 'source', platformBindings: {
+      provider: 'railway', projectId: 'railway-project', environmentId: 'railway-source',
+    } });
+    environments.create({ projectId: project.id, name: 'destination', platformBindings: {
+      provider: 'cloudrun', projectId: project.name, environmentId: 'us-central1', engine: { kind: 'opentofu' },
+    } });
+    const adc = vi.spyOn(GoogleAuth.prototype, 'getClient').mockRejectedValue(new Error('No local credentials'));
+    vi.spyOn(googleSignIn, 'configuredGoogleOAuthClient').mockReturnValue({ clientId: 'test-client' });
+    const browser = vi.spyOn(googleSignIn, 'signInWithGoogle').mockResolvedValue('browser-access-token');
+    const fetch = vi.fn().mockRejectedValue(new Error('Unexpected Google request'));
+    vi.stubGlobal('fetch', fetch);
+
+    const result = await runCloudPrepare({ project, provider: 'cloudrun',
+      migrationAccess: 'empty-transfer-slot', migrationSourceEnvironment: 'source', environmentName: 'destination',
+      confirm, ...(confirm ? { gcpSetupPlanId: 'reviewed-plan' } : {}) });
+    expect(result.success).toBe(false);
+    expect(adc).toHaveBeenCalledOnce();
+    expect(browser).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(setup).not.toHaveBeenCalled();
+
+    const ordinary = await runCloudPrepare({ project, provider: 'cloudrun' });
+    expect(ordinary.success).toBe(true);
+    expect(browser).toHaveBeenCalledOnce();
   });
 
   it('rejects conflicting native project selections before authorization or bootstrap verification', async () => {
