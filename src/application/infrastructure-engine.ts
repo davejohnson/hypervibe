@@ -228,6 +228,21 @@ export function gcpUnboundStateConflict(environment: Environment | null, selecte
   return `Environment ${environment.name} has existing OpenTofu state with no recorded Google Cloud project. Recover its original project binding or choose a fresh migration target.`;
 }
 
+/**
+ * Names of queues, services and buckets that OpenTofu would delete from an environment's state although no
+ * declared resource maps them. Only a resource's own address names it; companions (IAM members, schedules)
+ * are covered once their owner is retired. Underscores come back as hyphens, which maps to the same address.
+ */
+export function strayStateResources(unmanagedDeletes: string[]): { queues: string[]; services: string[]; storage: string[] } {
+  const names = (pattern: RegExp) => [...new Set(unmanagedDeletes.map((address) => pattern.exec(address)?.[1]).filter((key): key is string => Boolean(key)))]
+    .map((key) => key.replace(/_/g, '-'));
+  return {
+    queues: names(/^google_pubsub_(?:topic|subscription|topic_iam_member|subscription_iam_member)\.queue_([a-z0-9_]+?)(?:_publisher|_subscriber)?$/),
+    services: names(/^google_cloud_run_v2_(?:service|worker_pool|job)\.([a-z0-9_]+)$/),
+    storage: names(/^google_storage_bucket\.storage_([a-z0-9_]+)$/),
+  };
+}
+
 export async function resolveEngineContext(
   ctx: CommandContext,
   project: Project,
@@ -1080,14 +1095,17 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     planned = await planEnvironment(leftovers);
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
-  // Queues recorded only in engine state (for example, created before Hypervibe recorded queue
-  // bindings) are Hypervibe's own: retire them by their state address, then plan again.
-  const strayQueues = [...new Set(planned.unmanagedDeletes
-    .map((address) => /^google_pubsub_(?:topic|subscription|topic_iam_member|subscription_iam_member)\.queue_([a-z0-9_]+?)(?:_publisher|_subscriber)?$/.exec(address)?.[1])
-    .filter((key): key is string => Boolean(key)))].map((key) => key.replace(/_/g, '-'));
-  if (strayQueues.length && planned.unmanagedDeletes.every((address) => address.startsWith('google_pubsub_'))
-    && strayQueues.every((name) => !environmentSpec!.queues?.[name])) {
+  // Queues, services and buckets recorded only in engine state are Hypervibe's own: the state belongs to this
+  // environment alone. They get there when queue bindings were not yet recorded, or when an apply was cut off
+  // after the engine created them and before Hypervibe wrote them down. Retire them by state address, then plan again.
+  const stray = strayStateResources(planned.unmanagedDeletes);
+  const strayQueues = stray.queues.filter((name) => !environmentSpec!.queues?.[name]);
+  const strayServices = stray.services.filter((name) => !environmentSpec!.services[name] && !boundServices.includes(name));
+  const strayStorage = stray.storage.filter((name) => !environmentSpec!.storage?.[name]);
+  if (strayQueues.length || strayServices.length || strayStorage.length) {
     engineBinding.queues = [...new Set([...(engineBinding.queues ?? []), ...strayQueues])];
+    engineBinding.storage = [...new Set([...(engineBinding.storage ?? []), ...strayStorage])];
+    boundServices.push(...strayServices);
     planId = crypto.randomUUID();
     planned = await planEnvironment(leftovers);
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
@@ -1610,11 +1628,13 @@ async function recordServiceBindings(
     }
     // A change to only a workload's companions (for example a worker's waker) keeps its binding.
     if (!addresses.some((address) => address.startsWith('google_cloud_run_v2_service.'))) continue;
-    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource);
-    services[name] = {
-      serviceId: resource,
-      ...(observed.state === 'present' && typeof observed.value.uri === 'string' ? { url: observed.value.uri } : {}),
-    };
+    // A failed read of the address must not stop the record of what the engine created (live 2026-11-20: the network
+    // dropped here, nothing was recorded, and later plans refused to remove what the apply had created).
+    const previous = services[name];
+    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource).catch(() => undefined);
+    const url = observed?.state === 'present' && typeof observed.value.uri === 'string' ? observed.value.uri
+      : previous?.serviceId === resource && typeof previous.url === 'string' ? previous.url : undefined;
+    services[name] = { serviceId: resource, ...(url ? { url } : {}) };
   }
   ctx.repos.environments.updatePlatformBindings(current.id, {
     engine: JSON.parse(JSON.stringify(engine)) as EngineBinding,
