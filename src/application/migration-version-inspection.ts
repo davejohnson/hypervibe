@@ -18,8 +18,8 @@ async function current(ctx: CommandContext, selection: Selection, checkAccess = 
   const { project, spec, targetName } = selection;
   const source = ctx.repos.environments.findById(selection.source.id);
   if (!source || source.projectId !== project.id || source.name === targetName || spec.environments[source.name]?.hosting.provider !== 'railway'
-    || spec.environments[source.name]?.database?.provider !== 'railway' || spec.environments[targetName] && spec.environments[targetName].database?.provider !== 'cloudsql'
-    || migrationDatabaseBindingConflict(ctx, project, spec, source, ctx.repos.environments.findByProjectAndName(project.id, targetName) ?? undefined)) throw new Error();
+    || spec.environments[source.name]?.database?.provider !== 'railway'
+    || migrationDatabaseBindingConflict(ctx, project, spec, source, undefined)) throw new Error();
   const databases = ctx.repos.components.findByEnvironmentId(source.id).filter(item => item.type === 'postgres');
   const database = databases[0], { projectId, environmentId } = source.platformBindings;
   if (databases.length !== 1 || !database?.externalId || database.bindings.provider !== 'railway'
@@ -45,6 +45,16 @@ type ReviewSelection = Selection & { revision: number; fresh?: boolean };
 export function planMigrationSourceVersion(ctx: CommandContext, selection: ReviewSelection & { fresh: true }): Promise<SourceReview>;
 export function planMigrationSourceVersion(ctx: CommandContext, selection: ReviewSelection): Promise<SourceReview | { major: number }>;
 export async function planMigrationSourceVersion(ctx: CommandContext, selection: ReviewSelection): Promise<SourceReview | { major: number }> {
+  const source = selection.spec.environments[selection.source.name];
+  if (source?.hosting.provider !== 'railway' || source.database?.provider !== 'railway') {
+    const provider = source?.database?.provider;
+    const guidance = provider === 'rds'
+      ? 'For a managed AWS Aurora source, hv_db_query can read catalog statistics through the Aurora Data API using the environment application login.'
+      : provider === 'azure-postgres'
+        ? 'For a private Azure PostgreSQL source, hv_inspect can check the server. Reading its SQL inventory requires a private connector that Hypervibe does not yet provide.'
+        : 'This reviewed inventory requires a Railway-hosted PostgreSQL source.';
+    return { status: 'blocked', message: `Source inspection is unavailable for ${selection.source.name}. ${guidance}` };
+  }
   try {
     const { metadata, inspection } = await current(ctx, selection, selection.fresh);
     const id = migrationVersionActionId(metadata);
@@ -72,7 +82,8 @@ export async function planMigrationSourceVersion(ctx: CommandContext, selection:
     const requirement = error instanceof MissingTrustedAccess
       ? 'For this SSH inspection, the selected Railway connection needs the absolute paths sshIdentityFile (an already registered private key) and sshKnownHostsFile (independently trusted Railway host keys). Supply both in that connection using a private credentials reference.'
       : 'The exact tracked Railway database, attached volume, running deployment, image digest and replica must be verifiable.';
-    return { status: 'blocked', message: `The private source version could not be reviewed. ${requirement} Use hv_launch for ${selection.targetName} to prepare the empty target independently.` };
+    const next = selection.fresh ? '' : ` Use hv_launch for ${selection.targetName} to prepare the empty target independently.`;
+    return { status: 'blocked', message: `The private source version could not be reviewed. ${requirement}${next}` };
   }
 }
 

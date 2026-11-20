@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import type { CommandContext } from './context.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
-import { SpecStore } from '../domain/spec/spec.store.js';
+import { SpecStore, type SpecResult } from '../domain/spec/spec.store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { acquireManagedDatabaseAccess, type DatabaseAccessLease } from '../domain/services/database-access.service.js';
 import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-database-identity.js';
@@ -263,36 +263,28 @@ interface MigrateParams {
   sourceDirectory?: string;
 }
 
-export async function migrateEnvironment(ctx: CommandContext, params: MigrateParams): Promise<MigrateResult> {
-  const lease = acquireMigrationTargetLease(params.project.id, params.to.trim());
-  if (!lease) return { status: 'blocked', message: `A migration to ${params.to} is already running. Wait for it to finish before retrying.` };
-  try {
-    return await runMigration(ctx, params, lease);
-  } finally {
-    lease.close();
-  }
+function selectMigrationSource(ctx: CommandContext, params: MigrateParams, store: SpecStore):
+  { blocked: string } | { specResult: SpecResult; sourceEnvironment: Environment } {
+  const specResult = store.get(params.project);
+  if (!specResult) return { blocked: 'This project has no spec yet.' };
+  if (!specResult.spec.environments[params.from]) return { blocked: `The spec has no source environment "${params.from}".` };
+  const sourceEnvironment = ctx.repos.environments.findByProjectAndName(params.project.id, params.from);
+  if (!sourceEnvironment) return { blocked: `Environment ${params.from} has never been deployed by Hypervibe.` };
+  return { specResult, sourceEnvironment };
 }
 
-async function runMigration(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease): Promise<MigrateResult> {
+export async function migrateEnvironment(ctx: CommandContext, params: MigrateParams): Promise<MigrateResult> {
   // Reject before even proposing or preparing a target. This applies equally
   // to every provider and to copy, refresh, verification and cutover resumes.
   if (params.from.trim() === params.to.trim()) {
     return { status: 'blocked', message: 'The migration source and target must be different environments. Migrating an environment into itself can erase its source data.' };
   }
-  const store = new SpecStore();
-  let specResult = store.get(params.project);
-  if (!specResult) return { status: 'blocked', message: 'This project has no spec yet.' };
-  const sourceSpec = specResult.spec.environments[params.from];
-  if (!sourceSpec) return { status: 'blocked', message: `The spec has no source environment "${params.from}".` };
-  const declaredTarget = specResult.spec.environments[params.to];
-  if (params.gcpProjectId && declaredTarget && declaredTarget.hosting.gcpProjectId !== params.gcpProjectId) {
-    return { status: 'blocked', message: `Migration target ${params.to} already selects ${declaredTarget.hosting.gcpProjectId ?? 'the repository default'}. Choose a new target environment to migrate to ${params.gcpProjectId}.` };
-  }
-  const sourceEnvironment = ctx.repos.environments.findByProjectAndName(params.project.id, params.from);
-  if (!sourceEnvironment) return { status: 'blocked', message: `Environment ${params.from} has never been deployed by Hypervibe.` };
   const suppliedPlan = params.planId ? new ConvergeExecutor().loadPlan(params.planId) : undefined;
   if (suppliedPlan && 'error' in suppliedPlan) return { status: 'blocked', message: suppliedPlan.error };
   if (params.inspectSource || suppliedPlan?.document.scope === 'migration-source-version') {
+    const source = selectMigrationSource(ctx, params, new SpecStore());
+    if ('blocked' in source) return { status: 'blocked', message: source.blocked };
+    const { specResult, sourceEnvironment } = source;
     if (params.copyData || params.refreshData || params.cutover || params.confirmCutover || params.verifyOnly
       || params.importSecrets || params.approveAccess?.length || params.gcpSetupPlanId || params.billingAccountName || params.domain || params.region || params.gcpProjectId) {
       return { status: 'blocked', message: 'Review the source inspection separately from target changes, data transfer and cutover.' };
@@ -314,6 +306,28 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     if (params.confirmActions?.length) return { status: 'blocked', message: 'Review a saved source inspection plan before confirming its action.' };
     return planMigrationSourceVersion(ctx, { project: params.project, source: sourceEnvironment, targetName: params.to,
       spec: specResult.spec, revision: specResult.revision, fresh: true });
+  }
+  const lease = acquireMigrationTargetLease(params.project.id, params.to.trim());
+  if (!lease) return { status: 'blocked', message: `A migration to ${params.to} is already running. Wait for it to finish before retrying.` };
+  try {
+    return await runMigration(ctx, params, lease, suppliedPlan);
+  } finally {
+    lease.close();
+  }
+}
+
+async function runMigration(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease,
+  suppliedPlan = params.planId ? new ConvergeExecutor().loadPlan(params.planId) : undefined): Promise<MigrateResult> {
+  if (suppliedPlan && 'error' in suppliedPlan) return { status: 'blocked', message: suppliedPlan.error };
+  const store = new SpecStore();
+  const source = selectMigrationSource(ctx, params, store);
+  if ('blocked' in source) return { status: 'blocked', message: source.blocked };
+  let { specResult } = source;
+  const { sourceEnvironment } = source;
+  const sourceSpec = specResult.spec.environments[params.from]!;
+  const declaredTarget = specResult.spec.environments[params.to];
+  if (params.gcpProjectId && declaredTarget && declaredTarget.hosting.gcpProjectId !== params.gcpProjectId) {
+    return { status: 'blocked', message: `Migration target ${params.to} already selects ${declaredTarget.hosting.gcpProjectId ?? 'the repository default'}. Choose a new target environment to migrate to ${params.gcpProjectId}.` };
   }
   const liveTarget = await protectForwardingTarget(params.project, specResult.spec, sourceEnvironment,
     ctx.repos.environments.findByProjectAndName(params.project.id, params.to), params.to, params);

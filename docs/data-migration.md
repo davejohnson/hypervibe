@@ -4,6 +4,16 @@ Choose how the data will move before pausing the app. Application maintenance
 pauses the app while you copy data yourself. Automated data migration copies
 whole databases and buckets through a separate reviewed Hypervibe plan.
 
+## Inspect a Railway PostgreSQL source
+
+Use `hypervibe migrate --from production --to rehearsal --inspect-source` to review an inspection of the source PostgreSQL database. The saved action identifies the Railway project, environment, database deployment, image digest, replica and volume. It requires an existing Railway connection with the absolute paths `sshIdentityFile` and `sshKnownHostsFile` for an already registered key and independently trusted host keys.
+
+After approval, Hypervibe runs one fixed catalog query over the local PostgreSQL socket in that running replica. It reports the server version, number of user tables and estimated live rows. The database must use a supported PostgreSQL image, a single running replica and a private database URL matching the local database name and standard port. The check opens no ports and creates no services. A later Google Cloud migration to the same named destination can reuse the version for sizing while the reviewed source identity still matches. An explicit `--inspect-source` review asks for fresh statistics. The estimates describe the selected database at inspection time and supply no copy or cutover authority.
+
+The destination name scopes the approval. It may refer to an AWS, Azure or Google Cloud environment, or one you have not created. Inspection leaves the destination untouched. For AWS Aurora sources, `hv_db_query` supports bounded catalog reads through the Data API when the environment has its application query credential. For private Azure PostgreSQL, `hv_inspect` can check server metadata. SQL inventory needs a private connector that Hypervibe does not yet provide.
+
+Guided migration defaults new destinations to Google Cloud. It can import runtime settings into an existing AWS destination. Guided data transfers to AWS and guided migration to Azure are unavailable.
+
 ## Railway to Google Cloud
 
 Prepare a separate Cloud Run environment and check the app on its temporary
@@ -16,10 +26,6 @@ reviewed native jobs. A historical receipt only describes the earlier copy.
 The application pause and forwarding flow below is a separate capability.
 Follow [the private transfer implementation](https://github.com/davejohnson/hypervibe/issues/747)
 and [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
-
-Before preparing the target, use `hypervibe migrate --from production --to rehearsal --inspect-source` to review an inspection of the source PostgreSQL database. The saved action identifies the Railway project, environment, database deployment, image digest, replica and volume. It requires an existing Railway connection with the absolute paths `sshIdentityFile` and `sshKnownHostsFile` for an already registered key and independently trusted host keys.
-
-After approval, Hypervibe runs one fixed catalog query over the local PostgreSQL socket in that running replica. It reports the server version, number of user tables and estimated live rows. The database must use a supported PostgreSQL image, a single running replica and a private database URL matching the local database name and standard port. The check opens no ports and creates no services. Hypervibe can reuse the version for target sizing while the reviewed identity still matches. An explicit `--inspect-source` review asks for fresh statistics. The estimates describe the selected database at inspection time and supply no copy or cutover authority.
 
 For a production rehearsal, include files with known contents and eligible
 queued work. Check every referenced object, run one worker against the target,

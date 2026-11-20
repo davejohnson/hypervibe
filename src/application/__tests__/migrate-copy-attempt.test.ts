@@ -4,6 +4,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { acquireMigrationTargetLease } from '../../adapters/db/migration-target-lease.js';
 import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
@@ -460,6 +461,67 @@ describe('current source credential handoff', () => {
     f.versionInspection.hasTrustedAccess.mockResolvedValue(true);
     expect(await f.migrate()).toMatchObject({ status: 'needs_confirmation' });
     expect(f.versionInspection.inspect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { hosting: 'aws', database: 'rds' },
+    { hosting: 'azure', database: 'azure-postgres' },
+  ])('reviews only the Railway source for a declared $hosting destination', async ({ hosting, database }) => {
+    const f = railwayFixture();
+    f.store.merge(f.project, { environments: { rehearsal: { hosting: { provider: hosting, engine: 'opentofu' }, database: { provider: database }, services: {} } } });
+    const rehearsal = f.ctx.repos.environments.create({ projectId: f.project.id, name: 'rehearsal' });
+    const spec = f.store.get(f.project);
+    const otherMigration = f.current();
+    f.versionInspection.hasTrustedAccess.mockResolvedValue(true);
+    const review = await f.migrate({ inspectSource: true, to: 'rehearsal' });
+    expect(review.status).toBe('needs_confirmation');
+    if (review.status !== 'needs_confirmation') throw new Error('Expected a saved source inspection plan.');
+    const approval = { planId: review.planId, confirmActions: review.confirmActions };
+    expect(await f.migrate(approval)).toMatchObject({ status: 'blocked' });
+    expect(await f.migrate({ to: 'rehearsal', ...approval })).toMatchObject({ status: 'source_inspected', inventory: { tables: 4 } });
+    expect(f.store.get(f.project)).toEqual(spec);
+    expect(f.ctx.repos.environments.findById(rehearsal.id)?.platformBindings).toEqual(rehearsal.platformBindings);
+    expect(f.current()).toEqual(otherMigration);
+    expect(launch.launchEnvironment).not.toHaveBeenCalled();
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+
+    // Even an ordinary migration cannot use this receipt for a different destination.
+    f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: {
+      ...f.target.platformBindings.engine as engine.EngineBinding, migration: { from: 'source' },
+    } });
+    expect(await f.migrate()).toMatchObject({ status: 'needs_confirmation' });
+    expect(f.current()).toEqual({ from: 'source' });
+    expect(f.releaseCalls()).toHaveLength(0);
+  });
+
+  it('can review and apply a source inspection while the named destination is locked', async () => {
+    const f = railwayFixture();
+    f.versionInspection.hasTrustedAccess.mockResolvedValue(true);
+    const lease = acquireMigrationTargetLease(f.project.id, 'target')!;
+    try {
+      const review = await f.migrate({ inspectSource: true });
+      expect(review.status).toBe('needs_confirmation');
+      if (review.status !== 'needs_confirmation') throw new Error('Expected a saved source inspection plan.');
+      expect(await f.migrate({ planId: review.planId, confirmActions: review.confirmActions })).toMatchObject({ status: 'source_inspected' });
+      expect(await f.migrate()).toMatchObject({ status: 'blocked', message: expect.stringContaining('already running') });
+    } finally {
+      lease.close();
+    }
+  });
+
+  it.each([
+    { hosting: 'aws', database: 'rds', guidance: /Aurora Data API/ },
+    { hosting: 'azure', database: 'azure-postgres', guidance: /private connector/ },
+  ])('reports available database access for a $hosting source without contacting Railway', async ({ hosting, database, guidance }) => {
+    const f = railwayFixture();
+    f.store.merge(f.project, { environments: { source: { hosting: { provider: hosting, engine: 'opentofu' }, database: { provider: database } } } });
+    const result = await commands.createCommandRegistry(f.ctx).get('hv_migrate')!.execute({
+      project: f.project.id, from: 'source', to: 'target', inspectSource: true,
+    });
+    expect(result).toMatchObject({ ok: false, error: { message: expect.stringMatching(guidance) } });
+    expect(f.versionInspection.observe).not.toHaveBeenCalled();
+    expect(access.acquireManagedDatabaseAccess).not.toHaveBeenCalled();
+    expect(launch.launchEnvironment).not.toHaveBeenCalled();
   });
 
   it('reviews the source before asking Google Cloud for a target, and requires the exact approval', async () => {
