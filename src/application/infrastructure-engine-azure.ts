@@ -322,6 +322,10 @@ function recordPlan(project: Project, context: AzureEngineContext, params: { env
 const withDependencies = (actions: PlanAction[], dependencies: string[]) => dependencies.length
   ? actions.map((action) => action.type === 'noop' ? action : { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...dependencies])] })
   : actions;
+/** Puts the removal of a failed app environment ahead of the shared steps, which then wait for it. */
+export const withRepairFirst = (repair: PlanAction | undefined, actions: PlanAction[], prior: string[] = []): PlanAction[] => repair
+  ? [{ ...repair, ...(prior.length ? { dependsOn: prior } : {}) }, ...withDependencies(actions, [repair.id])]
+  : actions;
 const changing = (actions: PlanAction[]) => actions.filter((action) => action.type !== 'noop').map((action) => action.id);
 
 /**
@@ -427,7 +431,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
   // A failed earlier attempt can leave the app environment in Azure but not in the engine's state.
   const repair = sharedPlanned.actions.some((action) => action.id === 'shared:apps' && action.type === 'create') ? await azureFailedEnvironmentAction(context) : undefined;
-  const sharedActions = repair ? [repair, ...withDependencies(sharedPlanned.actions, [repair.id])] : sharedPlanned.actions;
+  const sharedActions = withRepairFirst(repair, sharedPlanned.actions);
   const sharedChanging = changing(sharedActions);
   // Connections made before 2026-11-17 never turned on Azure networking; only the subscription Owner can.
   let networkingUnchecked = false;
@@ -552,9 +556,9 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
     if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
     if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
     sharedActions = withDependencies(sharedPlanned.actions.filter((action) => action.type !== 'noop'), [...changing(environmentActions), ...changing(buildActions)]);
-    // The engine cannot destroy an app environment it never recorded; a failed one is removed directly.
-    const repair = sharedActions.some((action) => action.id === 'shared:apps') ? undefined : await azureFailedEnvironmentAction(context);
-    if (repair) sharedActions = [repair, ...sharedActions];
+    // The engine cannot destroy an app environment it never recorded; a failed one is removed directly,
+    // before the log workspace it points at (which the engine did record under the same step).
+    sharedActions = withRepairFirst(await azureFailedEnvironmentAction(context), sharedActions, [...changing(environmentActions), ...changing(buildActions)]);
     shared = { shared: { planId: sharedPlanId, state: context.shared.state } };
   }
   const dropActions: PlanAction[] = environmentSpec.database && remaining.length ? [{
@@ -567,16 +571,16 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'azure' },
-    reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${sharedActions.length ? ' (nor the shared network, app environment, server and registry)' : ''}, and remove it from the spec.`,
+    reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${!remaining.length ? ' (nor the shared network, app environment, server and registry)' : ''}, and remove it from the spec.`,
     dependsOn: [...changing(environmentActions), ...changing(buildActions), ...changing(sharedActions), ...changing(dropActions)],
-    metadata: { operation: AZURE_TEARDOWN_CLEANUP_OPERATION, subscriptionId, sharedRemoved: sharedActions.length > 0 },
+    metadata: { operation: AZURE_TEARDOWN_CLEANUP_OPERATION, subscriptionId, sharedRemoved: !remaining.length },
   };
   if (!cleanup.dependsOn!.length) delete cleanup.dependsOn;
   const actions = [...emptyActions, ...environmentActions, ...buildActions, ...dropActions, ...sharedActions, cleanup];
   const warnings = [
     `Removes Azure environment ${environmentName} (${azureLocationFor(spec, environmentName, context.connection)}, resource group ${context.connection.resourceGroup}). This cannot be undone.`,
     ...(environmentSpec.database ? ['Azure keeps no final snapshot of a deleted database; export it first if you need the data.'] : []),
-    sharedActions.length ? 'No other testing environment uses the shared network, app environment, server and registry, so they are removed too.' : `The shared network, app environment, server and registry stay for ${remaining.join(', ')}.`,
+    !remaining.length ? 'No other testing environment uses the shared network, app environment, server and registry, so they are removed too.' : `The shared network, app environment, server and registry stay for ${remaining.join(', ')}.`,
     `Hypervibe's access (resource group, Key Vault, deploy identity) stays, for other environments of ${project.name}.`,
   ];
   return recordPlan(project, context, params, actions, warnings, { planId, teardown: true, build: { planId: buildPlanId, state: context.buildState }, ...shared });

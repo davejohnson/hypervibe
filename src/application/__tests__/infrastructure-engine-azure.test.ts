@@ -6,8 +6,7 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { AzureTokens } from '../../adapters/providers/azure/azure-ops.client.js';
 import {
   AZURE_DATABASE_LOGIN_OPERATION, AZURE_FAILED_ENVIRONMENT_OPERATION, AZURE_IMAGE_BUILD_OPERATION, azureFailedEnvironmentAction, AZURE_SECRET_OPERATION, AZURE_TEARDOWN_CLEANUP_OPERATION, azureBindingToSave, azureEngineLayout, azureLegacyNames, azureResourceName, azureEngineProblems,
-  azureEnvironmentSecretKeys, azureProfileFor, azureTestingEnvironments, buildAzureEngineInput, buildAzureSharedInput, runAzureAction, type AzureEngineContext,
-} from '../infrastructure-engine-azure.js';
+  azureEnvironmentSecretKeys, azureProfileFor, azureTestingEnvironments, buildAzureEngineInput, buildAzureSharedInput, runAzureAction, type AzureEngineContext, withRepairFirst } from '../infrastructure-engine-azure.js';
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -239,6 +238,25 @@ describe('Azure apply actions', () => {
     await expect(azureFailedEnvironmentAction(unreadable.context)).resolves.toBeUndefined();
     await expect(runAzureAction(unreadable.ctx, unreadable.context, action(AZURE_FAILED_ENVIRONMENT_OPERATION), params(), { pollMs: 0 })).resolves.toMatchObject({ success: false, status: 'blocked' });
     expect(unreadable.calls.filter((call) => call.method === 'DELETE')).toEqual([]);
+  });
+
+  it('removes a failed app environment before the shared steps, including the log workspace the engine did record', () => {
+    const repair = { id: 'shared-repair:apps', type: 'destroy' } as never;
+    const shared = [{ id: 'shared:apps', type: 'destroy', dependsOn: ['web:app'] }, { id: 'shared:network', type: 'noop' }] as never[];
+    expect(withRepairFirst(repair, shared, ['web:app'])).toEqual([
+      { id: 'shared-repair:apps', type: 'destroy', dependsOn: ['web:app'] },
+      { id: 'shared:apps', type: 'destroy', dependsOn: ['web:app', 'shared-repair:apps'] },
+      { id: 'shared:network', type: 'noop' },
+    ]);
+    expect(withRepairFirst(undefined, shared)).toBe(shared);
+  });
+
+  it('keeps the environment in the spec when a shared leftover the engine never recorded remains after the last teardown', async () => {
+    const azure = setup((_method, url) => url.includes("vault.azure.net/secrets?") ? json(200, { value: [] })
+      : json(200, { value: decodeURIComponent(url).includes('hv-shared') ? [{ name: 'hv-billforge-shared-apps' }] : [] }));
+    const result = await runAzureAction(azure.ctx, azure.context, action(AZURE_TEARDOWN_CLEANUP_OPERATION, { sharedRemoved: true }), { project: project as never, spec: spec({ test: testing() }) });
+    expect(result).toMatchObject({ success: false, message: expect.stringContaining('hv-billforge-shared-apps') });
+    expect(azure.bindings().azure).toBeUndefined();
   });
 
   it('keeps the environment in the spec when anything tagged for it remains after teardown', async () => {
