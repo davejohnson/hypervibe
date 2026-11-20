@@ -5,12 +5,23 @@ import path from 'path';
 import { initializeDatabase, SqliteAdapter } from '../../../adapters/db/sqlite.adapter.js';
 import { ProjectRepository } from '../../../adapters/db/repositories/project.repository.js';
 import { ConnectionRepository } from '../../../adapters/db/repositories/connection.repository.js';
+import { EnvironmentRepository } from '../../../adapters/db/repositories/environment.repository.js';
 import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
+import '../../../adapters/providers/gcp/cloudrun.adapter.js';
+import { GoogleAuth } from 'google-auth-library';
+import * as googleSignIn from '../../../adapters/providers/gcp/google-browser-signin.js';
+import * as transferEvidence from '../../../adapters/providers/gcp/gcp-transfer-slot-evidence.js';
+import * as isolationEvidence from '../../../adapters/providers/gcp/gcp-transfer-isolation-evidence.js';
+import { transferSlot } from '../../../adapters/providers/gcp/tofu/transfer-slot.js';
+import { isolationGrants } from '../../../adapters/providers/gcp/tofu/transfer-isolation.js';
 import { runCloudPrepare, verifyAndRecordBootstrapPreparation } from '../cloud-prepare.execute.js';
 import { getCloudPreparation, getCloudPrepareProfile, isCloudPrepared } from '../cloud-prepare.js';
 
 const setup = vi.hoisted(() => vi.fn(async (_params: unknown) => ({ success: true, mode: 'preview', planId: 'saved-setup', htmlPath: undefined as string | undefined, actions: [] as unknown[], error: undefined as string | undefined })));
-vi.mock('../gcp-project-setup.service.js', () => ({ runGcpProjectSetup: setup, getGcpProjectSetupContribution: () => undefined }));
+const savedIsolation = vi.hoisted(() => vi.fn());
+const contribution = vi.hoisted(() => vi.fn());
+vi.mock('../gcp-project-setup.service.js', () => ({ runGcpProjectSetup: setup, getGcpProjectSetupContribution: contribution,
+  hasGcpProjectSetup: () => true, getGcpRuntimeIsolation: savedIsolation }));
 vi.mock('google-auth-library', () => ({ GoogleAuth: class {
   async getClient() { return { getAccessToken: async () => ({ token: 'private-admin-token' }) }; }
 } }));
@@ -24,6 +35,8 @@ describe('runCloudPrepare', () => {
   let tempDir: string;
 
   beforeEach(() => {
+    savedIsolation.mockReset();
+    contribution.mockReset();
     setup.mockReset();
     setup.mockResolvedValue({ success: true, mode: 'preview', planId: 'saved-setup', htmlPath: '/reports/saved-setup.html', actions: [], error: undefined });
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hypervibe-cloud-prepare-'));
@@ -38,7 +51,7 @@ describe('runCloudPrepare', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  function seedProject() {
+  function seedProject(runtimeServiceAccountEmail?: string) {
     const projectRepo = new ProjectRepository();
     const connectionRepo = new ConnectionRepository();
     const project = projectRepo.create({
@@ -51,6 +64,7 @@ describe('runCloudPrepare', () => {
       scope: 'davejohnson/hls-property-care',
       credentialsEncrypted: getSecretStore().encryptObject({
         projectId: 'hls-property-care',
+        runtimeServiceAccountEmail,
         region: 'us-central1',
         credentials: JSON.stringify({
           type: 'service_account',
@@ -103,6 +117,93 @@ describe('runCloudPrepare', () => {
     expect(result.success).toBe(false);
     expect(authorize).not.toHaveBeenCalled();
     expect(setup).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('requires existing Google credentials for an empty transfer slot without browser sign-in (confirm=%s)', async confirm => {
+    const project = seedProject(RUNTIME_SERVICE_ACCOUNT_EMAIL);
+    const environments = new EnvironmentRepository();
+    environments.create({ projectId: project.id, name: 'source', platformBindings: {
+      provider: 'railway', projectId: 'railway-project', environmentId: 'railway-source',
+    } });
+    environments.create({ projectId: project.id, name: 'destination', platformBindings: {
+      provider: 'cloudrun', projectId: project.name, environmentId: 'us-central1', engine: { kind: 'opentofu' },
+    } });
+    const adc = vi.spyOn(GoogleAuth.prototype, 'getClient').mockRejectedValue(new Error('No local credentials'));
+    vi.spyOn(googleSignIn, 'configuredGoogleOAuthClient').mockReturnValue({ clientId: 'test-client' });
+    const browser = vi.spyOn(googleSignIn, 'signInWithGoogle').mockResolvedValue('browser-access-token');
+    const fetch = vi.fn().mockRejectedValue(new Error('Unexpected Google request'));
+    vi.stubGlobal('fetch', fetch);
+
+    const result = await runCloudPrepare({ project, provider: 'cloudrun',
+      migrationAccess: 'empty-transfer-slot', migrationSourceEnvironment: 'source', environmentName: 'destination',
+      confirm, ...(confirm ? { gcpSetupPlanId: 'reviewed-plan' } : {}) });
+    expect(result.success).toBe(false);
+    expect(adc).toHaveBeenCalledOnce();
+    expect(browser).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(setup).not.toHaveBeenCalled();
+
+    const ordinary = await runCloudPrepare({ project, provider: 'cloudrun' });
+    expect(ordinary.success).toBe(true);
+    expect(browser).toHaveBeenCalledOnce();
+  });
+
+  it('requires the approved empty slot in the same managed state before planning app restrictions', async () => {
+    const project = seedProject(RUNTIME_SERVICE_ACCOUNT_EMAIL);
+    const environments = new EnvironmentRepository();
+    environments.create({ projectId: project.id, name: 'source', platformBindings: {
+      provider: 'railway', projectId: 'railway-project', environmentId: 'railway-source',
+    } });
+    environments.create({ projectId: project.id, name: 'destination', platformBindings: {
+      provider: 'cloudrun', projectId: project.name, environmentId: 'us-central1', engine: { kind: 'opentofu' },
+    } });
+    const authorize = vi.fn(async () => 'test-token');
+    const fetch = vi.fn().mockRejectedValue(new Error('Unexpected Google request'));
+    vi.stubGlobal('fetch', fetch);
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', migrationAccess: 'restrict-app-access',
+      migrationSourceEnvironment: 'source', environmentName: 'destination', defaultAdminAccessTokenProvider: authorize });
+    expect(result).toMatchObject({ success: false, error: expect.stringMatching(/approved empty transfer slot/i) });
+    expect(authorize).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(setup).not.toHaveBeenCalled();
+  });
+
+  it('sends the approved source and target to native isolation planning and re-reads Google after apply', async () => {
+    const project = seedProject(RUNTIME_SERVICE_ACCOUNT_EMAIL);
+    const environments = new EnvironmentRepository();
+    const source = environments.create({ projectId: project.id, name: 'source', platformBindings: {
+      provider: 'railway', projectId: 'railway-project', environmentId: 'railway-source',
+    } });
+    const destination = environments.create({ projectId: project.id, name: 'destination', platformBindings: {
+      provider: 'cloudrun', projectId: project.name, environmentId: 'us-central1', engine: { kind: 'opentofu' },
+    } });
+    const target = { projectId: project.name, targetRegion: 'us-central1', sourceRailwayProjectId: 'railway-project',
+      sourceRailwayEnvironmentId: 'railway-source', sourceEnvironmentId: source.id, targetEnvironmentId: destination.id };
+    const slot = transferSlot(target);
+    contribution.mockReturnValue(slot.configuration);
+    const createTime = '2026-01-01T00:00:00Z';
+    const observation = { projectNumber: '12345', account: { name: 'projects/' + project.name + '/serviceAccounts/' + slot.accountEmail,
+      email: slot.accountEmail, uniqueId: '10002', description: slot.description },
+      secret: { name: 'projects/12345/secrets/' + slot.secretId, createTime, labels: slot.labels }, directAccessor: true };
+    const scope = { target, targetEnvironmentName: destination.name, projectNumber: '12345', runtimeEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL,
+      runtimeUniqueId: '10001', bucket: project.name + '-hv-build-source', bucketTimeCreated: createTime,
+      copyUniqueId: '10002', secretCreateTime: createTime };
+    const evidence = { slot: observation, scope, grants: { 'roles/secretmanager.secretAccessor': 'broad',
+      'roles/storage.objectUser': 'broad' } as const, evidenceDigest: 'a'.repeat(64) };
+    const readSlot = vi.spyOn(transferEvidence, 'readTransferSlotEvidence').mockResolvedValue(observation);
+    const readIsolation = vi.spyOn(isolationEvidence, 'readTransferIsolationEvidence').mockResolvedValue(evidence);
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', migrationAccess: 'restrict-app-access', confirm: true,
+      migrationSourceEnvironment: source.name, environmentName: destination.name, gcpSetupPlanId: 'reviewed-isolation',
+      defaultAdminAccessTokenProvider: async () => 'test-token' });
+    expect(result.success, String(result.error)).toBe(true);
+    expect(contribution).toHaveBeenCalledWith(project.id, project.name, slot.id);
+    expect(setup).toHaveBeenCalledWith(expect.objectContaining({ confirm: true, gcpSetupPlanId: 'reviewed-isolation',
+      transferIsolationReview: evidence, authenticationScope: 'migration:restrict-app-access:' + slot.id }));
+    const params = setup.mock.calls[0]![0] as { observeIsolationAfterApply: () => Promise<unknown>; contribution: { configuration: { resources: Record<string, unknown> } } };
+    expect(Object.keys(params.contribution.configuration.resources)).toEqual(isolationGrants(scope).map(grant => grant.address));
+    readSlot.mockRejectedValueOnce(new Error('slot verification unavailable'));
+    await expect(params.observeIsolationAfterApply()).rejects.toThrow('slot verification unavailable');
+    expect(readIsolation).toHaveBeenCalledOnce();
   });
 
   it('rejects conflicting native project selections before authorization or bootstrap verification', async () => {
@@ -349,6 +450,56 @@ describe('runCloudPrepare', () => {
     expect(result.success).toBe(converged);
     expect(requests.filter(({ method, url }) => method && method !== 'GET' && !url.endsWith(':getIamPolicy'))).toEqual([]);
     expect(Boolean(new ProjectRepository().findById(project.id)?.policies.cloudPreparation)).toBe(converged);
+  });
+
+  it('cannot grant deployment roles to the saved restricted app by selecting it as a deployment account', async () => {
+    const project = seedProject();
+    savedIsolation.mockImplementation((_id, _project, email) => email === RUNTIME_SERVICE_ACCOUNT_EMAIL ? {} : undefined);
+    const authorize = vi.fn(async () => 'test-token');
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', gcsAccess: 'lifecycle',
+      deployServiceAccountEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL, defaultAdminAccessTokenProvider: authorize });
+    expect(result).toMatchObject({ success: false, error: expect.stringMatching(/restricted app.*deployment/i) });
+    expect(setup).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+  });
+
+  it.each(['exact', 'broad', 'additional', 'altered', 'recreated'])('verifies the saved app restrictions during ordinary GCS preparation (%s)', async observed => {
+    const project = seedProject(RUNTIME_SERVICE_ACCOUNT_EMAIL);
+    const isolation = {
+      target: { projectId: project.name, targetRegion: 'us-central1', sourceEnvironmentId: 'source',
+        targetEnvironmentId: 'dest', sourceRailwayProjectId: 'p', sourceRailwayEnvironmentId: 'e' },
+      targetEnvironmentName: 'destination', projectNumber: '12345', runtimeEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL,
+      runtimeUniqueId: '10001', bucket: project.name + '-hv-build-source', bucketTimeCreated: '2026-01-01T00:00:00Z',
+      copyUniqueId: '10002', secretCreateTime: '2026-01-01T00:00:00Z',
+    };
+    savedIsolation.mockImplementation((_id, _project, email) => email === isolation.runtimeEmail ? isolation : undefined);
+    const bindings = isolationGrants(isolation).map(({ role, member, condition }) => ({
+      role, members: [member], condition: observed === 'broad' ? undefined :
+        observed === 'altered' ? { ...condition, expression: 'true' } : condition,
+    }));
+    if (observed === 'additional') bindings.push({ role: bindings[1]!.role, members: bindings[1]!.members, condition: undefined });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.endsWith('/projects/' + project.name)) return Response.json({ name: 'projects/12345', projectId: project.name, state: 'ACTIVE' });
+      if (url.includes('/services/storage.googleapis.com')) return Response.json({ name: 'projects/12345/services/storage.googleapis.com', parent: 'projects/12345', config: { name: 'storage.googleapis.com' }, state: 'ENABLED' });
+      if (url.endsWith(':getIamPolicy')) return Response.json({ version: 3, bindings: [
+        { role: 'roles/storage.admin', members: ['serviceAccount:' + DEPLOY_SERVICE_ACCOUNT_EMAIL] },
+        ...bindings,
+      ] });
+      if (url.includes('/serviceAccounts/')) return Response.json({
+        name: 'projects/' + project.name + '/serviceAccounts/' + RUNTIME_SERVICE_ACCOUNT_EMAIL,
+        projectId: project.name, email: RUNTIME_SERVICE_ACCOUNT_EMAIL, uniqueId: observed === 'recreated' ? '20001' : '10001',
+      });
+      throw new Error('Unexpected Google request');
+    }));
+    const result = await runCloudPrepare({ project, provider: 'cloudrun', gcsAccess: 'lifecycle',
+      adminAccessToken: 'test-token', confirm: true });
+    if (observed === 'exact') {
+      expect(result.success, String(result.error)).toBe(true);
+      expect(getCloudPreparation(new ProjectRepository().findById(project.id)!, 'cloudrun')?.runtimeRequiredRoles).toContain('roles/storage.objectUser');
+    } else {
+      expect(result).toMatchObject({ success: false, error: expect.stringMatching(/restriction/i) });
+      expect(getCloudPreparation(new ProjectRepository().findById(project.id)!, 'cloudrun')).toBeNull();
+    }
   });
 
   it('preserves the environment, native project, and region when retrying authorization', async () => {

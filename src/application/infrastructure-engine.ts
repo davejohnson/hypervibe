@@ -11,13 +11,14 @@ import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.j
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
 import { cloudEngineFor, cloudEngineForPlan } from './cloud-engines.js';
+import { runtimeSecretGrantReviewer, runtimeSecretGrantChanges, type RuntimeSecretGrant, type ReviewedRuntimeSecretGrant } from '../adapters/providers/gcp/gcp-runtime-secret-grants.js';
 import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import {
   cloudRunGet, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type JobRunResult, type PendingJobRun, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { createStorageHmacKey, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
-import { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
+import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan } from './engine-shared.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
@@ -166,6 +167,8 @@ export interface EngineBinding {
   pendingImportedSecrets?: string[];
   /** Container identities tracked in the environment engine state. */
   secrets?: string[];
+  /** Local ownership evidence for the native generation of each confirmed per-secret IAM member. */
+  runtimeSecretGrantOrigins?: Record<string, Pick<ReviewedRuntimeSecretGrant, 'name' | 'createTime'>>;
   /** Non-secret credential metadata bound to an acknowledged exact Secret Manager version. */
   secretMetadata?: Record<string, { gcpProjectId: string; version: string; labels: Record<string, string> }>;
   /** Keyless CI release trust granted for this exact repository. */
@@ -223,6 +226,21 @@ export function gcpUnboundStateConflict(environment: Environment | null, selecte
     return `Cannot check the existing OpenTofu state for ${environment.name}. Restore access to its private state before selecting a Google Cloud project.`;
   }
   return `Environment ${environment.name} has existing OpenTofu state with no recorded Google Cloud project. Recover its original project binding or choose a fresh migration target.`;
+}
+
+/**
+ * Names of queues, services and buckets that OpenTofu would delete from an environment's state although no
+ * declared resource maps them. Only a resource's own address names it; companions (IAM members, schedules)
+ * are covered once their owner is retired. Underscores come back as hyphens, which maps to the same address.
+ */
+export function strayStateResources(unmanagedDeletes: string[]): { queues: string[]; services: string[]; storage: string[] } {
+  const names = (pattern: RegExp) => [...new Set(unmanagedDeletes.map((address) => pattern.exec(address)?.[1]).filter((key): key is string => Boolean(key)))]
+    .map((key) => key.replace(/_/g, '-'));
+  return {
+    queues: names(/^google_pubsub_(?:topic|subscription|topic_iam_member|subscription_iam_member)\.queue_([a-z0-9_]+?)(?:_publisher|_subscriber)?$/),
+    services: names(/^google_cloud_run_v2_(?:service|worker_pool|job)\.([a-z0-9_]+)$/),
+    storage: names(/^google_storage_bucket\.storage_([a-z0-9_]+)$/),
+  };
 }
 
 export async function resolveEngineContext(
@@ -323,6 +341,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(service.cpu ? { cpu: service.cpu } : {}),
         ...(service.memory ? { memory: service.memory } : {}),
         ...(workload === 'web' && service.alwaysOn ? { alwaysOn: true } : {}),
+        ...(service.workerPaused ? { minInstances: 0 } : {}),
         ...(workload === 'worker' && service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery } : {}),
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
@@ -333,6 +352,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   return {
     projectId: context.gcpProjectId,
     region: context.region,
+    ...(environmentSpec.hosting.gcpRuntimeSecretGrants ? { gcpRuntimeSecretGrants: environmentSpec.hosting.gcpRuntimeSecretGrants } : {}),
     services,
     ...(command && primary ? { releaseJob: {
       ...primary, logicalName: 'release', resourceName: context.resourceNameFor('release-command'), workload: 'worker' as const,
@@ -1017,6 +1037,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     importedSecrets,
     secretVersions,
   });
+  if (input.gcpRuntimeSecretGrants && input.services.some(service => Object.keys(service.secretEnv ?? {}).some(isBuildTokenKey))) {
+    return { blocked: ['A workload references a build-only package token. Its runtime identity cannot receive a grant on that token.'] };
+  }
   const configure = (adopt?: { databaseInstance?: string; buckets?: string[] }) => buildCloudRunConfiguration({
     adopt: { ...adopt, secrets: adoptSecrets },
     secrets: containers, retiredSecrets,
@@ -1053,9 +1076,13 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
   let planId = crypto.randomUUID();
+  let grantChanges: RuntimeSecretGrant[] = [];
   const planEnvironment = (adopt?: { databaseInstance?: string; buckets?: string[] }) => planWithCloudRunRevisionMinimums(input.services,
     verifyPlannedChanges => engine.plan({ backend: gcpEngineBackend, configuration: configure(adopt), auth: context.auth,
-      state: context.state, planId, verifyPlannedChanges }));
+      state: context.state, planId, verifyPlannedChanges: shown => {
+        grantChanges = runtimeSecretGrantChanges(shown, context.gcpProjectId, context.runtimeServiceAccountEmail);
+        return verifyPlannedChanges(shown);
+      } }));
   let planned = await planEnvironment();
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   // A create for something that already exists means engine state lost track of it (for example,
@@ -1068,19 +1095,35 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     planned = await planEnvironment(leftovers);
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
-  // Queues recorded only in engine state (for example, created before Hypervibe recorded queue
-  // bindings) are Hypervibe's own: retire them by their state address, then plan again.
-  const strayQueues = [...new Set(planned.unmanagedDeletes
-    .map((address) => /^google_pubsub_(?:topic|subscription|topic_iam_member|subscription_iam_member)\.queue_([a-z0-9_]+?)(?:_publisher|_subscriber)?$/.exec(address)?.[1])
-    .filter((key): key is string => Boolean(key)))].map((key) => key.replace(/_/g, '-'));
-  if (strayQueues.length && planned.unmanagedDeletes.every((address) => address.startsWith('google_pubsub_'))
-    && strayQueues.every((name) => !environmentSpec!.queues?.[name])) {
+  // Queues, services and buckets recorded only in engine state are Hypervibe's own: the state belongs to this
+  // environment alone. They get there when queue bindings were not yet recorded, or when an apply was cut off
+  // after the engine created them and before Hypervibe wrote them down. Retire them by state address, then plan again.
+  const stray = strayStateResources(planned.unmanagedDeletes);
+  const strayQueues = stray.queues.filter((name) => !environmentSpec!.queues?.[name]);
+  const strayServices = stray.services.filter((name) => !environmentSpec!.services[name] && !boundServices.includes(name));
+  const strayStorage = stray.storage.filter((name) => !environmentSpec!.storage?.[name]);
+  if (strayQueues.length || strayServices.length || strayStorage.length) {
     engineBinding.queues = [...new Set([...(engineBinding.queues ?? []), ...strayQueues])];
+    engineBinding.storage = [...new Set([...(engineBinding.storage ?? []), ...strayStorage])];
+    boundServices.push(...strayServices);
     planId = crypto.randomUUID();
     planned = await planEnvironment(leftovers);
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
   if (planned.blockers.length) return { blocked: planned.blockers };
+  const grantActions = planned.actions.filter(action => action.id.startsWith('secret-runtime-access:') && action.type !== 'noop');
+  if (grantActions.length !== grantChanges.length || !grantActions.every(action =>
+    grantChanges.some(grant => action.id === `secret-runtime-access:${grant.secretId}`))) {
+    return { blocked: ['The engine changes could not be matched to the reviewed secret grants.'] };
+  }
+  const runtimeGrants: Record<string, ReviewedRuntimeSecretGrant> = {};
+  const reviewGrant = runtimeSecretGrantReviewer(token, context.gcpProjectId, context.environment.id);
+  for (const grant of grantChanges) {
+    const checked = await reviewGrant(grant);
+    if ('blocked' in checked) return { blocked: [checked.blocked] };
+    if (grant.before && !sameGrantOrigin(engineBinding, checked)) return { blocked: [originalSecretRequired(grant.secretId)] };
+    runtimeGrants[`secret-runtime-access:${grant.secretId}`] = checked;
+  }
 
   // Releases push to the repository in this environment's region; project setup made only one.
   const repository = await observeImageRepository(token, context.gcpProjectId, context.region);
@@ -1099,6 +1142,11 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
 
   const domainBefore = [...new Map([...domainPlans.values()].flatMap(plan => plan.before).map(action => [action.id, action])).values()];
   const serviceActions = planned.actions.map(action => {
+    const grant = runtimeGrants[action.id];
+    if (grant) {
+      const changes = [grant.before && `remove Secret Accessor from ${grant.before}`, grant.after && `grant Secret Accessor to ${grant.after}`].filter(Boolean);
+      return { ...action, reason: `On ${grant.name}, ${changes.join(' and ')}.` };
+    }
     if (!action.id.startsWith('domain:') || !['create', 'update', 'replace'].includes(action.type)) return action;
     const extra = domainPlans.get(action.resource.name)?.before.filter(before => before.type !== 'noop').map(before => before.id) ?? [];
     return extra.length ? { ...action, dependsOn: [...(action.dependsOn ?? []), ...extra] } : action;
@@ -1171,6 +1219,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   }] : [];
   // The complete engine segment creates containers before operational value writes.
   const actions = [...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
+  describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
   const warnings = [
     gcpInfrastructureNotes.release,
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
@@ -1187,6 +1236,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
     engine: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
+      ...(Object.keys(runtimeGrants).length ? { runtimeGrants } : {}),
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
       ...(imageRepository ? { imageRepository } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
@@ -1296,6 +1346,7 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
+    runtimeGrants?: Record<string, ReviewedRuntimeSecretGrant>;
     imageRepository?: { planId: string; state: EngineStateIdentity };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
@@ -1425,6 +1476,19 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
           if (!absence.ready) return stop(absence.reason);
         }
       }
+      const grantMembers = members.filter(entry => entry.id.startsWith('secret-runtime-access:'));
+      const reviewGrant = runtimeSecretGrantReviewer(token, context.gcpProjectId, context.environment.id);
+      const binding = (ctx.repos.environments.findById(context.environment.id)?.platformBindings.engine as EngineBinding | undefined) ?? {};
+      for (const member of grantMembers) {
+        const grant = reviewed.runtimeGrants?.[member.id];
+        if (!grant || grant.secretId !== member.resource.name || member.id !== `secret-runtime-access:${grant.secretId}` || (grant.after && grant.after !== `serviceAccount:${context.runtimeServiceAccountEmail}`)) {
+          return stop('The runtime identity differs from the reviewed secret access plan. Run hv_plan again.');
+        }
+        if (grant.before && !sameGrantOrigin(binding, grant)) return stop(originalSecretRequired(grant.secretId));
+        const checked = await reviewGrant(grant);
+        if ('blocked' in checked) return stop(checked.blocked);
+        if (checked.name !== grant.name || checked.createTime !== grant.createTime) return stop('The secret was replaced after access was reviewed. Run hv_plan again.');
+      }
       for (const member of members.filter((entry) => entry.id.startsWith('secret-container:'))) {
         const observed = await observeSecret(token, context.gcpProjectId, member.resource.name);
         const changed = observed.state === 'unknown'
@@ -1469,11 +1533,19 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         backend: gcpEngineBackend, auth: context.auth, state: context.state, planId: reviewed.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses,
       });
-      await recordServiceBindings(ctx, context, environmentName, members, outcome.outcomes, token, reviewed.database?.instanceName);
+      await recordServiceBindings(ctx, context, environmentName, members, outcome.outcomes, token, reviewed.database?.instanceName, reviewed.runtimeGrants);
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
   return { kind: 'executed', envName: environmentName, result };
+}
+
+function sameGrantOrigin(binding: EngineBinding, grant: ReviewedRuntimeSecretGrant): boolean {
+  const saved = binding.runtimeSecretGrantOrigins?.[grant.secretId];
+  return saved?.name === grant.name && saved?.createTime === grant.createTime;
+}
+function originalSecretRequired(id: string): string {
+  return `The local record does not identify the original secret for the existing grant on ${id}. Its access must be preserved.`;
 }
 
 async function recordServiceBindings(
@@ -1483,7 +1555,8 @@ async function recordServiceBindings(
   members: PlanAction[],
   outcomes: Record<string, string>,
   token: string,
-  databaseInstanceName?: string
+  databaseInstanceName?: string,
+  runtimeGrants?: Record<string, ReviewedRuntimeSecretGrant>
 ): Promise<void> {
   const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const services = { ...((current.platformBindings as { services?: Record<string, Record<string, unknown>> }).services ?? {}) };
@@ -1491,6 +1564,14 @@ async function recordServiceBindings(
   for (const member of members) {
     const addresses = engineSegmentOf(member)?.addresses ?? [];
     if (!addresses.every((address) => outcomes[address] === 'succeeded')) continue;
+    if (member.id.startsWith('secret-runtime-access:')) {
+      const grant = runtimeGrants![member.id]!;
+      const origins = { ...engine.runtimeSecretGrantOrigins };
+      if (member.type === 'destroy') delete origins[grant.secretId];
+      else origins[grant.secretId] = { name: grant.name, createTime: grant.createTime };
+      engine.runtimeSecretGrantOrigins = origins;
+      continue;
+    }
     if (member.id.startsWith('secret-container:')) {
       const remaining = (engine.secrets ?? []).filter((id) => id !== member.resource.name);
       const secretMetadata = { ...engine.secretMetadata };
@@ -1547,11 +1628,13 @@ async function recordServiceBindings(
     }
     // A change to only a workload's companions (for example a worker's waker) keeps its binding.
     if (!addresses.some((address) => address.startsWith('google_cloud_run_v2_service.'))) continue;
-    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource);
-    services[name] = {
-      serviceId: resource,
-      ...(observed.state === 'present' && typeof observed.value.uri === 'string' ? { url: observed.value.uri } : {}),
-    };
+    // A failed read of the address must not stop the record of what the engine created (live 2026-11-20: the network
+    // dropped here, nothing was recorded, and later plans refused to remove what the apply had created).
+    const previous = services[name];
+    const observed = await cloudRunGet(token, context.gcpProjectId, context.region, resource).catch(() => undefined);
+    const url = observed?.state === 'present' && typeof observed.value.uri === 'string' ? observed.value.uri
+      : previous?.serviceId === resource && typeof previous.url === 'string' ? previous.url : undefined;
+    services[name] = { serviceId: resource, ...(url ? { url } : {}) };
   }
   ctx.repos.environments.updatePlatformBindings(current.id, {
     engine: JSON.parse(JSON.stringify(engine)) as EngineBinding,
@@ -1824,7 +1907,7 @@ async function releaseOne(
 
 export interface EngineWorkerStatus {
   service: string;
-  mode: 'on-demand' | 'always-on';
+  mode: 'on-demand' | 'always-on' | 'pause-requested';
   instances?: number;
   waker?: { lastRunAt?: string; state?: string; pendingWork?: number; readError?: WakerReadFailure };
 }
@@ -1846,10 +1929,13 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
   for (const [name, service] of Object.entries(environmentSpec.services)) {
     if (service.workloadKind !== 'worker') continue;
     const resource = bound[name]?.workerPoolName;
-    const status: EngineWorkerStatus = { service: name, mode: service.onDemand ? 'on-demand' : 'always-on' };
+    const status: EngineWorkerStatus = { service: name, mode: service.workerPaused ? 'pause-requested' : service.onDemand ? 'on-demand' : 'always-on' };
     if (resource) {
       const pool = await cloudRunGet(token, context.gcpProjectId, context.region, resource, 'workerPools');
-      if (pool.state === 'present') status.instances = Number(pool.value.scaling?.manualInstanceCount ?? 0);
+      if (pool.state === 'present') {
+        const scaling = pool.value.scaling;
+        if (Number.isSafeInteger(scaling?.manualInstanceCount) && scaling.manualInstanceCount >= 0) status.instances = scaling.manualInstanceCount;
+      }
       if (service.onDemand) {
         const response = await latestWakerExecution(token, context, resource);
         const latest = response.ok ? ((await response.json()) as { executions?: Array<{ state?: string; startTime?: string; result?: string }> }).executions?.[0] : undefined;

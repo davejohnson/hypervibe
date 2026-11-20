@@ -17,12 +17,19 @@ export interface PlanReportAction {
   addresses: string[];
 }
 
+export type ReportCloudTarget =
+  | { provider: 'gcp'; projectId: string }
+  | { provider: 'aws'; accountId: string; region?: string; partition?: string }
+  | { provider: 'azure'; subscriptionId: string; resourceGroup?: string; tenantId?: string };
+
 export interface PlanReport {
   planId: string;
   project: string;
   environment?: string;
   scope: string;
+  setupPurpose?: 'railway-transfer' | 'railway-transfer-isolation';
   target?: string;
+  cloudTarget?: ReportCloudTarget;
   billingAccount?: string;
   createdAt?: string;
   /** The complete setup preview receives one approval, independently of action IDs. */
@@ -43,6 +50,17 @@ function display(value: string): string {
   return redactSensitiveString(value)
     .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [redacted]')
     .replace(/(https?:\/\/[^\s?#]+)\?[^\s]*/gi, '$1?[redacted]');
+}
+
+// Keep only identifiers used for display and navigation. Native connection objects may carry credentials.
+function displayCloudTarget(target: ReportCloudTarget): ReportCloudTarget {
+  switch (target.provider) {
+    case 'gcp': return { provider: 'gcp', projectId: display(target.projectId) };
+    case 'aws': return { provider: 'aws', accountId: display(target.accountId),
+      ...(target.region && { region: display(target.region) }), ...(target.partition && { partition: display(target.partition) }) };
+    case 'azure': return { provider: 'azure', subscriptionId: display(target.subscriptionId),
+      ...(target.resourceGroup && { resourceGroup: display(target.resourceGroup) }), ...(target.tenantId && { tenantId: display(target.tenantId) }) };
+  }
 }
 
 function strings(value: unknown, format = display): string[] {
@@ -108,9 +126,12 @@ export function makePlanReport(input: Omit<PlanReport, 'actions' | 'blocked' | '
     planId: input.planId, project: display(input.project), scope: display(input.scope),
     ...(input.environment ? { environment: display(input.environment) } : {}),
     ...(input.target ? { target: display(input.target) } : {}),
+    ...(input.cloudTarget ? { cloudTarget: displayCloudTarget(input.cloudTarget) } : {}),
     ...(input.billingAccount ? { billingAccount: display(input.billingAccount) } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.approval ? { approval: input.approval } : {}),
+    ...((input.setupPurpose === 'railway-transfer' || input.setupPurpose === 'railway-transfer-isolation')
+      ? { setupPurpose: input.setupPurpose } : {}),
     actions, blocked: [...blocked], warnings,
   };
 }

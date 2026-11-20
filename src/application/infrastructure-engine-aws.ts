@@ -3,7 +3,7 @@ import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindin
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
-import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
+import { describeFixedWorkerCountChanges, specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
@@ -260,6 +260,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
       env: envFor(logicalName), ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
     })),
     workers: withImage.filter(([, service]) => service.workloadKind === 'worker').map(([logicalName, service]) => ({
+      ...(service.workerPaused ? { paused: true } : {}),
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: envFor(logicalName),
       ...(service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
       ...(service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery, ...(service.onDemand.nextWorkAtQuery ? { nextWorkAtQuery: service.onDemand.nextWorkAtQuery } : {}) } : {}),
@@ -569,6 +570,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const prerequisites = [...secretActions, ...buildPlanned.actions, ...imageActions, ...appLoginActions].filter((action) => action.type !== 'noop').map((action) => action.id);
   const engineActions = planned.actions.map((action) => (action.type === 'create' || action.type === 'update' || action.type === 'replace') && prerequisites.length
     ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...prerequisites])] } : action);
+  describeFixedWorkerCountChanges(engineActions, environmentSpec, 'aws_ecs_service.desired_count');
   // What the environment's own plan creates is filled in after it: the query credential and each waker's secret.
   const queryCredential = Boolean(environmentSpec.database) && (appLogin || !binding.database?.querySecretArn || engineActions.some(action => action.id === 'database-query:credential' && action.type !== 'noop'));
   const missingWakers = wakerSecrets.filter((secret) => !(binding.wakerLogins ?? []).includes(secret));

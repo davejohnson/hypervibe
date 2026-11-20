@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
 import * as domainPlanning from '../infrastructure-engine-domain.js';
-import { gcpSecretStore, planInfrastructureEngine } from '../infrastructure-engine.js';
+import { gcpSecretStore, planInfrastructureEngine, strayStateResources } from '../infrastructure-engine.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
@@ -68,6 +68,53 @@ function fixture() {
   vi.stubGlobal('fetch', fetch);
   return { ctx, project, environment, spec, configurations, enginePlan, fetch, setState: (value: typeof state) => { state = value; } };
 }
+
+describe('resources left only in engine state by an apply that was cut off', () => {
+  // Live 2026-11-20: the network dropped mid-apply; the engine had created the workloads and a bucket, Hypervibe had
+  // recorded none of them, and every later plan stopped at "which this plan does not manage".
+  const left = ['google_cloud_run_v2_worker_pool.worker', 'google_cloud_run_v2_worker_pool_iam_member.worker_waker', 'google_storage_bucket.storage_files', 'google_storage_bucket_iam_member.storage_files_runtime'];
+  const cutOff = (f: ReturnType<typeof fixture>, extra: string[] = []) => f.enginePlan.mockImplementation(async ({ configuration }) => {
+    f.configurations.push(configuration);
+    const segment = { id: 'engine-segment', engine: 'opentofu' as const, planDigest: 'a'.repeat(64), configurationDigest: 'b'.repeat(64), engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } };
+    const unmanaged = [...left, ...extra].filter((address) => !configuration.resources[address]);
+    const managed = [...new Map(left.filter((address) => configuration.resources[address]).map((address) => [configuration.resources[address]!.actionId, configuration.resources[address]!])).values()];
+    return { ok: true, segmentId: segment.id, segment, planFile: '/not-executed', unmanagedDeletes: unmanaged,
+      blockers: unmanaged.map((address) => `OpenTofu proposed delete for ${address}, which this plan does not manage.`),
+      actions: managed.map((resource) => ({ id: resource.actionId, type: 'destroy' as const, resource: { kind: resource.kind, name: resource.name, provider: 'gcp' }, verified: true, reason: 'engine preview', metadata: { engineSegment: { ...segment, addresses: [] } } })) };
+  });
+  const params = (f: ReturnType<typeof fixture>) => ({ project: f.project, specRevision: 1, environmentName: 'staging',
+    spec: projectSpecSchema.parse({ version: 1, project: f.project.name, environments: { staging: { hosting: { provider: 'cloudrun' }, services: { web: {} } } } }) });
+
+  it('plans to remove a workload and a bucket the spec no longer has, although Hypervibe never recorded them', async () => {
+    const f = fixture(); cutOff(f);
+    const planned = await planInfrastructureEngine(f.ctx, params(f));
+    if ('blocked' in planned) throw new Error(planned.blocked.join('; '));
+    expect(planned.actions.filter((action) => action.type === 'destroy').map((action) => action.id).sort()).toEqual(['service:worker', 'storage:files']);
+    expect(f.enginePlan).toHaveBeenCalledTimes(2);
+  });
+
+  it('leaves a workload the spec still has to the ordinary plan', async () => {
+    const f = fixture(); cutOff(f);
+    const kept = params(f);
+    kept.spec.environments.staging!.services.worker = { workloadKind: 'worker', startCommand: 'node worker.js' } as never;
+    const planned = await planInfrastructureEngine(f.ctx, kept);
+    if ('blocked' in planned) throw new Error(planned.blocked.join('; '));
+    // Declared by the spec, so it is managed and was never an unmanaged delete; only the bucket is retired.
+    expect(f.configurations.at(-1)!.resources['google_storage_bucket.storage_files']).toMatchObject({ actionId: 'storage:files', dataBearing: true });
+    expect(f.configurations.at(-1)!.resources['google_cloud_run_v2_worker_pool.worker']).toMatchObject({ actionId: 'service:worker' });
+  });
+
+  it('still blocks when the state holds something that is not a workload, bucket or queue', async () => {
+    const f = fixture(); cutOff(f, ['google_compute_network.other']);
+    expect(await planInfrastructureEngine(f.ctx, params(f))).toMatchObject({ blocked: [expect.stringContaining('google_compute_network.other')] });
+  });
+
+  it('names only workloads, buckets and queues by their own address, never their companions or the database', () => {
+    expect(strayStateResources(['google_cloud_run_v2_service.web', 'google_cloud_run_v2_job.nightly_report', 'google_cloud_run_v2_service_iam_member.web_public',
+      'google_storage_bucket.storage_user_files', 'google_pubsub_topic.queue_jobs', 'google_sql_database_instance.db']))
+      .toEqual({ queues: ['jobs'], services: ['web', 'nightly-report'], storage: ['user-files'] });
+  });
+});
 
 describe('outside keys under the engine container boundary', () => {
   it('plans containers before collecting values, then wires only the exact saved version', async () => {

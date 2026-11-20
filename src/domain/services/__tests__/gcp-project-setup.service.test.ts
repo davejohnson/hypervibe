@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { composeGcpProjectConfiguration, runGcpProjectSetup, type GcpProjectSetupParams } from '../gcp-project-setup.service.js';
 import { buildGcpBootstrapConfiguration, buildGcpPreparationConfiguration } from '../../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { transferSlot } from '../../../adapters/providers/gcp/tofu/transfer-slot.js';
 import { buildCiReleaseConfiguration } from '../../../adapters/providers/gcp/tofu/gcp-ci.backend.js';
 import type { EngineConfiguration } from '../../ports/infrastructure-engine.port.js';
 import type { EnginePlanResult } from '../../../adapters/engine/opentofu/engine.js';
@@ -97,6 +99,124 @@ describe('one saved project setup plan', () => {
     expect(managed.apply).toHaveBeenCalledWith(expect.objectContaining({ planId: preview.planId, approvedAddresses: ['google_project_iam_member.storage'] }));
     expect((await runGcpProjectSetup({ ...params, confirm: true }, { engine: managed })).success).toBe(false);
     expect(managed.apply).toHaveBeenCalledTimes(1);
+  });
+  it.each(['original resources', 'recreated account', 'recreated secret'] as const)(
+    'confirms only the reviewed three creates for an empty transfer slot with %s', async observation => {
+    const target = { projectId: 'example-project', sourceEnvironmentId: 'rail-staging', targetEnvironmentId: 'gcp-staging',
+      sourceRailwayProjectId: 'rail-project-key', sourceRailwayEnvironmentId: 'rail-env-key', targetRegion: 'us-central1' };
+    const slot = transferSlot(target);
+    const evidence = { projectNumber: '123456789012', account: null, secret: null, directAccessor: false };
+    const params: GcpProjectSetupParams = { ...parameters(slot.id), auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: 'test-setup-token' }, redact: ['test-setup-token'] },
+      contribution: { id: slot.id, configuration: slot.configuration }, transferSlotReview: { target, evidence } };
+    const { account, secret, grant } = slot.addresses;
+    const after: Record<string, object> = {
+      [account]: { project: target.projectId, account_id: slot.accountId, display_name: 'Hypervibe copy job', description: slot.description,
+        disabled: false, create_ignore_already_exists: false },
+      [secret]: { project: target.projectId, secret_id: slot.secretId, labels: slot.labels, deletion_protection: true, replication: [{ auto: [{}] }] },
+      [grant]: { project: target.projectId, secret_id: slot.secretId, member: slot.member, role: 'roles/secretmanager.secretAccessor', condition: [] },
+    };
+    const rows = Object.entries(after).map(([address, values]) => ({
+      address, type: address.split('.')[0], mode: 'managed', provider_name: 'registry.opentofu.org/hashicorp/google',
+      change: { actions: ['create'], before: null, after: values },
+    }));
+    const managed = engine();
+    const planActions = managed.plan.getMockImplementation()!;
+    managed.plan.mockImplementation(async (input: Parameters<typeof planActions>[0] & { verifyPlannedChanges?: (raw: unknown) => boolean }) => {
+      expect(input.verifyPlannedChanges?.({ resource_changes: rows })).toBe(true);
+      return planActions(input);
+    });
+
+    const existing = { name: 'projects/' + target.projectId + '/serviceAccounts/' + slot.accountEmail, email: slot.accountEmail,
+      uniqueId: '123456789012345678901', description: slot.description };
+    const unowned = await runGcpProjectSetup({ ...params, transferSlotReview: { target, evidence: { ...evidence, account: existing } } }, { engine: managed });
+    expect(unowned).toMatchObject({ success: false, error: expect.stringMatching(/cannot adopt/) });
+    expect(managed.plan).not.toHaveBeenCalled();
+
+    const preview = await runGcpProjectSetup(params, { engine: managed });
+    expect(preview, preview.error).toMatchObject({ success: true, mode: 'preview', planId: expect.any(String), htmlPath: expect.any(String) });
+    expect(preview.actions?.map(action => action.type)).toEqual(['create', 'create', 'create']);
+    const html = fs.readFileSync(preview.htmlPath!, 'utf8');
+    const titles = [...html.matchAll(/<span class="action-name">([^<]+)<\/span>/g)].map(match => match[1]);
+    expect(titles.sort()).toEqual(['Copy-job service account · ' + slot.accountEmail, 'Empty migration secret container · ' + slot.secretId,
+      'Allow the copy-job account to read ' + slot.secretId].sort());
+    expect(html).not.toContain('Warnings (');
+    expect(html).toContain('What happens next</h3>');
+    expect(html).toContain('the connection details the copy job will use to read your Railway database or documents');
+    expect(html).toContain('Hypervibe verifies that the copy job has permission to read it and your app does not');
+    expect(html).toContain('Data moves only after you approve a separate copy plan.');
+
+    const createTime = '2026-10-18T00:05:00Z';
+    const savedRows = rows.map(row => ({ ...row, values: { ...row.change.after,
+      ...(row.address === account && { email: slot.accountEmail, unique_id: existing.uniqueId }),
+      ...(row.address === secret && { create_time: createTime }) } }));
+    const dependencies = { engine: { ...managed, inspectState: async <T>(input: { project: (raw: unknown) => T }) =>
+      ({ ok: true as const, present: true as const, value: input.project({ values: { root_module: { resources: savedRows } } }) }) } };
+    const observeTransferAfterApply = vi.fn(async () => ({
+      projectNumber: evidence.projectNumber, directAccessor: true,
+      account: { ...existing, uniqueId: observation === 'recreated account' ? '123456789012345678902' : existing.uniqueId },
+      secret: { name: 'projects/' + evidence.projectNumber + '/secrets/' + slot.secretId, labels: slot.labels,
+        createTime: observation === 'recreated secret' ? '2026-10-19T00:05:00Z' : createTime },
+    }));
+    const confirmation = { ...params, confirm: true, gcpSetupPlanId: preview.planId, observeTransferAfterApply };
+    for (const gcpSetupPlanId of [undefined, 'setup-deadbeef-0123-4456-8abc-987654321000']) {
+      const result = await runGcpProjectSetup({ ...confirmation, gcpSetupPlanId }, { engine: managed });
+      expect(result).toMatchObject({ success: false, error: expect.stringMatching(/exact saved plan ID/) });
+    }
+    const changed = await runGcpProjectSetup({ ...confirmation, transferSlotReview: { target, evidence: { ...evidence, projectNumber: '234567890123' } } }, { engine: managed });
+    expect(changed).toMatchObject({ success: false, error: expect.stringMatching(/Preview this exact/) });
+    expect(managed.apply).not.toHaveBeenCalled();
+
+    const cannotVerify = await runGcpProjectSetup({ ...confirmation, observeTransferAfterApply: undefined }, dependencies);
+    expect(cannotVerify).toMatchObject({ success: false, error: expect.stringMatching(/requires fresh Google metadata/) });
+    expect(managed.apply).not.toHaveBeenCalled();
+    const confirmed = await runGcpProjectSetup(confirmation, dependencies);
+    if (observation === 'original resources') {
+      expect(confirmed, confirmed.error).toMatchObject({ success: true, planId: preview.planId, htmlPath: preview.htmlPath });
+    } else {
+      expect(confirmed).toMatchObject({ success: false, error: expect.stringMatching(/private engine state/) });
+      const plans = path.dirname(preview.htmlPath!);
+      expect(fs.readdirSync(plans).some(file => /^setup-[0-9a-f]{64}\.json$/.test(file))).toBe(true);
+    }
+    expect(observeTransferAfterApply).toHaveBeenCalledOnce();
+    expect(managed.apply.mock.invocationCallOrder[0]).toBeLessThan(observeTransferAfterApply.mock.invocationCallOrder[0]);
+    expect(managed.apply).toHaveBeenCalledTimes(1);
+    expect(managed.apply).toHaveBeenCalledWith(expect.objectContaining({ planId: preview.planId,
+      approvedAddresses: expect.arrayContaining([account, secret, grant]) }));
+    expect(managed.apply.mock.calls[0][0].approvedAddresses).toHaveLength(3);
+    expect(managed.plan).toHaveBeenCalledTimes(1);
+    if (observation === 'original resources') {
+      const unchanged = savedRows.map(row => ({ ...row, change: { actions: ['no-op'], before: row.values, after: row.values } }));
+      managed.plan.mockImplementation(async (input: Parameters<typeof planActions>[0] & { verifyPlannedChanges?: (raw: unknown) => boolean }) => {
+        if (input.verifyPlannedChanges) expect(input.verifyPlannedChanges({ resource_changes: unchanged })).toBe(true);
+        const result = await planActions(input);
+        return { ...result, actions: result.actions.map(action =>
+          action.id.startsWith('transfer-slot:') ? { ...action, type: 'noop' as const } : action) };
+      });
+      const repeat = await runGcpProjectSetup({ ...params, transferSlotReview: { target, evidence: await observeTransferAfterApply() } }, dependencies);
+      expect(repeat.success, repeat.error).toBe(true);
+      expect(fs.readFileSync(repeat.htmlPath!, 'utf8')).toContain('the connection details the copy job will use to read your Railway database or documents');
+      const otherSetup = await runGcpProjectSetup(parameters('storage'), dependencies);
+      expect(otherSetup.success, otherSetup.error).toBe(true);
+      expect(fs.readFileSync(otherSetup.htmlPath!, 'utf8')).not.toContain('the connection details the copy job will use to read your Railway database or documents');
+    }
+  });
+  it('explains an archived transfer plan while keeping a separate access warning visible', () => {
+    const params = parameters('access');
+    const paths = engineStatePaths({ provider: 'gcp', projectId: params.projectId, environmentId: params.gcpProjectId, partition: 'project-shared' }, directory);
+    ensureEngineStateDirectories(paths);
+    const legacy = 'Hypervibe will leave this secret empty. Before adding credentials, verify that the app cannot read them through a project-wide or inherited grant. The data copy is a separate step.';
+    const risk = 'The app has an unexpected permission.';
+    const planId = 'setup-76543210-1234-4123-8123-456789012345';
+    const report = { planId, scope: 'Google Cloud project setup', target: params.gcpProjectId, project: params.projectId,
+      blocked: [], warnings: [legacy, risk], actions: [{ id: 'transfer-slot:secret:1234', name: 'Empty migration secret container',
+        type: 'create', provider: 'gcp', kind: 'secret', fields: [], addresses: [], dependsOn: [], verified: true }] };
+    const checksum = createHash('sha256').update(JSON.stringify([params.projectId, report])).digest('hex');
+    fs.writeFileSync(path.join(paths.plans, planId + '.report.json'), JSON.stringify({ report, checksum, projectId: params.projectId }));
+    const reopened = findSavedSetupReport(params.projectId, params.gcpProjectId, planId, undefined, directory);
+    const html = fs.readFileSync(reopened!.htmlPath, 'utf8');
+    expect(html).toContain('Warnings (1)</h3><ul><li>' + risk + '</li>');
+    expect(html).not.toContain(legacy);
+    expect(html).toContain('the connection details the copy job will use to read your Railway database or documents');
   });
   it('rejects confirmation with changed scope before planning or applying', async () => {
     const managed = engine();

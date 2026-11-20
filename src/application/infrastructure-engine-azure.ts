@@ -27,8 +27,8 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
-  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, deleteFailedAppEnvironment, emptyContainer, ensureEnvironmentDatabase, observeFailedAppEnvironment, entraSqlRunner, purgeVaultSecrets, taggedResources, withAzureSetupAccess,
-  type AzureKeyVaultSecretStore, type SqlRunner,
+  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, deleteFailedAppEnvironment, emptyContainer, environmentDatabaseDrop, environmentDatabaseSetup, observeFailedAppEnvironment, purgeVaultSecrets, runAzureSetupSql, taggedResources,
+  type AzureKeyVaultSecretStore,
 } from '../adapters/providers/azure/azure-ops.client.js';
 import { azureCiSetupReady, azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
 import type { CommandContext } from './context.js';
@@ -468,8 +468,9 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const needsWaker = Object.values(environmentSpec.services).some((service) => service.onDemand);
   const loginActions: PlanAction[] = environmentSpec.database && (!binding.databaseLoginAt || (needsWaker && !binding.wakerLoginAt)) ? [{
     id: 'database-login:postgres', type: 'create', verified: true, resource: { kind: 'secret', name: ENGINE_DATABASE_URL_KEY, provider: 'azure' },
-    reason: `Hypervibe will create ${environmentName}'s database and login on ${context.shared.serverName}${needsWaker ? ', and a read-only login for the worker\'s scale rule' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Key Vault. The server is closed to the internet; for this step it accepts this computer's address only, then closes again.`,
-    ...(sharedChanging.includes('shared:database') ? { dependsOn: ['shared:database'] } : {}),
+    reason: `Hypervibe will create ${environmentName}'s database and login on ${context.shared.serverName}${needsWaker ? ', and a read-only login for the worker\'s scale rule' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Key Vault. The server stays closed to the internet: the step runs as a short job inside the project's private network.`,
+    // The setup job runs in the shared app environment, so it waits for that and its network as well as the server.
+    dependsOn: sharedChanging.filter((id) => ['shared:database', 'shared:apps', 'shared:network'].includes(id)),
     metadata: { operation: AZURE_DATABASE_LOGIN_OPERATION, subscriptionId: context.connection.subscriptionId, host: context.shared.databaseHost, waker: needsWaker },
   }] : [];
 
@@ -564,7 +565,7 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   const dropActions: PlanAction[] = environmentSpec.database && remaining.length ? [{
     id: 'database-drop:postgres', type: 'destroy', verified: true, dataBearing: true, requiresConfirm: true,
     resource: { kind: 'database', name: `${environmentName} database`, provider: 'azure' },
-    reason: `Hypervibe will permanently delete ${environmentName}'s database and logins from the shared server ${context.shared.serverName}. Other environments' databases are untouched. For this step the server accepts this computer's address only, then closes again.`,
+    reason: `Hypervibe will permanently delete ${environmentName}'s database and logins from the shared server ${context.shared.serverName}. Other environments' databases are untouched. The server stays closed to the internet: the step runs as a short job inside the project's private network.`,
     ...(changing(environmentActions).length ? { dependsOn: changing(environmentActions) } : {}),
     metadata: { operation: AZURE_DATABASE_DROP_OPERATION, subscriptionId, host: context.shared.databaseHost },
   }] : [];
@@ -587,9 +588,8 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
 }
 
 export interface AzureApplyDependencies {
-  sqlRunner?: (context: AzureEngineContext, host: string) => SqlRunner;
-  /** Runs setup SQL while the closed server accepts this computer; tests replace it. */
-  setupAccess?: <T>(context: AzureEngineContext, sql: SqlRunner, work: () => Promise<T>) => Promise<T>;
+  /** Runs a psql script on the server from inside the project's private network; tests replace it. */
+  setupSql?: (context: AzureEngineContext, host: string, script: string) => Promise<void>;
   /** Milliseconds between checks while waiting on Azure; tests use 0. */
   pollMs?: number;
   buildImage?: (context: AzureEngineContext, source: { directory: string; commitSha: string }) => Promise<{ image: string; logsUrl?: string } | { error: string; unknown?: boolean; logsUrl?: string }>;
@@ -604,9 +604,10 @@ function updateBinding(ctx: CommandContext, context: AzureEngineContext, patch: 
 export async function runAzureAction(ctx: CommandContext, context: AzureEngineContext, action: PlanAction, params: { project: Project; spec: ProjectSpec }, deps: AzureApplyDependencies = {}): Promise<ActionResult> {
   const metadata = (action.metadata ?? {}) as Record<string, unknown>;
   const store = azureEnvironmentSecretStore(context);
-  const sql = (host: string) => (deps.sqlRunner ?? ((c, h) => entraSqlRunner(c.tokens, h, azureDeployAppName(c.project.name))))(context, host);
-  const setupAccess = deps.setupAccess ?? (<T>(c: AzureEngineContext, runner: SqlRunner, work: () => Promise<T>) =>
-    withAzureSetupAccess(c.tokens, c.shared.serverId, () => runner('postgres', async (query) => { await query('SELECT 1'); }), work));
+  const setupSql = deps.setupSql ?? ((c: AzureEngineContext, host: string, script: string) => runAzureSetupSql(c.tokens, {
+    id: `/subscriptions/${c.connection.subscriptionId}/resourceGroups/${c.connection.resourceGroup}/providers/Microsoft.App/jobs/${azureResourceName(c.prefix, 'dbsetup', c.legacyNames)}`,
+    environmentId: c.shared.appsEnvironmentId, host, user: azureDeployAppName(c.project.name),
+  }, script));
   switch (metadata.operation) {
     case AZURE_SECRET_OPERATION: {
       const key = String(metadata.key);
@@ -636,16 +637,8 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
       return { success: true, message: `Built ${built.image}.`, data: { imageUri: built.image, ...(built.logsUrl ? { buildLogsUrl: built.logsUrl } : {}) } };
     }
     case AZURE_DATABASE_LOGIN_OPERATION: {
-      // A new server's Entra administrator takes a minute to be usable.
-      const runner = sql(String(metadata.host));
-      const urls = await setupAccess(context, runner, async () => {
-        for (let attempt = 0; ; attempt++) {
-          try { return await ensureEnvironmentDatabase(runner, { host: String(metadata.host), environmentName: context.environmentName, waker: Boolean(metadata.waker) }); } catch (error) {
-            if (attempt >= 5 || !/password authentication failed|role .* does not exist|ECONNREFUSED|ETIMEDOUT|the database system is starting up/i.test(error instanceof Error ? error.message : '')) throw error;
-            await new Promise((done) => setTimeout(done, 20_000));
-          }
-        }
-      });
+      const { script, ...urls } = environmentDatabaseSetup({ host: String(metadata.host), environmentName: context.environmentName, waker: Boolean(metadata.waker) });
+      await setupSql(context, String(metadata.host), script);
       for (const [key, value] of [[ENGINE_DATABASE_URL_KEY, urls.databaseUrl], ...(urls.wakerUrl ? [[WAKER_SECRET_KEY, urls.wakerUrl]] : [])] as Array<[string, string]>) {
         const failed = await store.write(key, value);
         if (failed) return { success: false, message: failed };
@@ -665,8 +658,7 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
       return { success: true, message: 'gone' in emptied ? `${metadata.container} no longer exists.` : `Deleted ${emptied.deleted} file(s) from ${metadata.container}.` };
     }
     case AZURE_DATABASE_DROP_OPERATION: {
-      const runner = sql(String(metadata.host));
-      await setupAccess(context, runner, () => dropEnvironmentDatabase(runner, context.environmentName));
+      await setupSql(context, String(metadata.host), environmentDatabaseDrop(context.environmentName));
       return { success: true, message: `Deleted ${context.environmentName}'s database and logins.` };
     }
     case AZURE_FAILED_ENVIRONMENT_OPERATION: {

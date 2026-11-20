@@ -140,6 +140,9 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  const repoEngine = asRecord(repoBindings.engine);
+  if (Object.hasOwn(repoEngine ?? {}, 'runtimeSecretGrantOrigins') || (Object.hasOwn(repoBindings, 'engine') && !repoEngine
+    && Object.hasOwn(asRecord(existing.engine) ?? {}, 'runtimeSecretGrantOrigins'))) throw new Error('Runtime secret grant ownership is local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'serviceInstanceCreateHistory')) throw new Error('Service instance attempt history is private local evidence and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'repositoryVariableOwnership')) throw new Error('Repository-variable ownership and recovery state are local only and cannot be imported.');
   if (Object.hasOwn(repoBindings, 'credentialUpdates')) throw new Error('Credential acceptance and recovery state are local only and cannot be imported.');

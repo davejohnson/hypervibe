@@ -25,7 +25,19 @@ const googleApis: Record<string, string> = {
   storage: 'Cloud Storage', workflows: 'Workflows',
 };
 
-export const namedResourceKinds = new Set(['service', 'database', 'cache', 'volume', 'domain', 'queue']);
+const namedResourceKinds = new Set(['service', 'database', 'cache', 'volume', 'domain', 'queue']);
+
+export function isSecretReadPermission(action: PlanReportAction): boolean {
+  return action.kind === 'secret' && action.id === `secret-runtime-access:${action.name}`;
+}
+
+function isAppIdentity(action: PlanReportAction): boolean {
+  return action.kind === 'service' && action.id === 'identity:runtime';
+}
+
+export function isNamedResource(action: PlanReportAction): boolean {
+  return namedResourceKinds.has(action.kind) && !isAppIdentity(action);
+}
 
 export function humanize(value: string): string {
   const words = value.trim().replace(/[-_]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
@@ -37,6 +49,8 @@ export function providerName(value: string): string {
 }
 
 export function actionTitle(action: PlanReportAction): string {
+  if (isSecretReadPermission(action)) return `App read access to ${action.name}`;
+  if (isAppIdentity(action)) return 'App runtime identity';
   const api = /^Enable ([a-z0-9-]+)\.googleapis\.com$/i.exec(action.name);
   if (api) return `${Object.hasOwn(googleApis, api[1]) ? googleApis[api[1]] : humanize(api[1])} API`;
   // The full grant (principal, role and target) stays in the action detail.
@@ -56,6 +70,8 @@ function describe(action: PlanReportAction): GroupDescription {
   const access = (title: string, icon: MapGroup['icon']): GroupDescription => ({ lane: lanes[1], title, icon });
   const store = (title: string, icon: MapGroup['icon']): GroupDescription => ({ lane: 'Data and storage', title, icon });
   const app = (title: string): GroupDescription => ({ lane: 'App services', title, icon: 'service' });
+  if (isSecretReadPermission(action)) return access('Secret permissions', 'key');
+  if (isAppIdentity(action)) return access('App identity and permissions', 'identity');
   if (/\bgoogle_project_service[.:]/.test(resources)) return setup('Cloud APIs', 'api');
   if (/\bgoogle_(?:project_service_identity|service_account)[.:]/.test(resources)) return access('Service accounts', 'identity');
   if (/\bgoogle_project_iam_(member|binding|policy)[.:]/.test(resources)) return access('Project permissions', 'key');
@@ -89,7 +105,7 @@ export function buildReportMap(actions: PlanReportAction[]) {
     const description = describe(action);
     // Keep named app resources distinct, so connections such as web → database
     // are visible. The many APIs and IAM grants of project setup stay grouped.
-    const name = namedResourceKinds.has(action.kind) ? action.name : '';
+    const name = isNamedResource(action) ? action.name : '';
     const category = JSON.stringify([action.provider, description.lane, description.title, name]);
     let group = byCategory.get(category);
     if (!group) {

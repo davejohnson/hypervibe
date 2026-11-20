@@ -88,7 +88,7 @@ it.each(['aws', 'azure'] as const)('shows observed workload counts and keeps unb
   const registry = new CommandRegistry();
   registerCoreTools(registry, createToolContext());
   new SpecStore().replace(project, projectSpecSchema.parse({ version: 1, project: project.name, environments: { staging: {
-    hosting: { provider }, services: { web: {}, missing: { workloadKind: 'worker' } },
+    hosting: { provider }, services: { web: {}, missing: { workloadKind: 'worker', ...(provider === 'aws' ? { workerPaused: true } : {}) } },
   } } }));
   if (provider === 'aws') awsTransport(r => r.target.endsWith('DescribeServices') ? { data: { services: [{
     serviceArn: webArn, clusterArn: webCluster, status: 'ACTIVE', runningCount: 0, pendingCount: 0, desiredCount: 0,
@@ -99,7 +99,23 @@ it.each(['aws', 'azure'] as const)('shows observed workload counts and keeps unb
   expect(result).toMatchObject({ ok: true, data: { workloads: expect.arrayContaining([
     expect.objectContaining({ service: 'web', presence: 'present', activity: 'idle', running: 0 }),
     expect.objectContaining({ service: 'missing', presence: 'unknown', activity: 'unknown' }),
-  ]), workers: [expect.objectContaining({ service: 'missing', activity: 'unknown' })] } });
+  ]), workers: [expect.objectContaining({ service: 'missing', activity: 'unknown', mode: provider === 'aws' ? 'pause-requested' : 'always-on' })] } });
+});
+
+it.each([0, 1])('shows a requested AWS pause with %i tasks still running', async running => {
+  const { project, environment } = fixture('aws');
+  const definition = `arn:aws:ecs:eu-west-1:${account}:task-definition/exact-staging-web:1`;
+  new EnvironmentRepository().updatePlatformBindings(environment.id, { services: { worker: { serviceId: webArn,
+    clusterArn: webCluster, taskDefinitionArn: definition, resourceType: 'ecs-service', workloadKind: 'worker', region: 'eu-west-1' } } });
+  new SpecStore().replace(project, projectSpecSchema.parse({ version: 1, project: project.name, environments: { staging: {
+    hosting: { provider: 'aws' }, services: { worker: { workloadKind: 'worker', workerPaused: true } },
+  } } }));
+  awsTransport(r => r.target.endsWith('DescribeServices') ? { data: { services: [{ serviceArn: webArn, clusterArn: webCluster,
+    taskDefinition: definition, status: 'ACTIVE', desiredCount: 0, runningCount: running, pendingCount: 0,
+    deployments: [{ status: 'PRIMARY', rolloutState: 'COMPLETED', taskDefinition: definition }] }] } } : undefined);
+  const registry = new CommandRegistry(); registerCoreTools(registry, createToolContext());
+  expect(await registry.execute('hv_status', { project: project.name, env: 'staging' })).toMatchObject({ ok: true,
+    data: { workers: [{ service: 'worker', mode: 'pause-requested', instances: 0, desired: 0, pending: 0, running, activity: running ? 'running' : 'idle' }] } });
 });
 
 it('exposes engine logs through the public command and observes worker-only environments without an HTTP URL', async () => {

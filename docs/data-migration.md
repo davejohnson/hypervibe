@@ -17,6 +17,41 @@ The application pause and forwarding flow below is a separate capability.
 Follow [the private transfer implementation](https://github.com/davejohnson/hypervibe/issues/747)
 and [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
 
+For a prepared Railway source and Cloud Run destination, preview the copy
+account and its empty global Secret Manager container with
+`hv_connections` action `prepare`, provider `cloudrun`,
+`migrationAccess="empty-transfer-slot"`, the project, the Railway
+`migrationSourceEnvironment` and the destination `environment`. Review the
+saved HTML plan. To create the listed resources, repeat that request with
+`confirm=true` and the exact `gcpSetupPlanId`. The third action gives the
+copy account Secret Accessor on that container. Hypervibe retains these
+resources in the target's managed project setup.
+
+Once the empty secret and copy account exist, preview the next change with the
+same project, source and target and `migrationAccess="restrict-app-access"`.
+Review its saved HTML and supply its own `gcpSetupPlanId` to approve it.
+The plan narrows two project-level grants held by the app's runtime account.
+It excludes the transfer secret and its versions from the secret reader grant.
+It excludes objects under `migrations/<destination>/` in the build-source
+bucket from the storage grant. Object names can still appear in bucket lists.
+
+Hypervibe creates each conditional grant before removing its broad predecessor.
+If one grant was fully replaced and the other is still broad, preview the
+restrictions again and review the remaining change. An interruption within
+one replacement needs separate recovery. If Google still lists both grants
+for the same role, or OpenTofu still tracks the previous grant, the app may
+retain broad access. Keep the transfer secret empty and pause the copy.
+Request recovery of that grant through Hypervibe’s managed Google Cloud setup,
+then preview the restrictions again.
+
+Hypervibe checks the direct bindings and the identities of the
+account, secret and bucket. A successful change to these two grants is only
+one part of verifying access. Other grants, inherited permissions and anyone
+holding a signed download URL can affect who can read an export. The transfer
+secret stays empty. A separate reviewed workflow must verify the app's
+effective denial, the copy job's access, and dump isolation before handling any
+source data. [Google IAM resource attributes](https://docs.cloud.google.com/iam/docs/conditions-resource-attributes) · [Cloud Storage signed URLs](https://docs.cloud.google.com/storage/docs/access-control/signed-urls)
+
 For a production rehearsal, include files with known contents and eligible
 queued work. Check every referenced object, run one worker against the target,
 then write a new record there and verify that a restored copy contains it.
@@ -31,6 +66,26 @@ serialize migration work per destination environment. A refresh can reconcile
 a recorded, completed Cloud Run execution after an interruption. If its
 ownership, completion, or cleanup is uncertain, the next copy remains blocked.
 Independent installations do not share this local execution lock.
+
+### Hold a destination worker before restoring queued work
+
+Let current jobs finish first. On Google Cloud and AWS, a fixed-size worker
+can be held at zero with `services.<name>.workerPaused: true` in `hv_spec`.
+Review the count change in the infrastructure plan and apply it. On Google
+Cloud, use `hv_status` to verify the worker pool has zero configured
+instances. On AWS, verify that the exact ECS worker has zero desired, running
+and pending tasks. A pause request or missing observation leaves that check
+open. Check separately that no job is in flight and that other writers,
+including web services and scheduled jobs, are quiet. Set `workerPaused` to
+`false` and approve the plan for one instance when processing should resume.
+
+On-demand workers have independent wake-up mechanisms. If changing an
+on-demand worker to fixed size, retire the wake-up mechanism and confirm its
+outstanding executions have finished before relying on a fixed-worker pause.
+Azure fixed workers run one Container Apps replica. Its managed engine
+rejects the per-worker pause setting. Azure's zero minimum permits scaling
+down, while changes to an image or scaling settings can provision a new
+revision. [Azure worker pause follow-up](https://github.com/davejohnson/hypervibe/issues/791)
 
 ## Pause the app for a manual move
 
@@ -230,8 +285,9 @@ Workload suspension is currently:
 | Hosting provider | Maintenance behavior |
 | --- | --- |
 | Railway | Removes the exact active deployment, preserves replicas/sleep/cron settings, and redeploys it on exit. This does not prove application jobs or uploads finished gracefully. |
-| GCP Cloud Run | Sets manual service scaling to zero, pauses scheduler jobs, waits for current native job executions to finish, and restores the exact prior scaling/schedule state. |
-| Azure Container Apps | Uses the provider stop/start lifecycle and verifies terminal running state. |
+| GCP Cloud Run | Supports the fixed-worker setting above. Whole-app workload maintenance is unavailable on the managed engine. |
+| AWS ECS | Supports the fixed-worker setting above. Whole-app workload maintenance is unavailable on the managed engine. |
+| Azure Container Apps | Whole-app workload maintenance and individual fixed-worker pause are unavailable on the managed engine. |
 
 This matrix is deliberate. A provider is not marked supported until Hypervibe
 can stop background work and direct origins, retain exact restoration state,

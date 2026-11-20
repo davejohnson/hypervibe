@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, dropEnvironmentDatabase, emptyContainer, ensureEnvironmentDatabase, purgeVaultSecrets, lookupPublicAddress, taggedResources, withAzureSetupAccess, type SqlRunner } from '../azure-ops.client.js';
+import { AZURE_DATABASE_ROOTS } from '../azure-database-roots.js';
+import { AZURE_SETUP_IMAGE, AzureTokens, azureDatabaseNames, azureDatabaseRoots, azureKeyVaultSecretStore, emptyContainer, environmentDatabaseDrop, environmentDatabaseSetup, purgeVaultSecrets, runAzureSetupSql, taggedResources } from '../azure-ops.client.js';
 
 const access = { tenantId: 't', clientId: 'c', clientSecret: 'client-secret-value' };
 const json = (status: number, body: unknown = {}) => new Response(status === 204 ? null : JSON.stringify(body), { status });
@@ -50,33 +52,25 @@ describe('Azure Key Vault secret store', () => {
 });
 
 describe('Azure database logins on a shared server', () => {
-  const recorder = () => {
-    const statements: Array<{ database: string; sql: string }> = [];
-    const runner: SqlRunner = async (database, run) => {
-      await run(async (sql) => { statements.push({ database, sql }); return { rows: [] }; });
-    };
-    return { statements, runner };
-  };
-
-  it('gives each environment its own database that only its logins can connect to', async () => {
-    const { statements, runner } = recorder();
-    const urls = await ensureEnvironmentDatabase(runner, { host: 'srv.postgres.database.azure.com', environmentName: 'pr-12', waker: true });
+  it('gives each environment its own database that only its logins can connect to', () => {
+    const setup = environmentDatabaseSetup({ host: 'srv.postgres.database.azure.com', environmentName: 'pr-12', waker: true });
     expect(azureDatabaseNames('pr-12')).toEqual({ database: 'app_pr_12', login: 'app_pr_12', waker: 'waker_pr_12' });
-    const sql = statements.map((entry) => entry.sql);
-    expect(sql).toContain('CREATE DATABASE app_pr_12 OWNER app_pr_12');
-    expect(sql).toContain('REVOKE CONNECT, TEMPORARY ON DATABASE app_pr_12 FROM PUBLIC');
-    expect(sql).toContain('GRANT pg_read_all_data TO waker_pr_12');
+    const lines = setup.script.trimEnd().split('\n');
+    // Creates on a new server, rotates on one that already has the login or database.
+    expect(lines[0]).toMatch(/^SELECT CASE WHEN EXISTS \(SELECT 1 FROM pg_roles WHERE rolname = 'app_pr_12'\) THEN 'ALTER' ELSE 'CREATE' END \|\| ' ROLE app_pr_12 LOGIN PASSWORD ''SCRAM-SHA-256\$4096:[A-Za-z0-9+\/=$:]+''' \\gexec$/);
+    expect(lines).toContain("SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_database WHERE datname = 'app_pr_12') THEN 'ALTER DATABASE app_pr_12 OWNER TO app_pr_12' ELSE 'CREATE DATABASE app_pr_12 OWNER app_pr_12' END \\gexec");
+    expect(lines).toContain('REVOKE CONNECT, TEMPORARY ON DATABASE app_pr_12 FROM PUBLIC;');
+    expect(lines).toContain('GRANT pg_read_all_data TO waker_pr_12;');
+    expect(lines.slice(-2)).toEqual(['\\connect app_pr_12', 'ALTER SCHEMA public OWNER TO app_pr_12;']);
+    expect(setup.databaseUrl).toMatch(/^postgresql:\/\/app_pr_12:[A-Za-z0-9_-]{32}@srv\.postgres\.database\.azure\.com:5432\/app_pr_12\?sslmode=require$/);
+    expect(setup.wakerUrl).toMatch(/^postgresql:\/\/waker_pr_12:/);
     // Passwords travel only as SCRAM verifiers.
-    expect(sql.find((statement) => statement.startsWith('CREATE ROLE app_pr_12'))).toMatch(/PASSWORD 'SCRAM-SHA-256\$4096:/);
-    expect(urls.databaseUrl).toMatch(/^postgresql:\/\/app_pr_12:[A-Za-z0-9_-]{32}@srv\.postgres\.database\.azure\.com:5432\/app_pr_12\?sslmode=require$/);
-    expect(urls.wakerUrl).toMatch(/^postgresql:\/\/waker_pr_12:/);
-    expect(statements.at(-1)).toEqual({ database: 'app_pr_12', sql: 'ALTER SCHEMA public OWNER TO app_pr_12' });
+    for (const url of [setup.databaseUrl, setup.wakerUrl!]) expect(setup.script).not.toContain(new URL(url).password);
+    expect(environmentDatabaseSetup({ host: 'h', environmentName: 'test', waker: false }).script).not.toContain('waker');
   });
 
-  it('drops only the environment\'s database and logins', async () => {
-    const { statements, runner } = recorder();
-    await dropEnvironmentDatabase(runner, 'test');
-    expect(statements.map((entry) => entry.sql).slice(1)).toEqual(['DROP DATABASE IF EXISTS app_test', 'DROP ROLE IF EXISTS app_test', 'DROP ROLE IF EXISTS waker_test']);
+  it('drops only the environment\'s database and logins', () => {
+    expect(environmentDatabaseDrop('test').trimEnd().split('\n').slice(1)).toEqual(['DROP DATABASE IF EXISTS app_test;', 'DROP ROLE IF EXISTS app_test;', 'DROP ROLE IF EXISTS waker_test;']);
   });
 });
 
@@ -102,103 +96,120 @@ describe('Azure storage and absence checks', () => {
   });
 });
 
-describe('Azure database setup access', () => {
-  const serverId = '/subscriptions/s/resourceGroups/hv-app/providers/Microsoft.DBforPostgreSQL/flexibleServers/hv-app-shared-abc123';
-  /**
-   * A server as Azure behaved live on 2026-11-18 (West US 2): it starts closed, and it drops every
-   * connection ("timeout expired") unless public access is on and a rule allows the caller's address.
-   * It never says which address it turned away.
-   */
-  const server = (options: { failClose?: boolean } = {}) => {
-    const state = { access: 'Disabled', rule: undefined as string | undefined };
+describe('Azure database setup inside the private network', () => {
+  const group = '/subscriptions/s/resourceGroups/hv-app';
+  const job = { id: `${group}/providers/Microsoft.App/jobs/hv-app-test-dbsetup`, environmentId: `${group}/providers/Microsoft.App/managedEnvironments/hv-app-shared-apps`,
+    host: 'srv.postgres.database.azure.com', user: 'hypervibe-app' };
+  /** Azure's job API as documented: a job is created, started, reports its execution's status, and is gone after deletion. */
+  const azureJobs = (options: { leftover?: boolean; status?: string; undeletable?: boolean; refuseCreate?: boolean; loseStart?: boolean; foreign?: boolean; bareStart?: boolean; flakyStatus?: boolean } = {}) => {
+    const state = { job: options.leftover ? { tags: options.foreign ? {} : { 'hv-setup': 'database' } } as Record<string, unknown> : undefined as Record<string, unknown> | undefined, created: [] as Array<Record<string, any>>, deleted: 0, starts: 0, reads: 0 };
     const azure = fake((method, url, body) => {
-      if (url.includes('/firewallRules/hypervibe-setup')) {
-        if (method === 'PUT') { state.rule = JSON.parse(body!).properties.startIpAddress; expect(JSON.parse(body!).properties.endIpAddress).toBe(state.rule); return json(202); }
-        if (method === 'DELETE') { state.rule = undefined; return json(202); }
+      const path = new URL(url).pathname;
+      if (path === job.environmentId) return json(200, { location: 'westus2' });
+      if (path === `${job.id}/start` && method === 'POST') {
+        state.starts++;
+        if (options.loseStart) throw new TypeError('fetch failed');
+        return state.job ? (options.bareStart ? json(202) : json(200, { name: 'run-1' })) : json(404);
       }
-      if (method === 'PATCH') {
-        const wanted = JSON.parse(body!).properties.network.publicNetworkAccess as string;
-        if (wanted === 'Disabled' && options.failClose) return json(409, { error: { code: 'ServerIsBusy' } });
-        state.access = wanted; return json(202);
+      if (path === `${job.id}/executions`) {
+        if (options.flakyStatus && state.reads++ === 0) throw new TypeError('fetch failed');
+        return json(200, { value: [{ name: 'run-1', properties: { status: options.status ?? 'Succeeded' } }] });
       }
-      return json(200, { properties: { state: 'Ready', network: { publicNetworkAccess: state.access } } });
+      if (path !== job.id) throw new Error(`Unexpected call ${method} ${url}`);
+      if (method === 'PUT' && options.refuseCreate) return json(403, { error: { code: 'AuthorizationFailed', message: 'no' } });
+      if (method === 'PUT') { state.job = JSON.parse(body!); state.created.push(state.job!); return json(201); }
+      if (method === 'DELETE') {
+        if (options.undeletable) return json(409, { error: { code: 'JobBusy' } });
+        if (!state.job) return json(204);
+        state.job = undefined; state.deleted++; return json(202);
+      }
+      return state.job ? json(200, { tags: state.job.tags, properties: { provisioningState: 'Succeeded' } }) : json(404);
     });
-    const probe = async () => { if (state.access !== 'Enabled' || state.rule !== '203.0.113.7') throw new Error('timeout expired'); };
-    return { azure, state, probe };
+    return { azure, state };
   };
-  /** No waiting between attempts; the address service answers with this computer's address. */
-  const here = { pollMs: 0, lookupAddress: async () => '203.0.113.7' as string | undefined };
-  const puts = (azure: { calls: Array<{ method: string; body?: string }> }) => azure.calls.filter((call) => call.method === 'PUT').map((call) => JSON.parse(call.body!).properties.startIpAddress);
+  const fast = { pollMs: 0 };
 
-  it('opens the server to this computer\'s address only, runs the work, then closes it again', async () => {
-    const { azure, state, probe } = server();
-    const seen: Array<typeof state> = [];
-    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => { seen.push({ ...state }); return 'done'; }, here)).resolves.toBe('done');
-    expect(seen).toEqual([{ access: 'Enabled', rule: '203.0.113.7' }]);
-    expect(state).toEqual({ access: 'Disabled', rule: undefined });
-    // Nothing but the one address was ever allowed.
-    expect(puts(azure)).toEqual(['203.0.113.7']);
+  it('runs the script from a job in the network, without opening the server or asking anyone for an address', async () => {
+    const { azure, state } = azureJobs();
+    await runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast);
+    // Only Entra sign-in and the job's own management calls: no database-server settings, no firewall rule, no address service.
+    for (const call of azure.calls) expect(call.url.startsWith('https://login.microsoftonline.com/') || call.url.startsWith('https://management.azure.com/subscriptions/s/resourceGroups/hv-app/providers/Microsoft.App/')).toBe(true);
+    expect(state.created).toHaveLength(1);
+    const { location, properties } = state.created[0]!;
+    expect(location).toBe('westus2');
+    expect(state.created[0]!.tags).toEqual({ 'hv-setup': 'database' });
+    expect(properties).toMatchObject({ environmentId: job.environmentId, configuration: { triggerType: 'Manual', replicaRetryLimit: 0 } });
+    // The login token and the script are secrets; the container's settings only refer to them.
+    expect(properties.configuration.secrets).toEqual([{ name: 'token', value: 'token-for-https://ossrdbms-aad.database.windows.net/.default' }, { name: 'script', value: 'SELECT 1;\n' }]);
+    const container = properties.template.containers[0];
+    expect(container.image).toBe(AZURE_SETUP_IMAGE);
+    expect(AZURE_SETUP_IMAGE).toMatch(/^mcr\.microsoft\.com\/[a-z/]+@sha256:[0-9a-f]{64}$/);
+    expect(container.env).toEqual(expect.arrayContaining([{ name: 'PGHOST', value: job.host }, { name: 'PGUSER', value: 'hypervibe-app' }, { name: 'PGSSLMODE', value: 'verify-full' },
+      { name: 'PGPASSWORD', secretRef: 'token' }, { name: 'HV_SETUP_SQL', secretRef: 'script' }]));
+    expect(JSON.stringify(properties.template)).not.toContain('token-for-');
+    // The image trusts only a short Microsoft list, so the job brings the roots Azure databases chain to.
+    const roots = container.env.find((entry: { name: string }) => entry.name === 'HV_SETUP_CA').value as string;
+    expect(roots.match(/BEGIN CERTIFICATE/g)).toHaveLength(3);
+    expect(roots).toBe(azureDatabaseRoots());
+    expect(container.env).toContainEqual({ name: 'PGSSLROOTCERT', value: '/tmp/hv-ca.pem' });
+    expect(container.command.at(-1)).toMatch(/^printf "%s" "\$HV_SETUP_CA" > \/tmp\/hv-ca\.pem;/);
+    // Each is the certificate it claims to be: a self-signed root with the recorded fingerprint, not close to expiry.
+    for (const root of AZURE_DATABASE_ROOTS) {
+      const certificate = new crypto.X509Certificate(root.pem);
+      expect(certificate.subject.split('\n')).toContain(`CN=${root.name}`);
+      expect(certificate.fingerprint256).toBe(root.sha256);
+      expect(certificate.checkIssued(certificate)).toBe(true);
+      expect(new Date(certificate.validTo).getTime()).toBeGreaterThan(Date.now() + 365 * 24 * 3600_000);
+    }
+    expect(container.command.at(-1)).toContain('psql -q -v ON_ERROR_STOP=1 -f -');
+    // Nothing is left behind.
+    expect(state.job).toBeUndefined();
+    expect(state.deleted).toBe(1);
   });
 
-  it('closes the server again when the work fails, and reports the failure', async () => {
-    const { azure, state, probe } = server();
-    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => { throw new Error('permission denied to create role'); }, here)).rejects.toThrow('permission denied to create role');
-    expect(state).toEqual({ access: 'Disabled', rule: undefined });
+  it('removes a job left by an interrupted run before it starts', async () => {
+    const { azure, state } = azureJobs({ leftover: true });
+    await runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast);
+    expect(state.deleted).toBe(2);
+    expect(azure.calls.findIndex((call) => call.method === 'DELETE')).toBeLessThan(azure.calls.findIndex((call) => call.method === 'PUT'));
   });
 
-  it('allows nothing when it cannot learn this computer\'s address, and still closes', async () => {
-    const { azure, state, probe } = server();
-    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'never', { pollMs: 0, lookupAddress: async () => undefined })).rejects.toThrow(/did not open the database server to anything/);
-    expect(puts(azure)).toEqual([]);
-    expect(state).toEqual({ access: 'Disabled', rule: undefined });
+  it('reports a failed script and still deletes the job', async () => {
+    const { azure, state } = azureJobs({ status: 'Failed' });
+    await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow(/database setup job failed.*logs under hv-app-test-dbsetup/);
+    expect(state.job).toBeUndefined();
   });
 
-  it('keeps waiting through dropped connections while the rule takes effect, and takes a refused login as reached', async () => {
-    const slow = server();
-    let attempts = 0;
-    const lagging = async () => { await slow.probe(); if (attempts++ < 3) throw new Error('timeout expired'); };
-    await expect(withAzureSetupAccess(slow.azure.tokens, serverId, lagging, async () => 'done', here)).resolves.toBe('done');
-    // A new server does not know its administrator for a minute: the network is open, so the work runs and retries the login itself.
-    const refused = server();
-    const login = async () => { await refused.probe(); throw Object.assign(new Error('password authentication failed'), { code: '28P01' }); };
-    await expect(withAzureSetupAccess(refused.azure.tokens, serverId, login, async () => refused.state.rule, here)).resolves.toBe('203.0.113.7');
-    expect(refused.state).toEqual({ access: 'Disabled', rule: undefined });
+  it('never deletes or replaces a job of the same name that it did not create', async () => {
+    const { azure, state } = azureJobs({ leftover: true, foreign: true });
+    await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow(/already exists and Hypervibe did not create it/);
+    expect(azure.calls.filter((call) => call.method !== 'GET' && !call.url.startsWith('https://login.'))).toEqual([]);
+    expect(state.job).toBeDefined();
   });
 
-  it('says what the server last answered when the allowed address never gets through, and closes', async () => {
-    // The address service can be wrong (another network path, say): the wrong address is allowed, nothing connects, and the window closes.
-    const { azure, state, probe } = server();
-    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'never', { pollMs: 0, lookupAddress: async () => '198.51.100.9' }))
-      .rejects.toThrow(/did not answer this computer after allowing 198\.51\.100\.9\. Last answer: timeout expired/);
-    // Node reports several failed addresses as one error with an empty message.
-    const several = server();
-    const aggregate = Object.assign(new AggregateError([Object.assign(new Error('connect ETIMEDOUT 20.1.2.3:5432'), { code: 'ETIMEDOUT' })], ''), { code: 'ETIMEDOUT' });
-    await expect(withAzureSetupAccess(several.azure.tokens, serverId, async () => { throw aggregate; }, async () => 'never', here)).rejects.toThrow(/Last answer: ETIMEDOUT: connect ETIMEDOUT 20\.1\.2\.3:5432/);
-    expect(state).toEqual({ access: 'Disabled', rule: undefined });
-    expect(several.state).toEqual({ access: 'Disabled', rule: undefined });
+  it('follows the run when Azure accepts the start without naming it, and through one unanswered status read', async () => {
+    const { azure, state } = azureJobs({ bareStart: true, flakyStatus: true });
+    await runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast);
+    expect(state.starts).toBe(1);
+    expect(state.job).toBeUndefined();
   });
 
-  it('tries again when closing fails once', async () => {
-    const { azure, state, probe } = server();
-    let failed = false;
-    const flaky = { get: (scope: string) => azure.tokens.get(scope), fetchImpl: (async (url: string, init?: RequestInit) => {
-      if (init?.method === 'PATCH' && String(init.body).includes('Disabled') && !failed) { failed = true; throw new TypeError('fetch failed'); }
-      return azure.tokens.fetchImpl(url, init);
-    }) as typeof fetch };
-    await expect(withAzureSetupAccess(flaky, serverId, probe, async () => 'done', here)).resolves.toBe('done');
-    expect(state).toEqual({ access: 'Disabled', rule: undefined });
+  it('stops with Azure\'s answer when the job is refused', async () => {
+    const { azure, state } = azureJobs({ refuseCreate: true });
+    await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow(/could not create the database setup job \(HTTP 403 AuthorizationFailed/);
+    expect(state.starts).toBe(0);
   });
 
-  it('says so when it cannot close the server, even though the work succeeded', async () => {
-    const { azure, probe } = server({ failClose: true });
-    await expect(withAzureSetupAccess(azure.tokens, serverId, probe, async () => 'done', here)).rejects.toThrow(/could not turn the database server's public access off again.*hv_plan/);
+  it('does not start the job a second time when the answer to starting it is lost, and deletes it', async () => {
+    const { azure, state } = azureJobs({ loseStart: true });
+    await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow('fetch failed');
+    expect(state.starts).toBe(1);
+    expect(state.job).toBeUndefined();
   });
 
-  it('reads this computer\'s address from the address service and rejects anything that is not one address', async () => {
-    const answer = (text: string, status = 200) => (async () => new Response(text, { status })) as unknown as typeof fetch;
-    expect(await lookupPublicAddress(answer('203.0.113.7\n'))).toBe('203.0.113.7');
-    expect(await lookupPublicAddress(answer('<html>blocked</html>'))).toBeUndefined();
-    expect(await lookupPublicAddress(answer('203.0.113.7', 503))).toBeUndefined();
-    expect(await lookupPublicAddress((async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch)).toBeUndefined();
+  it('does not start when an earlier job cannot be removed, and says so', async () => {
+    const { azure, state } = azureJobs({ leftover: true, undeletable: true });
+    await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow(/could not remove an earlier database setup job.*JobBusy/);
+    expect(state.created).toEqual([]);
   });
 });

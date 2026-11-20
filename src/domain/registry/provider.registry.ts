@@ -362,6 +362,24 @@ export interface ProviderCredentialUpdateCapability {
   >;
 }
 
+export type MigrationAccess = 'empty-transfer-slot' | 'restrict-app-access';
+
+export interface MigrationAccessCapability {
+  sourceProvider: string;
+  prepare(input: {
+    mode: MigrationAccess;
+    project: Project;
+    sourceEnvironment: string;
+    targetEnvironment: string;
+    targetProjectId: string;
+    region: string;
+    runtimeEmail: string;
+    deployEmail: string;
+    token: () => Promise<string>;
+    planId?: string;
+  }): Promise<Record<string, unknown> & { success: boolean }>;
+}
+
 export interface RegisteredProvider {
   metadata: ProviderMetadata;
   factory: (credentials: unknown) => unknown | Promise<unknown>;
@@ -375,6 +393,8 @@ export interface RegisteredProvider {
   hostedObservation?: HostedObservationCapability;
   /** Provider-owned deletion driver for explicitly retained non-lifecycle resources. */
   retainedCleanup?: ProviderRetainedCleanupCapability;
+  /** Preview or apply a reviewed, empty credential slot for this source provider. */
+  migrationAccess?: MigrationAccessCapability;
   /** Provider-owned projection from database bindings to workload runtime variables. */
   databaseRuntime?: ProviderDatabaseRuntimeProjection;
   /** Existing infrastructure can be adopted only when a provider declares and tests this capability. */

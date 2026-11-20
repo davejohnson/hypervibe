@@ -6,10 +6,12 @@ import { CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES, CLOUD_RUN_BUILD_IDENTITY_SELF_R
   CLOUD_RUN_RUNTIME_SERVICE_ACCOUNT_ACCESS_ROLES, getCloudPrepareProfile } from '../../../../domain/services/cloud-prepare.js';
 
 export {
-  composeGcpProjectConfiguration, executeGcpProjectSetup, getGcpProjectSetupContribution, getGcpProjectSetupContributions,
+  composeGcpProjectConfiguration, executeGcpProjectSetup, getGcpProjectSetupContribution, getGcpProjectSetupContributions, getGcpRuntimeIsolation,
   hasGcpProjectSetup, type GcpProjectSetupContribution, type GcpProjectSetupDependencies,
   type GcpProjectSetupParams, type GcpProjectSetupResult,
 } from './project-setup-executor.js';
+
+export { isolationGrants, type TransferIsolationScope } from './transfer-isolation.js';
 
 /** Pinned archive and extracted-package hashes from the signed OpenTofu registry release.
  * Provenance: test/provider-contracts/gcp/project-setup/google-beta.lock.hcl. */

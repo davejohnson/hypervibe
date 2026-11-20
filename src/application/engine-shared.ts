@@ -3,7 +3,7 @@ import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
-import type { ProjectSpec } from '../domain/spec/spec.schema.js';
+import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import type { InfrastructurePlanResult } from './infrastructure-engine.js';
 
 /** Helpers every cloud engine uses. Add shared engine behavior here, not to one cloud's module. */
@@ -17,6 +17,17 @@ export function specWithoutEnvironment(spec: ProjectSpec, environmentName: strin
       return [key, remaining.length ? { environments: remaining } : null];
     }));
   return { environments: { [environmentName]: null }, ...(Object.keys(secrets).length ? { secrets } : {}) };
+}
+
+export function describeFixedWorkerCountChanges(actions: PlanAction[], environment: EnvironmentSpec, countField: string): void {
+  for (const action of actions) {
+    const worker = environment.services[action.resource.name];
+    if (action.type === 'update' && worker?.workloadKind === 'worker' && !worker.onDemand
+      && action.diff?.some(change => change.field === countField)) {
+      const effect = worker.workerPaused ? 'pause this worker by setting its instance count to zero' : 'run one instance of this worker';
+      action.reason = `Hypervibe will ${effect}. ${action.reason}`;
+    }
+  }
 }
 
 /** Plan scope shared by every engine's infrastructure and release plans. */
