@@ -3,6 +3,7 @@ import type { PlanReport, PlanReportAction } from '../domain/plan/plan-report.js
 import type { PlanActionType } from '../domain/plan/plan.types.js';
 import { actionTitle, buildReportMap, humanize, lanes, namedResourceKinds, providerName, type MapGroup } from './plan-report-map.js';
 import { planReportBrowser } from './plan-report-browser.js';
+import { groupPlanNotices } from './plan-report-notices.js';
 import { planReportStyle } from './plan-report-style.js';
 
 const types: Record<PlanActionType, string> = {
@@ -30,7 +31,8 @@ function fact(label: string, value?: string) {
   return value ? `<div><dt>${label}</dt><dd>${value}</dd></div>` : '';
 }
 function notice(label: string, messages: string[], className: string) {
-  return messages.length ? `<div class="notice ${className}"><h3>${label} (${messages.length})</h3><ul>${messages.map(message => `<li>${escape(message)}</li>`).join('')}</ul></div>` : '';
+  const heading = className === 'info' ? label : `${label} (${messages.length})`;
+  return messages.length ? `<div class="notice ${className}"><h3>${heading}</h3><ul>${messages.map(message => `<li>${escape(message)}</li>`).join('')}</ul></div>` : '';
 }
 function node(group: MapGroup) {
   const provider = providerName(group.provider);
@@ -99,7 +101,9 @@ export function renderPlanReportHtml(report: PlanReport): string {
   }).join('');
   const rows = report.actions.map((action, index) =>
     actionRow(action, index, map.groupByAction.get(action)!, indexes)).join('');
-  const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', report.warnings, 'warning');
+  const { warnings, costs, next } = groupPlanNotices(report);
+  const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', warnings, 'warning')
+    + notice('Database cost and protection', costs, 'info') + notice('What happens next', next, 'info');
   const metadata = [
     ['Scope', humanize(report.scope)], ['Target', report.target], ['Billing account', report.billingAccount],
     ['Plan ID', report.planId], ['Created', report.createdAt],

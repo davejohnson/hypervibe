@@ -55,6 +55,7 @@ section { margin-top: 30px; }
 .section-head .muted, .map-note { font-size: .88rem; }
 .notices { display: grid; gap: 10px; }
 .notice { border-left: 3px solid #f4c481; background: var(--surface); padding: 10px 14px; }
+.notice.info { border-color: var(--frame); }
 .notice.blocked { border-color: #ffa29d; }
 .notice ul { padding-left: 20px; }
 .resource-map {
