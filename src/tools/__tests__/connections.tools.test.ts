@@ -657,7 +657,7 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it.each(['empty-transfer-slot', 'restrict-app-access'])('previews %s through MCP and confirms only its reviewed plan through the CLI', async migrationAccess => {
+  it.each(['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access'])('previews %s through MCP and confirms only its reviewed plan through the CLI', async migrationAccess => {
     const project = new ProjectRepository().create({ name: 'transfer-app', defaultPlatform: 'cloudrun' });
     new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
       destination: { hosting: { provider: 'cloudrun', gcpProjectId: 'transfer-project', region: 'us-central1' }, services: {} },
@@ -665,8 +665,8 @@ describe('hv_connections', () => {
     } });
     const input = { provider: 'cloudrun', action: 'prepare', project: project.name, environment: 'destination',
       migrationAccess, migrationSourceEnvironment: 'source' };
-    const planId = 'setup-reviewed-slot';
-    const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview', planId });
+    const planId = migrationAccess === 'verify-copy-access' ? 'probe-16a21ebf-67bb-4363-9774-d625a84c5b13' : 'setup-reviewed-slot';
+    const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview', planId, softDeleteSeconds: 604800, htmlPath: '/reports/' + planId + '.html' });
     const client = await makeClient();
     try {
       const preview = await client.call('hv_connections', input);
@@ -676,7 +676,14 @@ describe('hv_connections', () => {
         migrationSourceEnvironment: input.migrationSourceEnvironment, confirm: undefined }));
       expect(preview.confirmation.completeInput).toBe(true);
       expect(preview.confirmation.retryInput).toEqual({ ...input, confirm: true, gcpSetupPlanId: planId });
-      if (migrationAccess === 'restrict-app-access') {
+      if (migrationAccess === 'verify-copy-access') {
+        expect(preview.confirmation.message).toMatch(/two temporary Cloud Run jobs/i);
+        expect(preview.confirmation.message).toMatch(/secret version.*object/i);
+        expect(preview.confirmation.message).toMatch(/charges/i);
+        expect(preview.hint).toMatch(/app.*copy/i);
+        expect(preview.confirmation.message).toContain('7 days');
+        expect(preview.data.htmlPath).toBe('/reports/' + planId + '.html');
+      } else if (migrationAccess === 'restrict-app-access') {
         expect(preview.confirmation.message).toMatch(/app.*secret.*dump/i);
         expect(preview.hint).toContain('two project');
       } else {
@@ -701,10 +708,14 @@ describe('hv_connections', () => {
       const missingPlan = await client.call('hv_connections', input);
       expect(missingPlan.error?.code).toBe('PROVIDER_ERROR');
       expect(missingPlan.confirmation).toBeUndefined();
+      if (migrationAccess === 'verify-copy-access') {
+        prepare.mockResolvedValue({ success: true, mode: 'preview', planId });
+        expect((await client.call('hv_connections', input)).error?.code).toBe('PROVIDER_ERROR');
+      }
     } finally { await client.close(); }
   });
 
-  it.each(['empty-transfer-slot', 'restrict-app-access'])('rejects ambiguous targets, other actions, credentials and extra grants for %s', async migrationAccess => {
+  it.each(['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access'])('rejects ambiguous targets, other actions, credentials and extra grants for %s', async migrationAccess => {
     const project = new ProjectRepository().create({ name: 'transfer-app', defaultPlatform: 'cloudrun' });
     new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
       destination: { hosting: { provider: 'cloudrun', gcpProjectId: 'transfer-project' }, services: {} },
@@ -725,6 +736,7 @@ describe('hv_connections', () => {
         { migrationSourceEnvironment: 'destination' }, { migrationAccess: undefined },
         { gcpProjectId: 'wrong-project' }, { gcpSetupPlanId: 'some-plan' }, { confirm: true }, { ...confirmed, gcpSetupPlanId: '   ' },
         { gcsAccess: 'lifecycle' }, { memorystoreAccess: 'inspect' }, { queueAccess: 'remove' }, { workerAccess: 'lifecycle' },
+        { runtimeServiceAccountEmail: 'other@transfer-project.iam.gserviceaccount.com' },
         { deployServiceAccountEmail: 'override@transfer-project.iam.gserviceaccount.com' }, { scope: 'elsewhere/repo' },
         { credentialsRef: 'env:UNREAD' }, { adminAuth: 'default' }, { ...confirmed, adminAccessTokenRef: 'env:UNREAD' },
         { ...confirmed, adminCredentialsJson: 'unused' }, { purpose: 'different action' }, { awsAccountId: '123456789012' },

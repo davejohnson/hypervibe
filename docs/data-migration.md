@@ -8,8 +8,8 @@ whole databases and buckets through a separate reviewed Hypervibe plan.
 
 Prepare a separate Cloud Run environment and check the app on its temporary
 hostname. A working target does not establish that the production data can move.
-The guided GCP transfer currently lacks a saved OpenTofu plan for the temporary
-job and a private handoff for the database dump URL and bucket credentials.
+The guided GCP transfer still needs a saved OpenTofu plan for the actual
+copy job and a private handoff for the database dump URL and bucket credentials.
 Railway PostgreSQL and Railway bucket copies that need this handoff are blocked.
 A fresh comparison of private Railway and Cloud SQL databases also needs
 reviewed native jobs. A historical receipt only describes the earlier copy.
@@ -47,10 +47,28 @@ then preview the restrictions again.
 Hypervibe checks the direct bindings and the identities of the
 account, secret and bucket. A successful change to these two grants is only
 one part of verifying access. Other grants, inherited permissions and anyone
-holding a signed download URL can affect who can read an export. The transfer
-secret stays empty. A separate reviewed workflow must verify the app's
-effective denial, the copy job's access, and dump isolation before handling any
-source data. [Google IAM resource attributes](https://docs.cloud.google.com/iam/docs/conditions-resource-attributes) · [Cloud Storage signed URLs](https://docs.cloud.google.com/storage/docs/access-control/signed-urls)
+holding a signed download URL can affect who can read an export. [Google IAM resource attributes](https://docs.cloud.google.com/iam/docs/conditions-resource-attributes) · [Cloud Storage signed URLs](https://docs.cloud.google.com/storage/docs/access-control/signed-urls)
+
+To test those permissions, preview `migrationAccess="verify-copy-access"` with
+the same project, Railway source and Cloud Run destination. Review its saved
+HTML, then approve a single check with its exact `gcpSetupPlanId`. To reopen
+the report later, use `hv_runs` action `report` with the saved `runId`, the
+Hypervibe project and the Google Cloud `gcpProjectId`.
+
+The check places random test data in one new version of the transfer secret
+and one file under the destination's export prefix. One temporary Cloud Run
+job reads that version as the copy account and downloads the exact file
+generation through the short-lived link stored there. A second job uses the
+app account to read the same version and file directly. Both app reads must
+return permission denied. Google may charge for compute, requests and storage.
+
+Hypervibe checks cleanup of the jobs, the test version and the exact file
+generation. Google keeps metadata for the destroyed secret version. The
+preview shows any bucket soft-delete period, during which the deleted test
+file is recoverable. A failed or unfinished check leaves access unverified.
+A passing check records the two accounts' access at that time. Moving Railway
+credentials and customer data still requires the separate private handoff
+and approved copy plan.
 
 For a production rehearsal, include files with known contents and eligible
 queued work. Check every referenced object, run one worker against the target,

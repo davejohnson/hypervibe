@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
+import { runGcpTransferAccessProbe } from '../../../application/gcp-transfer-access-probe.js';
+import { readDestroyedTransferProbeVersions } from '../../storage/transfer-access-probe.js';
 import type { MigrationAccessCapability } from '../../../domain/registry/provider.registry.js';
 import { railwayTransferIsolationNote, railwayTransferSetupNote } from '../../../domain/plan/gcp-infrastructure-notes.js';
 import { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
@@ -54,6 +56,13 @@ async function prepareMigrationAccess(input: Parameters<MigrationAccessCapabilit
   const slot = transferSlot(scope);
   if ([input.runtimeEmail, input.deployEmail].includes(slot.accountEmail))
     return { success: false, error: 'The copy job must use a separate service account.' };
+  if (input.mode === 'verify-copy-access') {
+    return runGcpTransferAccessProbe({
+      project, target: scope, targetEnvironmentName: target.name, sourceEnvironmentName: source.name,
+      runtimeEmail: input.runtimeEmail, deployEmail: input.deployEmail, token: input.token,
+      confirm: input.planId !== undefined, planId: input.planId,
+    });
+  }
   const restrictApp = input.mode === 'restrict-app-access';
   if (restrictApp) {
     try {
@@ -73,7 +82,8 @@ async function prepareMigrationAccess(input: Parameters<MigrationAccessCapabilit
   }
   try {
     const selected = { projectId: gcpProjectId, accountEmail: slot.accountEmail, secretId: slot.secretId };
-    const read = () => readTransferSlotEvidence(token, selected);
+    const read = () => readTransferSlotEvidence(token, selected,
+      readDestroyedTransferProbeVersions(project.id, gcpProjectId, slot.secretId));
     const evidence = await read();
     const matchesOwnership = (observed: typeof evidence) =>
       (!observed.account || observed.account.description === slot.description) &&
