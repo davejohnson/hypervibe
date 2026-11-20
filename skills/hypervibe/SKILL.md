@@ -59,7 +59,9 @@ replace them with remembered permission tables or dashboard procedures.
    changes retain their required decisions and confirmations.
 3. Apply the exact reviewed plan with `hv_apply`, supplying only its required
    confirmations after authorization. A stale or changed plan needs a fresh
-   review. Follow explicit prerequisite stages before dependent work.
+   review. When a prerequisite stage succeeds and the requested work includes
+   the next stage, prepare its plan yourself and present any changes that need
+   approval. Preparing the preview does not authorize applying it.
 4. Verify with the appropriate Hypervibe status, health, logs, or CI commands.
    Report what the evidence establishes and what remains pending or unchecked.
    A successful request is not proof of a healthy deployment or a tested restore.

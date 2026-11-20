@@ -49,6 +49,7 @@ import type { EngineAuthentication, EngineReleaseResult, EngineStateIdentity } f
 export type { EngineReleaseResult } from '../domain/ports/infrastructure-engine.port.js';
 import { engineSegmentOf } from '../domain/ports/infrastructure-engine.port.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
+import { gcpInfrastructureNotes } from '../domain/plan/gcp-infrastructure-notes.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Service } from '../domain/entities/service.entity.js';
@@ -1146,14 +1147,14 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   // The complete engine segment creates containers before operational value writes.
   const actions = [...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const warnings = [
-    'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
+    gcpInfrastructureNotes.release,
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
     ...(databaseShape && databaseAction && databaseAction.type !== 'noop' ? [databaseShape.summary] : []),
     ...(cacheSpec && !cacheReady && anyService
-      ? ['Services are connected to Redis in the next infrastructure plan, once Hypervibe has published its URL.'] : []),
+      ? [gcpInfrastructureNotes.redis] : []),
     ...(databaseSpec && !databaseCredentialReady && anyService
-      ? ['Services are connected to the database in the next infrastructure plan, once Hypervibe has created its login. Run hv_plan scope="infrastructure" again after this apply.']
+      ? [gcpInfrastructureNotes.database]
       : []),
   ];
   const observedGenerations = await serviceGenerations(token, context, environmentName);

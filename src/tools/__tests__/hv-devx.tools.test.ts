@@ -108,6 +108,42 @@ describe('hv_runs', () => {
     } finally { await t.close(); }
   });
 
+  it('explains the next steps and cost when reopening a saved Google Cloud setup plan', async () => {
+    const { project, environment } = await seedRuns();
+    // Redacted messages recorded in a 0.1.52 Google Cloud infrastructure report.
+    const warnings = [
+      'Infrastructure is planned by OpenTofu. Releasing application code is a separate step: run hv_deploy after this apply.',
+      'Database: 1 vCPU, 3.75 GB, about US$50 a month plus storage. New databases start with 14 daily backups and 7 days of point-in-time recovery; existing backup and recovery settings are preserved. Deletion protection is on.',
+      'Services are connected to the database in the next infrastructure plan, once Hypervibe has created its login. Run hv_plan scope="infrastructure" again after this apply.',
+    ];
+    const plan = { kind: 'hv_plan', scope: 'infrastructure-engine', environmentName: environment.name, warnings,
+      actions: [
+        { id: 'database:postgres', type: 'create', verified: true, resource: { kind: 'database', name: 'postgres', provider: 'gcp' } },
+        { id: 'database-credential:postgres', type: 'create', verified: true, resource: { kind: 'secret', name: 'database login', provider: 'gcp' } },
+        { id: 'service:web', type: 'create', verified: true, resource: { kind: 'service', name: 'web', provider: 'gcp' } },
+      ] };
+    const repo = new RunRepository();
+    const saved = repo.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan });
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_runs', { action: 'report', runId: saved.id });
+      const html = readFileSync(result.data.htmlPath, 'utf8');
+      expect(html).toContain('Database cost and protection');
+      expect(html).toContain('US$50 a month plus storage');
+      expect(html).toContain('14 daily backups');
+      expect(html).toContain('7 days');
+      expect(html).toContain('Deletion protection is on.');
+      expect(html).toContain('What happens next');
+      expect(html).toContain('your coding agent prepares');
+      expect(html).toContain('need your approval');
+      expect(html).toContain('Releasing the app, copying production data and switching live traffic are separate steps.');
+      expect(html).not.toContain('Warnings (');
+      expect(html).not.toContain('Run hv_plan');
+      expect(html).not.toContain('run hv_deploy');
+      expect(repo.findById(saved.id)?.plan).toEqual(plan);
+    } finally { await t.close(); }
+  });
+
   it('refreshes the report when saved actions change and rolls back a failed report write', async () => {
     const { project, environment } = await seedRuns();
     const repo = new RunRepository();

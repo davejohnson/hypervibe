@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { PlanReport, PlanReportAction } from '../../domain/plan/plan-report.js';
 import { renderPlanReportHtml } from '../plan-report-html.js';
+import { gcpInfrastructureNotes } from '../../domain/plan/gcp-infrastructure-notes.js';
 import { buildReportMap } from '../plan-report-map.js';
 
 const action = (id: string, name: string, extra: Partial<PlanReportAction> = {}): PlanReportAction => ({
@@ -46,6 +47,30 @@ describe('standalone infrastructure plan report', () => {
     }
     expect(html).toContain('data-type="replace"><strong>1</strong>');
     expect(html).toContain('data-type="create"><strong>0</strong>');
+  });
+
+  it('keeps real risks visible and leaves traffic changes in the scope of their plan', () => {
+    const destructive = 'This environment declares no services; any previously created services will be deleted.';
+    const html = renderPlanReportHtml(report([action('domain:example.com', 'example.com', { kind: 'domain' })], {
+      scope: 'infrastructure-engine', warnings: [gcpInfrastructureNotes.release, destructive, 'A new provider warning.'],
+    }));
+    expect(html).toContain('Warnings (2)</h3><ul><li>' + destructive + '</li><li>A new provider warning.</li>');
+    expect(html).toContain('Releasing the app is a separate step.');
+    const trafficPlan = report([action('domain:example.com', 'example.com', { kind: 'domain' })], {
+      scope: 'infrastructure-engine', warnings: [gcpInfrastructureNotes.release],
+    });
+    expect(renderPlanReportHtml(trafficPlan)).not.toContain('switching live traffic');
+  });
+
+  it('explains both connection prerequisites and preserves an unfamiliar qualification', () => {
+    const qualifiedCost = 'Database: shared CPU, 0.6 GB, about US$10 a month plus storage. New databases start with 7 daily backups and 7 days of point-in-time recovery; existing backup and recovery settings are preserved. Deletion protection is off. Backup verification failed.';
+    const html = renderPlanReportHtml(report([action('service:web', 'web', { kind: 'service' })], {
+      scope: 'infrastructure-engine', warnings: [gcpInfrastructureNotes.release, gcpInfrastructureNotes.database, gcpInfrastructureNotes.redis, qualifiedCost],
+    }));
+    expect(html).toContain('creates the database login and makes the Redis address available');
+    expect(html).toContain('connect your app to the database and Redis');
+    expect(html).toContain('Warnings (1)</h3><ul><li>' + qualifiedCost + '</li>');
+    expect(html).not.toContain('Database cost and protection');
   });
 
   it('gives named app resources individual cards and preserves the original review order', () => {
