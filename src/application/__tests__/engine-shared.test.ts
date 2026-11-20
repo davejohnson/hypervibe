@@ -93,6 +93,22 @@ describe('shared engine plan recording', () => {
   });
 
   it.each([
+    { gcpProjectId: 'demo-project', aws: { accountId: '111122223333', region: 'us-east-1' } },
+    { state: { provider: 'gcp' }, aws: { accountId: '111122223333', region: 'us-east-1' } },
+    { accountId: '111122223333', region: 'us-east-1' },
+    { aws: { accountId: '111122223333', region: 'us-east-1' }, accountId: '222233334444' },
+  ])('keeps a bare or conflicting saved target readable without choosing a console', (engine) => {
+    const ctx = createCommandContext();
+    const project = ctx.repos.projects.create({ name: 'legacy-target' });
+    const env = ctx.repos.environments.create({ projectId: project.id, name: 'staging' });
+    const result = recordEnginePlan({ projectId: project.id, environmentId: env.id, environmentName: env.name,
+      specRevision: 1, actions: [], warnings: [], engine });
+    const html = readFileSync(runPlanReportPath(result.planRunId), 'utf8');
+    expect(html).toContain('<dt>Target</dt><dd>');
+    expect(html).not.toContain('href="https:');
+  });
+
+  it.each([
     { provider: 'gcp', target: 'reports-demo-project' },
     { provider: 'aws', target: '111122223333' },
     { provider: 'azure', target: '51b1a746-9a7d-4558-8b83-6d76d21775c5' },
@@ -103,7 +119,7 @@ describe('shared engine plan recording', () => {
     let planActions = actions;
     const engine = provider === 'gcp' ? { gcpProjectId: target }
       : provider === 'azure' ? { azure: { subscriptionId: target, resourceGroup: 'test-group' } }
-      : { aws: { accountId: target }, teardown: true };
+      : { aws: { accountId: target, region: 'us-east-1' }, teardown: true };
     if (provider === 'gcp') {
       const bucket = 'uploads';
       const configuration = buildCloudRunConfiguration({ projectId: target, region: 'us-central1', services: [],
@@ -125,7 +141,9 @@ describe('shared engine plan recording', () => {
     expect(result.confirmActions).toEqual(expected);
     function expectReview() {
       const html = readFileSync(runPlanReportPath(result.planRunId), 'utf8');
-      expect.soft(html.includes(`<dt>Target</dt><dd>${target}</dd>`)).toBe(true);
+      const links = [...html.matchAll(/href="(https:[^"]+)"/g)].map(match => match[1]!);
+      expect(links.some(link => link.includes(target))).toBe(true);
+      if (provider === 'azure') expect(links.some(link => link.includes(target) && link.includes('test-group'))).toBe(true);
       const confirmed = [...html.matchAll(/<li id="action-\d+"[\s\S]*?<\/details><\/li>/g)]
         .map(([row]) => row).filter(row => row.includes('Confirmation required'))
         .map(row => /<dt>Action ID<\/dt><dd><code>([^<]+)<\/code>/.exec(row)?.[1]);

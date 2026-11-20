@@ -1,7 +1,8 @@
 import type { EmptyTransferSlotCapability } from '../../../domain/registry/provider.registry.js';
+import { railwayTransferSetupNote } from '../../../domain/plan/gcp-infrastructure-notes.js';
 import { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 import { readTransferSlotEvidence, TransferEvidenceError } from './gcp-transfer-slot-evidence.js';
-import { emptySlotWarning, transferSlot } from './tofu/transfer-slot.js';
+import { transferSlot } from './tofu/transfer-slot.js';
 import { hasGcpProjectSetup, runGcpProjectSetup } from '../../../domain/services/gcp-project-setup.service.js';
 
 export const gcpEmptyTransferSlot: EmptyTransferSlotCapability = {
@@ -84,7 +85,7 @@ async function prepareEmptyTransferSlot(input: Parameters<EmptyTransferSlotCapab
       target: target.name,
       accountEmail: slot.accountEmail,
       secretId: slot.secretId,
-      message: emptySlotWarning,
+      message: railwayTransferSetupNote,
     };
   } catch (error) {
     if (error instanceof TransferEvidenceError) return { success: false, error: error.message };

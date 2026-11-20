@@ -643,7 +643,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           if (payload.mode !== 'preview' || typeof payload.planId !== 'string' || !payload.planId.trim()) {
             return commandError('PROVIDER_ERROR', 'The empty transfer slot preview did not return a saved plan ID. Preview again.');
           }
-          const message = `Apply the reviewed empty transfer slot plan ${payload.planId} for ${targetProject.name} (${migrationSourceEnvironment} to ${environment})?`;
+          const message = `Apply plan ${payload.planId} to prepare access for a future data copy from ${migrationSourceEnvironment} to ${environment} in ${targetProject.name}?`;
           const retryInput = {
             action: 'prepare', provider, project: projectRef!, environment: environment!,
             migrationSourceEnvironment: migrationSourceEnvironment!, migrationAccess,
@@ -652,7 +652,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           };
           return {
             ...commandSuccess({ ...projectContext, ...payload }, {
-              hint: `Review the service account, empty secret and access grants. After approval, repeat this call with --confirm --gcp-setup-plan-id ${payload.planId}.`,
+              hint: `Review the copy job’s account and its permission to read the empty secret reserved for connection details. After approval, repeat this call with --confirm --gcp-setup-plan-id ${payload.planId}.`,
               agentInstruction: { action: 'ask_user', message },
             }),
             confirmation: { message, retryInput, completeInput: true },

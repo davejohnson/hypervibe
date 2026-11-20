@@ -676,6 +676,8 @@ describe('hv_connections', () => {
         migrationSourceEnvironment: input.migrationSourceEnvironment, confirm: undefined }));
       expect(preview.confirmation.completeInput).toBe(true);
       expect(preview.confirmation.retryInput).toEqual({ ...input, confirm: true, gcpSetupPlanId: planId });
+      expect(preview.confirmation.message).toContain('future data copy from source to destination in transfer-app');
+      expect(preview.hint).toContain('the copy job');
       expect(preview.hint).toContain('--gcp-setup-plan-id ' + planId);
       prepare.mockResolvedValueOnce({ success: true, mode: 'confirm' });
       const output: string[] = [];

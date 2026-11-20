@@ -94,8 +94,19 @@ describe('standalone infrastructure plan report', () => {
 
   it('explains how approval works when reviewing a saved project setup', () => {
     const setup = report([action('create-project', 'Google Cloud project')], { approval: 'whole-plan' });
-    expect(renderPlanReportHtml(setup)).toContain('Applying this setup requires approval of the whole plan.');
-    expect(renderPlanReportHtml(report([]))).not.toContain('approval of the whole plan');
+    expect(renderPlanReportHtml(setup)).toContain('Approve the whole plan in the chat or terminal where you requested it.');
+    expect(renderPlanReportHtml(report([]))).not.toContain('Approve the whole plan');
+  });
+
+  it('takes the reader from the copy explanation to the reserved secret when its row is unambiguous', () => {
+    const scope = { scope: 'Google Cloud project setup', setupPurpose: 'railway-transfer' as const };
+    const unrelated = action('secret:app', 'App API key', { kind: 'secret', type: 'noop' });
+    const slot = action('transfer-slot:secret:one', 'Empty migration secret', { kind: 'secret' });
+    const render = (actions: PlanReportAction[]) => renderPlanReportHtml(report(actions, scope));
+    const link = '<a href="#action-1">View the secret in this plan</a>';
+    expect(render([unrelated, slot])).toContain(link);
+    expect(render([unrelated, { ...slot, type: 'noop' }])).toContain(link);
+    expect(render([slot, { ...slot, id: 'transfer-slot:secret:two' }])).not.toContain('View the secret in this plan');
   });
 
   it('escapes every untrusted text boundary and embeds only its hashed script and stylesheet', () => {

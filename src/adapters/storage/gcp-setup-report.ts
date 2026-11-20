@@ -1,4 +1,3 @@
-import { emptySlotWarning } from '../providers/gcp/tofu/transfer-slot.js';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,6 +13,7 @@ const intentFile = /^setup-([a-f0-9]{64})\.json$/;
 type SetupScope = { projectId: string; gcpProjectId: string; projectName?: string; dataDir?: string };
 interface ReportSource {
   planId: string;
+  setupPurpose?: 'railway-transfer';
   projectName?: string;
   createdAt?: string;
   planned: { actions: unknown; blockers?: unknown };
@@ -43,10 +43,11 @@ function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
   }
   const report = makePlanReport({
     planId: source.planId, project: source.projectName ?? scope.projectName ?? scope.projectId,
-    target: scope.gcpProjectId, scope: 'Google Cloud project setup', createdAt: source.createdAt,
+    target: scope.gcpProjectId, cloudTarget: { provider: 'gcp', projectId: scope.gcpProjectId },
+    scope: 'Google Cloud project setup', createdAt: source.createdAt,
     actions: source.planned.actions, blocked: source.planned.blockers, approval: 'whole-plan',
+    setupPurpose: source.setupPurpose,
   });
-  if (report.actions.some(action => action.id.startsWith('transfer-slot:') && action.type !== 'noop')) report.warnings.push(emptySlotWarning);
   if (report.actions.length !== source.planned.actions.length) throw new Error('The saved Google Cloud setup actions could not be read.');
 
   const changed = new Map(report.actions.filter(action => action.type !== 'noop')
@@ -133,6 +134,7 @@ export function findSavedSetupReport(projectId: string, gcpProjectId: string, pl
   if (!fs.existsSync(directory)) return;
   const report = storedReport(directory, scope, planId);
   if (report) return writePlanReport(directory, { ...report, approval: 'whole-plan',
+    cloudTarget: { provider: 'gcp', projectId: gcpProjectId },
     actions: report.actions.map(action => ({ ...action, requiresConfirm: false })) });
 
   // Older releases keyed their current approval by intent. Search only those
@@ -145,6 +147,7 @@ export function findSavedSetupReport(projectId: string, gcpProjectId: string, pl
     if (saved?.planId !== planId || saved.intent !== intent) continue;
     return saveSetupReport(scope, {
       planId, planned: { actions: record(saved.planned).actions, blockers: record(saved.planned).blockers },
+      setupPurpose: saved.setupPurpose === 'railway-transfer' ? saved.setupPurpose : undefined,
       configuration: saved.configuration, projectName: typeof saved.projectName === 'string' ? saved.projectName : undefined,
       createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : fs.statSync(file).mtime.toISOString(),
     });

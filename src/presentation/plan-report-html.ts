@@ -3,6 +3,7 @@ import type { PlanReport, PlanReportAction } from '../domain/plan/plan-report.js
 import type { PlanActionType } from '../domain/plan/plan.types.js';
 import { actionTitle, buildReportMap, humanize, lanes, namedResourceKinds, providerName, type MapGroup } from './plan-report-map.js';
 import { planReportBrowser } from './plan-report-browser.js';
+import { cloudFacts } from './plan-report-links.js';
 import { groupPlanNotices } from './plan-report-notices.js';
 import { planReportStyle } from './plan-report-style.js';
 
@@ -30,9 +31,10 @@ const csp = `default-src 'none'; script-src 'sha256-${digest(planReportBrowser)}
 function fact(label: string, value?: string) {
   return value ? `<div><dt>${label}</dt><dd>${value}</dd></div>` : '';
 }
-function notice(label: string, messages: string[], className: string) {
+function notice(label: string, messages: string[], className: string, detail?: { index: number; label: string }) {
   const heading = className === 'info' ? label : `${label} (${messages.length})`;
-  return messages.length ? `<div class="notice ${className}"><h3>${heading}</h3><ul>${messages.map(message => `<li>${escape(message)}</li>`).join('')}</ul></div>` : '';
+  const link = detail ? ` <a href="#action-${detail.index}">${escape(detail.label)}</a>` : '';
+  return messages.length ? `<div class="notice ${className}"><h3>${heading}</h3><ul>${messages.map(message => `<li>${escape(message)}</li>`).join('')}</ul>${link}</div>` : '';
 }
 function node(group: MapGroup) {
   const provider = providerName(group.provider);
@@ -101,14 +103,17 @@ export function renderPlanReportHtml(report: PlanReport): string {
   }).join('');
   const rows = report.actions.map((action, index) =>
     actionRow(action, index, map.groupByAction.get(action)!, indexes)).join('');
-  const { warnings, costs, next } = groupPlanNotices(report);
+  const { warnings, costs, next, detail } = groupPlanNotices(report);
   const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', warnings, 'warning')
-    + notice('Database cost and protection', costs, 'info') + notice('What happens next', next, 'info');
+    + notice('Database cost and protection', costs, 'info') + notice('What happens next', next, 'info', detail);
   const metadata = [
-    ['Scope', humanize(report.scope)], ['Target', report.target], ['Billing account', report.billingAccount],
-    ['Plan ID', report.planId], ['Created', report.createdAt],
-    ['Approval', report.approval === 'whole-plan' ? 'Applying this setup requires approval of the whole plan.' : undefined],
-  ].map(([label, value]) => fact(label!, value && escape(value))).join('');
+    fact('Scope', escape(humanize(report.scope))),
+    ...cloudFacts(report).map(({ label, value, href }) => typeof value === 'string' ? fact(label, href
+      ? `<a href="${escape(href)}" rel="noreferrer" aria-label="${escape(label + ' ' + value)}">${escape(value)}</a>`
+      : escape(value)) : ''),
+    fact('Plan ID', escape(report.planId)), fact('Created', report.createdAt && escape(report.createdAt)),
+    fact('Approval', report.approval === 'whole-plan' ? 'Approve the whole plan in the chat or terminal where you requested it.' : undefined),
+  ].join('');
   const flaggedCounts = [
     [report.actions.filter(action => action.requiresConfirm).length, 'Confirmation required'],
     [report.actions.filter(action => action.billable).length, 'May incur charges'],

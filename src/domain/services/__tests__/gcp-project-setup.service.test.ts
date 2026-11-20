@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { composeGcpProjectConfiguration, runGcpProjectSetup, type GcpProjectSetupParams } from '../gcp-project-setup.service.js';
 import { buildGcpBootstrapConfiguration, buildGcpPreparationConfiguration } from '../../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
@@ -138,8 +139,11 @@ describe('one saved project setup plan', () => {
     const titles = [...html.matchAll(/<span class="action-name">([^<]+)<\/span>/g)].map(match => match[1]);
     expect(titles.sort()).toEqual(['Copy-job service account · ' + slot.accountEmail, 'Empty migration secret container · ' + slot.secretId,
       'Allow the copy-job account to read ' + slot.secretId].sort());
-    expect(html).toContain('Hypervibe will leave this secret empty.');
-    expect(html).toContain('verify that the app cannot read them through a project-wide or inherited grant');
+    expect(html).not.toContain('Warnings (');
+    expect(html).toContain('What happens next</h3>');
+    expect(html).toContain('the connection details the copy job will use to read your Railway database or documents');
+    expect(html).toContain('Hypervibe verifies that the copy job has permission to read it and your app does not');
+    expect(html).toContain('Data moves only after you approve a separate copy plan.');
 
     const createTime = '2026-10-18T00:05:00Z';
     const savedRows = rows.map(row => ({ ...row, values: { ...row.change.after,
@@ -180,6 +184,39 @@ describe('one saved project setup plan', () => {
       approvedAddresses: expect.arrayContaining([account, secret, grant]) }));
     expect(managed.apply.mock.calls[0][0].approvedAddresses).toHaveLength(3);
     expect(managed.plan).toHaveBeenCalledTimes(1);
+    if (observation === 'original resources') {
+      const unchanged = savedRows.map(row => ({ ...row, change: { actions: ['no-op'], before: row.values, after: row.values } }));
+      managed.plan.mockImplementation(async (input: Parameters<typeof planActions>[0] & { verifyPlannedChanges?: (raw: unknown) => boolean }) => {
+        if (input.verifyPlannedChanges) expect(input.verifyPlannedChanges({ resource_changes: unchanged })).toBe(true);
+        const result = await planActions(input);
+        return { ...result, actions: result.actions.map(action =>
+          action.id.startsWith('transfer-slot:') ? { ...action, type: 'noop' as const } : action) };
+      });
+      const repeat = await runGcpProjectSetup({ ...params, transferSlotReview: { target, evidence: await observeTransferAfterApply() } }, dependencies);
+      expect(repeat.success, repeat.error).toBe(true);
+      expect(fs.readFileSync(repeat.htmlPath!, 'utf8')).toContain('the connection details the copy job will use to read your Railway database or documents');
+      const otherSetup = await runGcpProjectSetup(parameters('storage'), dependencies);
+      expect(otherSetup.success, otherSetup.error).toBe(true);
+      expect(fs.readFileSync(otherSetup.htmlPath!, 'utf8')).not.toContain('the connection details the copy job will use to read your Railway database or documents');
+    }
+  });
+  it('explains an archived transfer plan while keeping a separate access warning visible', () => {
+    const params = parameters('access');
+    const paths = engineStatePaths({ provider: 'gcp', projectId: params.projectId, environmentId: params.gcpProjectId, partition: 'project-shared' }, directory);
+    ensureEngineStateDirectories(paths);
+    const legacy = 'Hypervibe will leave this secret empty. Before adding credentials, verify that the app cannot read them through a project-wide or inherited grant. The data copy is a separate step.';
+    const risk = 'The app has an unexpected permission.';
+    const planId = 'setup-76543210-1234-4123-8123-456789012345';
+    const report = { planId, scope: 'Google Cloud project setup', target: params.gcpProjectId, project: params.projectId,
+      blocked: [], warnings: [legacy, risk], actions: [{ id: 'transfer-slot:secret:1234', name: 'Empty migration secret container',
+        type: 'create', provider: 'gcp', kind: 'secret', fields: [], addresses: [], dependsOn: [], verified: true }] };
+    const checksum = createHash('sha256').update(JSON.stringify([params.projectId, report])).digest('hex');
+    fs.writeFileSync(path.join(paths.plans, planId + '.report.json'), JSON.stringify({ report, checksum, projectId: params.projectId }));
+    const reopened = findSavedSetupReport(params.projectId, params.gcpProjectId, planId, undefined, directory);
+    const html = fs.readFileSync(reopened!.htmlPath, 'utf8');
+    expect(html).toContain('Warnings (1)</h3><ul><li>' + risk + '</li>');
+    expect(html).not.toContain(legacy);
+    expect(html).toContain('the connection details the copy job will use to read your Railway database or documents');
   });
   it('rejects confirmation with changed scope before planning or applying', async () => {
     const managed = engine();
