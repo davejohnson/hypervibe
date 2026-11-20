@@ -248,8 +248,10 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
     job in the shared environment, starts it, waits for it and deletes it. The
     job runs `psql` from Microsoft's own PostgreSQL image
     (`mcr.microsoft.com/azurelinux/base/postgres`, pinned by digest) with the
-    script and the deploy identity's short-lived Entra token as job secrets,
-    which Azure does not return. The job is deleted whatever happened; a failure
+    script and the deploy identity's short-lived Entra token as job secrets.
+    Someone who may manage the resource group can list a job's secrets while it
+    exists (they could also make themselves the server's administrator), so
+    the job is deleted whatever happened; a failure
     to delete it is reported as an error, and the next run removes a leftover
     before it starts. A failed script's output is in the environment's logs
     under the job's name (`<environment prefix>-dbsetup`). This replaced a

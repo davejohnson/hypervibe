@@ -99,17 +99,20 @@ describe('Azure database setup inside the private network', () => {
   const job = { id: `${group}/providers/Microsoft.App/jobs/hv-app-test-dbsetup`, environmentId: `${group}/providers/Microsoft.App/managedEnvironments/hv-app-shared-apps`,
     host: 'srv.postgres.database.azure.com', user: 'hypervibe-app' };
   /** Azure's job API as documented: a job is created, started, reports its execution's status, and is gone after deletion. */
-  const azureJobs = (options: { leftover?: boolean; status?: string; undeletable?: boolean; refuseCreate?: boolean; loseStart?: boolean } = {}) => {
-    const state = { job: options.leftover ? { stale: true } as Record<string, unknown> : undefined as Record<string, unknown> | undefined, created: [] as Array<Record<string, any>>, deleted: 0, starts: 0 };
+  const azureJobs = (options: { leftover?: boolean; status?: string; undeletable?: boolean; refuseCreate?: boolean; loseStart?: boolean; foreign?: boolean; bareStart?: boolean; flakyStatus?: boolean } = {}) => {
+    const state = { job: options.leftover ? { tags: options.foreign ? {} : { 'hv-setup': 'database' } } as Record<string, unknown> : undefined as Record<string, unknown> | undefined, created: [] as Array<Record<string, any>>, deleted: 0, starts: 0, reads: 0 };
     const azure = fake((method, url, body) => {
       const path = new URL(url).pathname;
       if (path === job.environmentId) return json(200, { location: 'westus2' });
       if (path === `${job.id}/start` && method === 'POST') {
         state.starts++;
         if (options.loseStart) throw new TypeError('fetch failed');
-        return state.job ? json(200, { name: 'run-1' }) : json(404);
+        return state.job ? (options.bareStart ? json(202) : json(200, { name: 'run-1' })) : json(404);
       }
-      if (path === `${job.id}/executions`) return json(200, { value: [{ name: 'earlier', properties: { status: 'Failed' } }, { name: 'run-1', properties: { status: options.status ?? 'Succeeded' } }] });
+      if (path === `${job.id}/executions`) {
+        if (options.flakyStatus && state.reads++ === 0) throw new TypeError('fetch failed');
+        return json(200, { value: [{ name: 'run-1', properties: { status: options.status ?? 'Succeeded' } }] });
+      }
       if (path !== job.id) throw new Error(`Unexpected call ${method} ${url}`);
       if (method === 'PUT' && options.refuseCreate) return json(403, { error: { code: 'AuthorizationFailed', message: 'no' } });
       if (method === 'PUT') { state.job = JSON.parse(body!); state.created.push(state.job!); return json(201); }
@@ -118,7 +121,7 @@ describe('Azure database setup inside the private network', () => {
         if (!state.job) return json(204);
         state.job = undefined; state.deleted++; return json(202);
       }
-      return state.job ? json(200, { properties: { provisioningState: 'Succeeded' } }) : json(404);
+      return state.job ? json(200, { tags: state.job.tags, properties: { provisioningState: 'Succeeded' } }) : json(404);
     });
     return { azure, state };
   };
@@ -132,6 +135,7 @@ describe('Azure database setup inside the private network', () => {
     expect(state.created).toHaveLength(1);
     const { location, properties } = state.created[0]!;
     expect(location).toBe('westus2');
+    expect(state.created[0]!.tags).toEqual({ 'hv-setup': 'database' });
     expect(properties).toMatchObject({ environmentId: job.environmentId, configuration: { triggerType: 'Manual', replicaRetryLimit: 0 } });
     // The login token and the script are secrets; the container's settings only refer to them.
     expect(properties.configuration.secrets).toEqual([{ name: 'token', value: 'token-for-https://ossrdbms-aad.database.windows.net/.default' }, { name: 'script', value: 'SELECT 1;\n' }]);
@@ -157,6 +161,20 @@ describe('Azure database setup inside the private network', () => {
   it('reports a failed script and still deletes the job', async () => {
     const { azure, state } = azureJobs({ status: 'Failed' });
     await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow(/database setup job failed.*logs under hv-app-test-dbsetup/);
+    expect(state.job).toBeUndefined();
+  });
+
+  it('never deletes or replaces a job of the same name that it did not create', async () => {
+    const { azure, state } = azureJobs({ leftover: true, foreign: true });
+    await expect(runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast)).rejects.toThrow(/already exists and Hypervibe did not create it/);
+    expect(azure.calls.filter((call) => call.method !== 'GET' && !call.url.startsWith('https://login.'))).toEqual([]);
+    expect(state.job).toBeDefined();
+  });
+
+  it('follows the run when Azure accepts the start without naming it, and through one unanswered status read', async () => {
+    const { azure, state } = azureJobs({ bareStart: true, flakyStatus: true });
+    await runAzureSetupSql(azure.tokens, job, 'SELECT 1;\n', fast);
+    expect(state.starts).toBe(1);
     expect(state.job).toBeUndefined();
   });
 

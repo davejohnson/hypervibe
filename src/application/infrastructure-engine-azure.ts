@@ -447,7 +447,8 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const loginActions: PlanAction[] = environmentSpec.database && (!binding.databaseLoginAt || (needsWaker && !binding.wakerLoginAt)) ? [{
     id: 'database-login:postgres', type: 'create', verified: true, resource: { kind: 'secret', name: ENGINE_DATABASE_URL_KEY, provider: 'azure' },
     reason: `Hypervibe will create ${environmentName}'s database and login on ${context.shared.serverName}${needsWaker ? ', and a read-only login for the worker\'s scale rule' : ''}, and store ${ENGINE_DATABASE_URL_KEY} in Key Vault. The server stays closed to the internet: the step runs as a short job inside the project's private network.`,
-    ...(sharedChanging.includes('shared:database') ? { dependsOn: ['shared:database'] } : {}),
+    // The setup job runs in the shared app environment, so it waits for that and its network as well as the server.
+    dependsOn: sharedChanging.filter((id) => ['shared:database', 'shared:apps', 'shared:network'].includes(id)),
     metadata: { operation: AZURE_DATABASE_LOGIN_OPERATION, subscriptionId: context.connection.subscriptionId, host: context.shared.databaseHost, waker: needsWaker },
   }] : [];
 

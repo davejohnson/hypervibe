@@ -204,10 +204,13 @@ export interface AzureSetupJob {
  * the internet. Setup SQL runs where the apps run: Hypervibe creates a one-off
  * Container Apps job in the project's private network, starts it, waits for it
  * to finish and deletes it. The job logs in as the deploy identity with a
- * short-lived Entra token; the token and the script are job secrets, which
- * Azure never returns. The job is deleted whatever happened, and a failure to
- * delete it is an error.
+ * short-lived Entra token; the token and the script are job secrets. Azure
+ * leaves secrets out of ordinary reads, but someone who may manage the resource
+ * group can list them while the job exists, so the job is deleted whatever
+ * happened and a failure to delete it is an error. The job carries a tag, and
+ * Hypervibe never deletes or replaces a job of that name without it.
  */
+const SETUP_TAG = { 'hv-setup': 'database' };
 export async function runAzureSetupSql(tokens: AzureTokenProvider, job: AzureSetupJob, script: string, options: { pollMs?: number } = {}): Promise<void> {
   const pollMs = options.pollMs ?? 5000;
   const wait = () => new Promise((done) => setTimeout(done, pollMs));
@@ -230,14 +233,19 @@ export async function runAzureSetupSql(tokens: AzureTokenProvider, job: AzureSet
     }
     return last;
   };
-  const stale = await remove();
+  const existing = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', url);
+  if (existing.status === 200 && (existing.body.tags as Record<string, string> | undefined)?.['hv-setup'] !== SETUP_TAG['hv-setup']) {
+    throw new Error(`A job named ${name} already exists and Hypervibe did not create it, so database setup did not run. Rename the service that uses that name.`);
+  }
+  if (existing.status !== 200 && existing.status !== 404) throw new Error(`Hypervibe could not check for an earlier database setup job (${azureError(existing)}).`);
+  const stale = existing.status === 404 ? undefined : await remove();
   if (stale) throw new Error(`Hypervibe could not remove an earlier database setup job, ${name} (${stale}).`);
   let failure: unknown;
   try {
     // A job must be in its environment's region, which is the shared network's and not always the app's.
     const environment = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${job.environmentId}?${APPS_API}`);
     if (environment.status !== 200 || typeof environment.body.location !== 'string') throw new Error(`Hypervibe could not read the project's Container Apps environment (${azureError(environment)}).`);
-    const created = await azureRest(tokens, AZURE_SCOPES.arm, 'PUT', url, { location: environment.body.location, properties: {
+    const created = await azureRest(tokens, AZURE_SCOPES.arm, 'PUT', url, { location: environment.body.location, tags: SETUP_TAG, properties: {
       environmentId: job.environmentId, workloadProfileName: 'Consumption',
       configuration: { triggerType: 'Manual', replicaTimeout: 600, replicaRetryLimit: 0, manualTriggerConfig: { parallelism: 1, replicaCompletionCount: 1 },
         secrets: [{ name: 'token', value: await tokens.get(AZURE_SCOPES.postgres) }, { name: 'script', value: script }] },
@@ -256,11 +264,12 @@ export async function runAzureSetupSql(tokens: AzureTokenProvider, job: AzureSet
       await wait();
     }
     const started = await azureRest(tokens, AZURE_SCOPES.arm, 'POST', `${ARM}${job.id}/start?${APPS_API}`);
-    const execution = started.body.name;
-    if (![200, 202].includes(started.status) || typeof execution !== 'string') throw new Error(`Hypervibe could not start the database setup job (${azureError(started)}).`);
+    if (![200, 202].includes(started.status)) throw new Error(`Hypervibe could not start the database setup job (${azureError(started)}).`);
+    // The job is new and started once, so its only run is this one; Azure may accept the start without naming it.
     for (let attempt = 0; ; attempt++) {
-      const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${job.id}/executions?${APPS_API}`);
-      const status = ((read.body.value ?? []) as Array<{ name?: string; properties?: { status?: string } }>).find((entry) => entry.name === execution)?.properties?.status;
+      // One unanswered status read must not end a script that may be half way through.
+      const read = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${job.id}/executions?${APPS_API}`).catch(() => ({ status: 0, body: {} as Record<string, unknown> }));
+      const status = ((read.body.value ?? []) as Array<{ properties?: { status?: string } }>)[0]?.properties?.status;
       if (status === 'Succeeded') break;
       if (status === 'Failed' || status === 'Stopped' || status === 'Degraded') throw new Error(`The database setup job ${status === 'Failed' ? 'failed' : `ended as ${status}`}. Its output is in the project's Container Apps logs under ${name}.`);
       if (attempt >= 180) throw new Error(`The database setup job did not finish in time${status ? ` (${status})` : ''}.`);
