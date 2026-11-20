@@ -1,6 +1,6 @@
 import { dnsZoneScopeForDomain } from '../domain/services/domain-scope.js';
 import { classifyWakerReadError, type WakerReadFailure } from './waker-read-error.js';
-import { publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
+import { checkHmacCreateAccess, publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
 import { repositorySourceArchive } from './repository-source.js';
 import { healthCheckFailed, strictHealthCheck } from '../domain/services/release-health.js';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
@@ -730,6 +730,45 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   return engine.plan(ctx, params);
 }
 
+function storageS3AccessMessage(message: string, environmentName: string): string {
+  return `${message} Run hv_launch env=${JSON.stringify(environmentName)} to review S3 access, or preview hv_connections provider="cloudrun" action="prepare" environment=${JSON.stringify(environmentName)} gcsAccess="s3" for this project.`;
+}
+
+/** Inspect the owned key pair before asking Google about access to create another. */
+export async function observeStorageS3Access(token: string, context: EngineContext, environmentName: string, spec: EnvironmentSpec): Promise<
+  { state: 'ready'; ready: string[]; pending: string[]; secretIds: string[]; versions: Record<string, string> }
+  | { state: 'needs_access' | 'blocked'; message: string }
+> {
+  const ready: string[] = [];
+  const pending: string[] = [];
+  const secretIds: string[] = [];
+  const versions: Record<string, string> = {};
+  for (const [storageName, storage] of Object.entries(spec.storage ?? {})) {
+    if (storage.access !== 's3') continue;
+    let complete = true;
+    for (const key of S3_COMPATIBLE_SECRET_KEYS) {
+      const secretKey = `${storageName}_${key}`;
+      const secretId = engineSecretId(environmentName, secretKey);
+      secretIds.push(secretId);
+      const observed = await observeSecret(token, context.gcpProjectId, secretId);
+      if (observed.state === 'unknown') return { state: 'blocked', message: observed.reason };
+      if (observed.state === 'present' && (observed.value.labels['managed-by'] !== 'hypervibe' || observed.value.labels['hv-environment'] !== labelValue(context.environment.id))) {
+        return { state: 'blocked', message: `Secret Manager already has ${secretId}, but its ownership does not match this environment.` };
+      }
+      if (observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.latestVersion) versions[secretKey] = observed.value.latestVersion;
+      else complete = false;
+    }
+    if (complete) ready.push(storageName);
+    else pending.push(storageName);
+  }
+  if (pending.length) {
+    const access = await checkHmacCreateAccess(token, context.gcpProjectId);
+    if (access.state === 'missing') return { state: 'needs_access', message: storageS3AccessMessage(access.message, environmentName) };
+    if (access.state === 'unknown') return { state: 'blocked', message: access.message };
+  }
+  return { state: 'ready', ready, pending, secretIds, versions };
+}
+
 /** Google Cloud's plan: Cloud Run, Cloud SQL, storage, queues, Redis and custom domains. */
 export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   project: Project;
@@ -851,26 +890,10 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (missingKeys.length && !outsideContainersMissing) {
     return { blocked: [missingOutsideKeysMessage(environmentName, missingKeys)], missingOutsideKeys: missingKeys };
   }
-  // S3-compatible bucket access: Hypervibe-owned access keys, published before services are wired.
-  const s3Storage = Object.entries(environmentSpec!.storage ?? {}).filter(([, storage]) => storage.access === 's3').map(([name]) => name);
-  const s3Ready: string[] = [];
-  const s3SecretIds: string[] = [];
-  for (const storageName of s3Storage) {
-    let ready = true;
-    for (const key of S3_COMPATIBLE_SECRET_KEYS) {
-      const secretKey = `${storageName}_${key}`;
-      const secretId = engineSecretId(environmentName, secretKey);
-      s3SecretIds.push(secretId);
-      const observed = await observeSecret(token, context.gcpProjectId, secretId);
-      if (observed.state === 'unknown') return { blocked: [observed.reason] };
-      if (observed.state === 'present' && observed.value.labels['hv-environment'] !== labels['hv-environment']) {
-        return { blocked: [`Secret Manager already has ${secretId}, but it is not owned by this Hypervibe environment.`] };
-      }
-      if (observed.state === 'present' && observed.value.hasEnabledVersion && observed.value.latestVersion) secretVersions[secretKey] = observed.value.latestVersion;
-      else ready = false;
-    }
-    if (ready) s3Ready.push(storageName);
-  }
+  const credentials = await observeStorageS3Access(token, context, environmentName, environmentSpec!);
+  if (credentials.state !== 'ready') return { blocked: [credentials.message] };
+  const { ready: s3Ready, pending: pendingS3Storage, secretIds: s3SecretIds } = credentials;
+  Object.assign(secretVersions, credentials.versions);
   const existing = await listEngineSecrets(token, context.gcpProjectId, context.environment.id);
   if (existing.state === 'unknown') return { blocked: [existing.reason] };
   const desiredIds = new Set([...desiredKeys.map((key) => engineSecretId(environmentName, key)), ...(databaseSpec ? [databaseSecretId] : []),
@@ -1122,7 +1145,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       secretId: databaseSecretId, iamUser: wakeUser },
   }] : [];
   const cacheAction = serviceActions.find((action) => action.id === 'cache:redis');
-  const s3CredentialActions: PlanAction[] = s3Storage.filter((name) => !s3Ready.includes(name)).map((storageName) => {
+  const s3CredentialActions: PlanAction[] = pendingS3Storage.map((storageName) => {
     const bucketAction = serviceActions.find((action) => action.id === `storage:${storageName}`);
     return {
       id: `storage-s3-key:${storageName}`, type: 'create', verified: true,
@@ -1286,6 +1309,10 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
   const token = await context.adapter.engineAccessToken();
 
+  if (document.actions.some(action => action.type !== 'noop' && action.metadata?.operation === ENGINE_STORAGE_S3_KEY_OPERATION)) {
+    const access = await checkHmacCreateAccess(token, context.gcpProjectId);
+    if (access.state !== 'granted') return { kind: 'blocked', reason: access.state === 'missing' ? storageS3AccessMessage(access.message, environmentName) : access.message };
+  }
   const claimTarget = () => claimGcpApplyTarget(ctx, context, params.spec.environments[environmentName]?.hosting.gcpProjectId);
   const applyToTarget = (change: () => Promise<ActionResult> | ActionResult): Promise<ActionResult> | ActionResult => {
     const conflict = claimTarget();

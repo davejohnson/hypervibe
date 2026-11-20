@@ -273,13 +273,6 @@ export function isCloudPreparedForCache(project: Pick<Project, 'policies'> | nul
   return Boolean(record && MEMORYSTORE_PREPARE_ADDONS.lifecycle.requiredRoles.every((role) => record.requiredRoles.includes(role)));
 }
 
-/** Whether GCP setup granted S3-compatible key management (the gcsAccess="s3" add-on). */
-export function isCloudPreparedForStorageS3(project: Pick<Project, 'policies'> | null | undefined, environmentProjectId?: string): boolean {
-  if (!project) return false;
-  const record = getCloudPreparation(project, 'cloudrun', environmentProjectId);
-  return Boolean(record && GCS_PREPARE_ADDONS.s3.requiredRoles.every((role) => record.requiredRoles.includes(role)));
-}
-
 export function withCloudPreparationRecord(
   policies: Record<string, unknown>,
   provider: CloudPrepareProvider,
