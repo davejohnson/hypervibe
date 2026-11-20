@@ -3,8 +3,6 @@ import { isDeepStrictEqual } from 'node:util';
 import type { EngineConfiguration } from '../../../../domain/ports/infrastructure-engine.port.js';
 import type { TransferSlotEvidence } from '../gcp-transfer-slot-evidence.js';
 
-export const emptySlotWarning =
-  'Hypervibe will leave this secret empty. Before adding credentials, verify that the app cannot read them through a project-wide or inherited grant. The data copy is a separate step.';
 export interface TransferSlotTarget {
   projectId: string;
   sourceEnvironmentId: string;

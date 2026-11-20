@@ -60,6 +60,7 @@ export interface GcpProjectSetupResult {
 interface SetupManifest { contributions: Record<string, EngineConfiguration> }
 interface SetupPreview {
   planId: string; baseline: string; intent: string; planned: EnginePlanResult;
+  setupPurpose?: 'railway-transfer';
   manifest: SetupManifest; configuration: EngineConfiguration;
   createdAt?: string; projectName?: string;
   requiresPlanId?: true;
@@ -304,6 +305,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       saved = { planId: `setup-${randomUUID()}`, createdAt: new Date().toISOString(), projectName: params.projectName,
         intent, baseline: digest(existing), manifest, configuration, planned: undefined as unknown as EnginePlanResult };
     }
+    if (slot) saved.setupPurpose = 'railway-transfer';
     let engine = overrides?.engine;
     if (!engine) {
       const binary = await ensureEngineBinary();

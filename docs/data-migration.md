@@ -27,11 +27,11 @@ saved HTML plan. To create the listed resources, repeat that request with
 copy account Secret Accessor on that container. Hypervibe retains these
 resources in the target's managed project setup.
 
-Keep the container empty while the app can read secrets at project scope.
-Any later permission review must identify the transfer container by its recorded
-native identity and exclude it from app grants. Before publishing a Railway
-credential, verify that the app is denied on the exact transfer slot, that the
-copy job can read it, and that the app cannot read the staged database dump.
+Hypervibe leaves the container empty. Before storing any Railway connection
+details, Hypervibe must verify that the copy job can read the selected secret
+and the app cannot, including through inherited permissions. The permission
+review must use the container’s recorded native identity, exclude it from app
+grants, and verify that the app cannot read the staged database dump.
 Credential publication, dump isolation and single-use job execution still
 require a separate reviewed workflow.
 
