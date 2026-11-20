@@ -258,6 +258,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
 
       await runDisposableFixture({ journal, save, cleanupOnly, signal: interrupted.signal, driver: {
         inventory,
+        replacedOnRestart: (resource) => resource.type === 'network-interface',
         observe: async (resource) => (await inventoryNow()).some((entry) => resourceKey(entry) === resourceKey(resource)) ? 'present' : 'absent',
         assertNoop: async () => {
           if (!inSpec()) return; // Teardown removed the environment from the spec; there is nothing left to plan.
