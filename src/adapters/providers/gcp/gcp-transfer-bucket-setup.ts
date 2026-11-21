@@ -13,7 +13,6 @@ import { EnvironmentRepository } from '../../db/repositories/environment.reposit
 import { OpenTofuEngine } from '../../engine/opentofu/engine.js';
 import { enginePluginCacheDir, ensureEngineBinary } from '../../engine/opentofu/install.js';
 import { getSecretStore } from '../../secrets/secret-store.js';
-import { RailwayAdapter } from '../railway/railway.adapter.js';
 import { cloudRunJobRequest } from './gcp-cloud-run.client.js';
 import { TransferEvidenceError } from './gcp-transfer-slot-evidence.js';
 import { gcpEngineBackend, storageEngineKey } from './tofu/gcp-engine.backend.js';
@@ -137,9 +136,11 @@ export async function prepareTransferBucketJob(input: Request, target: TransferS
       const store = new EnvironmentRepository();
       const source = store.findByProjectAndName(project.id, input.sourceEnvironment), destination = store.findByProjectAndName(project.id, input.targetEnvironment);
       const { sourceBucketId, targetBucket, location } = selectTransferBucket(new SpecStore().getForInspection(project)?.spec, source, destination, target, storageName);
-      const railway = await adapterFactory.getProviderAdapter('railway', project);
-      if (!railway.success || !(railway.adapter instanceof RailwayAdapter)) reject('Restore the Railway connection for this source project.');
-      const sourceBucketName = await railway.adapter.getMigrationBucketName(target.sourceRailwayProjectId, target.sourceRailwayEnvironmentId, sourceBucketId)
+      const railway = await adapterFactory.getStorageOperations('railway', project, { environment: source });
+      if (!railway.success || !railway.adapter.getMigrationBucketName) reject('Restore the Railway connection for this source project.');
+      const sourceBucketName = await railway.adapter.getMigrationBucketName({
+        projectId: target.sourceRailwayProjectId, environmentId: target.sourceRailwayEnvironmentId,
+      }, sourceBucketId)
         .catch(() => reject('Railway could not verify the selected bucket and its native S3 name in the source environment.'));
       const scope = { target, storageName, sourceBucketId, sourceBucketName, targetBucket }, job = transferBucketJob(scope);
       const token = await input.token();

@@ -683,7 +683,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
               break;
             case 'prepare-bucket-copy':
               message = `Prepare the copy job for ${migrationStorage} from ${migrationSourceEnvironment} to ${environment}? Its account will be able to read and add objects in the selected Google Cloud bucket.`;
-              review = 'Review the unscheduled job and the bucket permissions. Running the job and sending Railway credentials require a separate approval.';
+              review = 'Review the unscheduled job and the bucket permissions. Running the job and sending source credentials require a separate approval.';
               break;
             case 'empty-transfer-slot':
               message = `Apply plan ${payload.planId} to prepare access for a future data copy from ${migrationSourceEnvironment} to ${environment} in ${targetProject.name}?`;

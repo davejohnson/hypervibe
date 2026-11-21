@@ -7,14 +7,13 @@ import { engineBucketName } from '../../../../application/infrastructure-engine.
 const stubs = vi.hoisted(() => ({ find: vi.fn(), spec: vi.fn(), railway: vi.fn(), cloudJob: vi.fn(), setup: vi.fn(), inspect: vi.fn() }));
 vi.mock('../../../db/repositories/environment.repository.js', () => ({ EnvironmentRepository: class { findByProjectAndName = stubs.find } }));
 vi.mock('../../../../domain/spec/spec.store.js', () => ({ SpecStore: class { getForInspection = stubs.spec } }));
-vi.mock('../../../../domain/services/adapter.factory.js', () => ({adapterFactory:{getProviderAdapter:stubs.railway}}));
+vi.mock('../../../../domain/services/adapter.factory.js', () => ({adapterFactory:{getStorageOperations:stubs.railway}}));
 vi.mock('../../../../application/gcp-transfer-access-readiness.js', () => ({inspectTransferIsolation:async () => ({scope:{projectNumber:'123',copyUniqueId:'456'}}), ProbeProblem:class extends Error {}}));
 vi.mock('../../../engine/opentofu/install.js', () => ({ensureEngineBinary:async () => ({ok:true,binary:'fixture'}),enginePluginCacheDir:()=>''}));
 vi.mock('../../../engine/opentofu/engine.js', () => ({OpenTofuEngine:class { inspectState = async () => ({ok:true,present:true,value:true}) }}));
 vi.mock('../../../secrets/secret-store.js', () => ({getSecretStore:()=>({})}));
 vi.mock('../gcp-cloud-run.client.js', () => ({cloudRunJobRequest: stubs.cloudJob}));
 vi.mock('../../../../domain/services/gcp-project-setup.service.js', () => ({runGcpProjectSetup:stubs.setup}));
-import { RailwayAdapter } from '../../railway/railway.adapter.js';
 
 const target = {projectId:'fixture-cloud',targetRegion:'us-central1',targetEnvironmentId:'dst',sourceEnvironmentId:'src',
   sourceRailwayProjectId:'rp',sourceRailwayEnvironmentId:'re'};
@@ -37,7 +36,7 @@ describe('Google Cloud job readback for the initial preview and after applying i
     stubs.find.mockImplementation((_:string,name:string) => name==='old'?{id:'src',name,projectId:'project',platformBindings:{provider:'railway',...railwayScope,
       storage:{assets:{provider:'railway',externalId:'bucket-1',instanceScope:railwayScope}}}}:{id:'dst',name,projectId:'project',platformBindings:{provider:'cloudrun',projectId:target.projectId,environmentId:target.targetRegion,engine:{kind:'opentofu',storage:['assets']}}});
     stubs.spec.mockReturnValue({spec:{environments:{old:{hosting:{provider:'railway'},storage:{assets:{provider:'railway'}}},new:{hosting:{provider:'cloudrun'},storage:{assets:{provider:'gcs',region:'us-central1'}}}}}});
-    const adapter = Object.create(RailwayAdapter.prototype); adapter.getMigrationBucketName=async ()=>'native-assets'; stubs.railway.mockResolvedValue({success:true,adapter});
+    stubs.railway.mockResolvedValue({ success:true, adapter:{ getMigrationBucketName:async ()=>'native-assets' } });
     vi.stubGlobal('fetch',async (url:string)=>{
       if(url.includes(':getIamPolicy')) return json({etag:'project'});
       if(url.includes('/iam?')) return json({etag:'bucket',kind:'storage#policy',resourceId:'projects/_/buckets/'+bucket});

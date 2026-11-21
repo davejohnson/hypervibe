@@ -603,7 +603,10 @@ describe('Railway storage buckets', () => {
     const request = vi.fn().mockResolvedValueOnce(identity).mockResolvedValueOnce({ bucketS3Credentials: [{ bucketName: 'native-bucket' }] });
     const adapter = new RailwayAdapter();
     (adapter as unknown as { client: { request: typeof request } }).client = { request };
-    await expect(adapter.getMigrationBucketName('rp', 're', 'bucket-1')).resolves.toBe('native-bucket');
+    const storage = createRailwayStorageAdapter(adapter);
+    await expect(storage.getMigrationBucketName!({ projectId: 'rp' }, 'bucket-1')).rejects.toThrow('original project and environment');
+    expect(request).not.toHaveBeenCalled();
+    await expect(storage.getMigrationBucketName!({ projectId: 'rp', environmentId: 're' }, 'bucket-1')).resolves.toBe('native-bucket');
     expect(String(request.mock.calls[1]![0])).toMatch(/bucketS3Credentials\([^)]*\)\s*\{\s*bucketName\s*\}/);
     expect(request.mock.calls[1]![1]).toEqual({projectId:'rp',environmentId:'re',bucketId:'bucket-1'});
     expect(request.mock.calls.map(call => String(call[0])).join(' ')).not.toMatch(/accessKey|secretAccessKey|variables\s*\(|config\s*\(/i);
