@@ -362,7 +362,7 @@ export interface ProviderCredentialUpdateCapability {
   >;
 }
 
-export const migrationAccessModes = ['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access'] as const;
+export const migrationAccessModes = ['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access', 'prepare-bucket-copy'] as const;
 export type MigrationAccess = (typeof migrationAccessModes)[number];
 
 export function isMigrationAccessCheck(mode: MigrationAccess): boolean {
@@ -373,6 +373,7 @@ export interface MigrationAccessCapability {
   sourceProvider: string;
   prepare(input: {
     mode: MigrationAccess;
+    storageName?: string;
     project: Project;
     sourceEnvironment: string;
     targetEnvironment: string;

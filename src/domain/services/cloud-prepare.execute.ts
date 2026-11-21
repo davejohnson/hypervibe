@@ -134,6 +134,7 @@ export async function runCloudPrepare(params: {
   workerAccess?: WorkerPrepareAccess;
   migrationAccess?: MigrationAccess;
   migrationSourceEnvironment?: string;
+  migrationStorage?: string;
   gcpSetupPlanId?: string;
   requireBrowserApproval?: boolean;
   defaultAdminAccessTokenProvider?: () => Promise<string>;
@@ -172,12 +173,16 @@ export async function runCloudPrepare(params: {
     return { success: false, error: resolved.error };
   }
 
+  if ((params.migrationAccess === 'prepare-bucket-copy') !== (params.migrationStorage !== undefined) ||
+      (params.migrationStorage !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/.test(params.migrationStorage))) {
+    return { success: false, error: 'Select one declared storage name when preparing a bucket copy job.' };
+  }
   if (params.migrationAccess) {
     if (!migrationAccessModes.includes(params.migrationAccess)) {
       return { success: false, error: 'Select a supported migration access operation.' };
     }
     if (!params.environmentName || !params.migrationSourceEnvironment || params.environmentName === params.migrationSourceEnvironment ||
-      (isMigrationAccessCheck(params.migrationAccess) && (runtimeServiceAccountEmail || adminCredentialSource)) ||
+      ((isMigrationAccessCheck(params.migrationAccess) || params.migrationAccess === 'prepare-bucket-copy') && (runtimeServiceAccountEmail || adminCredentialSource)) ||
       !resolved.runtimeServiceAccountEmail || gcsAccess || memorystoreAccess || queueAccess || workerAccess || deployServiceAccountEmail ||
       adminCredentialsJson || adminAccessToken || adminAuth || (confirm !== !!params.gcpSetupPlanId)) {
       return { success: false, error: 'Select distinct source and target environments for the transfer slot. Confirm only with the saved migration setup plan ID.' };
@@ -188,6 +193,7 @@ export async function runCloudPrepare(params: {
       mode: params.migrationAccess,
       project,
       sourceEnvironment: params.migrationSourceEnvironment,
+      ...(params.migrationStorage && { storageName: params.migrationStorage }),
       targetEnvironment: params.environmentName,
       targetProjectId: resolved.gcpProjectId,
       region: params.region ?? 'us-central1',
