@@ -7,7 +7,7 @@ import * as setup from '../../domain/services/gcp-project-setup.service.js';
 import { configurationDigest, engineStatePaths } from '../../adapters/engine/opentofu/workspace.js';
 import { OPENTOFU_VERSION } from '../../adapters/engine/opentofu/versions.js';
 import { LocalReviewCatalog } from '../../adapters/storage/local-review-catalog.js';
-import { saveSetupReport } from '../../adapters/storage/gcp-setup-report.js';
+import { findSavedSetupReport, saveSetupReport } from '../../adapters/storage/gcp-setup-report.js';
 import { recordReviewApproval, reviewDigest } from '../../adapters/storage/review-authorization.js';
 import { reviewDetail } from '../../presentation/local-review.js';
 import { grantCiReleaseAccess } from '../infrastructure-engine-ci.js';
@@ -48,6 +48,8 @@ describe('browser consent for Google Cloud release access', () => {
   it('shows every workflow, environment, branch and trigger before saving consent for the exact grant', async () => {
     const preview = await grantCiReleaseAccess(access);
     const id = preview.planId!, catalog = new LocalReviewCatalog(directory);
+    fs.unlinkSync(path.join(path.dirname(preview.htmlPath!), id + '.report.json'));
+    expect(findSavedSetupReport(access.projectId, access.gcpProjectId, id, undefined, directory)).toBeDefined();
     const item = catalog.get(id)!;
     const html = reviewDetail(item, '/', '/reviews/' + id, [], 'csrf');
     expect(html).toContain('owner/app/.github/workflows/hypervibe-release-production.yml on main, environment production (manual only)');

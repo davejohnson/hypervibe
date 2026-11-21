@@ -147,10 +147,14 @@ export function findSavedSetupReport(projectId: string, gcpProjectId: string, pl
     const file = path.join(directory, entry.name);
     const saved = readStoredJson(file);
     if (saved?.planId !== planId || saved.intent !== intent) continue;
+    const connection = record(saved.bootstrapConnection);
     return saveSetupReport(scope, {
       planId, planned: { actions: record(saved.planned).actions, blockers: record(saved.planned).blockers },
       setupPurpose: saved.setupPurpose === 'railway-transfer' || saved.setupPurpose === 'railway-transfer-isolation'
         ? saved.setupPurpose : undefined,
+      bootstrapConnection: typeof connection.scope === 'string' && typeof connection.deploymentAccount === 'string'
+        ? { scope: connection.scope, deploymentAccount: connection.deploymentAccount } : undefined,
+      ciReleaseAccess: Array.isArray(saved.ciReleaseAccess) ? saved.ciReleaseAccess.filter((grant): grant is string => typeof grant === 'string') : undefined,
       configuration: saved.configuration, projectName: typeof saved.projectName === 'string' ? saved.projectName : undefined,
       createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : fs.statSync(file).mtime.toISOString(),
     });
