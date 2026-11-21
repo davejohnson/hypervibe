@@ -668,7 +668,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId, the local HTML review path (htmlPath), and a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId, a browser review link (reviewUrl) and local export (htmlPath), and a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
@@ -1515,13 +1515,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_apply',
-    'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Any consequential confirmation-gated action runs only when its exact action id is passed in confirmActions.',
+    'Apply a saved current plan. Pass useBrowserApproval=true to require its exact saved browser approval, or provide the confirmed action IDs. Existing scope, expiry and staleness checks still apply.',
     {
       project: projectField,
       planId: z.string().describe('Plan id returned by hv_plan'),
+      useBrowserApproval: z.boolean().optional().describe('Use the approval recorded in the browser for this exact plan. Omit confirmActions when using this option.'),
       confirmActions: z.array(z.string()).optional().describe('Exact action ids for consequential confirmation-gated changes such as purchases, deletion, or an application-secret rotation.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, planId, confirmActions }) => {
+    wrapCommandHandler(async ({ project: projectRef, planId, confirmActions, useBrowserApproval }) => {
+      if (useBrowserApproval && confirmActions) return commandError('VALIDATION', 'Use the browser approval or supply explicitly confirmed action IDs.');
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = specStore.get(project);
       if (!specResult) {
@@ -1533,6 +1535,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         specRevision: specResult.revision,
         planId,
         confirmActions: confirmActions ?? [],
+        ...(useBrowserApproval && { useBrowserApproval: true }),
       });
 
       if (outcome.kind === 'invalid_spec') {
@@ -1560,6 +1563,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         });
       }
       if (outcome.kind === 'blocked') {
+        if (outcome.reviewPlanId) return commandError('VALIDATION', 'This exact saved plan has no current browser approval.', {
+          details: { planId: outcome.reviewPlanId }, hint: 'Open its review to see its current status. An expired or changed plan needs a new review.',
+          next: ['hv_runs'],
+        });
         const recovery = planBlockRecovery(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl,
           connectionAfter: 'Then re-run hv_plan and hv_apply.', connectionNext: ['hv_connections', 'hv_plan', 'hv_apply'] });
         return commandError(recovery.code, recovery.message, recovery);

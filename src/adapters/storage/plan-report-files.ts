@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Run } from '../../domain/entities/run.entity.js';
-import { makePlanReport, type ReportCloudTarget } from '../../domain/plan/plan-report.js';
+import { makePlanReport, type PlanReport, type ReportCloudTarget } from '../../domain/plan/plan-report.js';
 import { getDb } from '../db/sqlite.adapter.js';
 import { ProjectRepository } from '../db/repositories/project.repository.js';
 import { planReportPath, writePlanReport } from './write-plan-report.js';
@@ -51,10 +51,9 @@ function savedTarget(engine: Record<string, unknown> | undefined): { target?: st
   return { target };
 }
 
-export function writeRunPlanReport(run: Run): { htmlPath: string } {
+export function savedRunReport(run: Pick<Run, 'id' | 'type' | 'createdAt' | 'plan'>, projectName: string): PlanReport {
   const document = run.plan as Record<string, unknown>;
   if (run.type !== 'plan' || document.kind !== 'hv_plan') throw new Error('This run does not contain a saved infrastructure plan.');
-  const project = new ProjectRepository().findById(run.projectId);
   const engine = document.engine as Record<string, unknown> | undefined;
   const aws = engine?.aws as { accountId?: unknown } | undefined;
   // Older engine plans omitted the confirmation list. AWS teardown requested every action ID.
@@ -67,11 +66,16 @@ export function writeRunPlanReport(run: Run): { htmlPath: string } {
       if (requirement && typeof requirement.key === 'string') blockers.push(`Supply a value for ${requirement.key} before applying.`);
     }
   }
-  return writePlanReport(reportDirectory(), makePlanReport({
-    planId: run.id, project: project?.name ?? run.projectId, createdAt: run.createdAt.toISOString(),
+  return makePlanReport({
+    planId: run.id, project: projectName, createdAt: run.createdAt.toISOString(),
     environment: typeof document.environmentName === 'string' ? document.environmentName : undefined,
     ...savedTarget(engine),
     scope: typeof document.scope === 'string' ? document.scope : 'full',
     actions: document.actions, confirmActions, blocked: blockers, warnings: document.warnings,
-  }));
+  });
+}
+
+export function writeRunPlanReport(run: Run): { htmlPath: string } {
+  const project = new ProjectRepository().findById(run.projectId);
+  return writePlanReport(reportDirectory(), savedRunReport(run, project?.name ?? run.projectId));
 }

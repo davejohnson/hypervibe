@@ -1,3 +1,4 @@
+import { LocalReviewCatalog } from '../../adapters/storage/local-review-catalog.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -163,6 +164,23 @@ it('saves a native HTML review without creating resources and runs exactly the a
   expect(await confirm(id)).toMatchObject({ success: true });
   expect(create).toHaveBeenCalledTimes(1);
   expect(runJob).toHaveBeenCalledTimes(2);
+});
+it('uses only browser approval for the same saved access test and shows the finished result', async () => {
+  const id = await preview(true);
+  const catalog = new LocalReviewCatalog(dataDir);
+  const resume = () => runGcpTransferAccessProbe({ ...input, fileOnly: true, confirm: true, planId: id, requireBrowserApproval: true });
+  expect(await resume()).toMatchObject({ success: false });
+  expect(log).toEqual([]);
+  const review = catalog.get(id)!;
+  expect(review.status).toBe('Awaiting approval');
+  catalog.approve(id, review.approval!.digest);
+  expect(log).toEqual([]);
+  expect(catalog.get(id)?.status).toBe('Approved');
+  runJob.mockResolvedValueOnce({ ok: true, fileEvidence: denied });
+  expect(await resume()).toMatchObject({ success: true });
+  expect(catalog.get(id)?.status).toBe('Passed');
+  expect(await resume()).toMatchObject({ success: true });
+  expect(runJob).toHaveBeenCalledTimes(1);
 });
 it('rejects stale or cross-target confirmation before any mutation', async () => {
   const id = await preview();

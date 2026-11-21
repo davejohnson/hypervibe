@@ -15,7 +15,7 @@ const CLAUDE_CORE = [
   'For missing connections, use the returned connectionSetup and supported bootstrap. Present its exact proposed scope and required approval before changes. Missing or unknown access blocks dependent work; never treat it as proof that a resource is absent.',
   'For a required form, call hv_connections action="describe" with provider/scope (project when initialized). Show its direct clickable setup link; preserve the complete query string, name and description exactly. Generic discovery is not scoped setup. Explain manual fields and the safe credential reference. Never put secrets in URLs or tokens in chat.',
   'For managed deployments use hv_ci_status, hv_ci_trigger and verification tools. Stop on blocked, failed, pending or confirmation-required results unless an explicit bounded continuation applies. Report actual evidence and partial outcomes honestly.',
-  'Read hypervibe://guidance and the installed skill; follow tool results and capability blockers.',
+  'Share reviewUrl for a saved plan or result. Use the recorded browser approval and returned continuation. Read hypervibe://guidance and the installed skill.',
 ].join('\n');
 
 const CLAUDE_DETAILS = [

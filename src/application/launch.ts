@@ -1,3 +1,4 @@
+import { browserApprovedRunActions } from './browser-approved-run.js';
 import { environmentDomains } from '../domain/services/infrastructure-engine-selection.js';
 import { effectiveBranchCiAutoDeploy } from '../domain/spec/spec.schema.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
@@ -70,7 +71,8 @@ export type LaunchResult =
   | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; domains?: Array<{ name: string; status: 'serving' | 'certificate_pending' }>; infrastructureRounds: number;
       ciWorkflow?: { path: string; changed: boolean; branch: string } };
 
-export const LAUNCH_ACCESS_IDS = ['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release', 'azure-setup', 'aws-setup'] as const;
+export const GCP_REVIEWED_ACCESS = ['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'] as const;
+export const LAUNCH_ACCESS_IDS = [...GCP_REVIEWED_ACCESS, 'azure-setup', 'aws-setup'] as const;
 export type LaunchAccessId = typeof LAUNCH_ACCESS_IDS[number];
 
 export interface CostLine { item: string; estimate: string }
@@ -198,6 +200,7 @@ async function runLaunch(ctx: CommandContext, params: {
   environmentName: string;
   billingAccountName?: string;
   gcpSetupPlanId?: string;
+  browserAccess?: string;
   /** Azure: the subscription the person chose after needs_subscription. */
   azureSubscriptionId?: string;
   /** AWS: the account a needs_access "aws-setup" result was shown for. */
@@ -248,6 +251,9 @@ async function runLaunch(ctx: CommandContext, params: {
       specRevision: loaded.document.specRevision, actions: loaded.document.actions,
       confirmActions: loaded.document.actions.filter(requiresActionConfirmation).map(action => action.id),
       warnings: loaded.document.warnings ?? [] };
+    if (params.confirmActions === undefined && browserApprovedRunActions(loaded.run, params.project.id)) {
+      params = { ...params, confirmActions: reviewedPlan.actions.filter(action => reviewedPlan!.confirmActions.includes(action.id)).map(approvalToken) };
+    }
     if (params.confirmActions?.length) {
       const expected = reviewedPlan.actions.filter((action) => reviewedPlan!.confirmActions.includes(action.id)).map(approvalToken).sort();
       if (JSON.stringify([...params.confirmActions].sort()) !== JSON.stringify(expected)) {
@@ -372,6 +378,10 @@ async function runLaunch(ctx: CommandContext, params: {
 }
 
 /** Google Cloud project, region, DNS and add-on access. Returns a stop point, or undefined once everything is in place. */
+function browserAccessPlan(params: { browserAccess?: string; gcpSetupPlanId?: string }, access: string) {
+  if (params.gcpSetupPlanId && params.browserAccess === access) return { gcpSetupPlanId: params.gcpSetupPlanId, requireBrowserApproval: true };
+}
+
 async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], environmentSpec: EnvironmentSpec,
   approvedAccess: Set<string>, resourceAccess: Array<{ id: string; label: string }>): Promise<LaunchResult | undefined> {
   // 1. Select billing, then review and approve the exact project setup plan.
@@ -408,9 +418,12 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
         includedAccess: resourceAccess.map((entry) => entry.id),
       };
     }
-    const setupApproved = approvedAccess.has('gcp-setup');
+    const setupPlanId = !params.browserAccess || params.browserAccess === 'gcp-setup' ? params.gcpSetupPlanId : undefined;
+    const browserSetup = Boolean(setupPlanId) && !approvedAccess.has('gcp-setup');
+    const setupApproved = approvedAccess.has('gcp-setup') || browserSetup;
     const setup = await runGcpBootstrap({ ...bootstrapTarget, region, project: params.project, gcpProjectId: target, billingAccountName: params.billingAccountName, confirm: setupApproved,
-      ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
+      ...(setupPlanId ? { gcpSetupPlanId: setupPlanId } : {}),
+      ...(browserSetup && { requireBrowserApproval: true }),
     });
     if (!setup.success) return {
       status: 'blocked', message: String(setup.error ?? 'GCP setup failed.'), details: setup,
@@ -429,9 +442,10 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
   // A connected project can host several environments in different regions.
   // Each regional repository belongs to retained project-shared engine state.
   if (!isCloudPreparedForRegion(ctx.repos.projects.findById(params.project.id) ?? params.project, region, environmentProjectId)) {
-    const confirm = approvedAccess.has('gcp-region');
+    const browser = browserAccessPlan(params, 'gcp-region');
+    const confirm = Boolean(browser) || approvedAccess.has('gcp-region');
     const prepared = await runCloudPrepare({ ...preparationTarget, project: params.project, provider: 'cloudrun',
-      gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), region, adminAuth: 'default', confirm });
+      gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), region, adminAuth: 'default', confirm, ...browser });
     if (!prepared.success) return { status: 'blocked', message: String(prepared.error ?? 'Regional Google Cloud setup failed.'), details: prepared };
     if (!confirm) return { status: 'needs_access', accessId: 'gcp-region',
       access: `Prepare build resources in ${region} using this saved OpenTofu plan. Shared resources in other regions are retained.`, grants: prepared };
@@ -484,9 +498,10 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       if (access.state === 'ready') continue;
       if (access.state === 'blocked') return { status: 'blocked', message: access.message };
     } else if (request.ready(ctx.repos.projects.findById(params.project.id) ?? params.project, environmentProjectId)) continue;
-    const confirm = approvedAccess.has(request.id);
+    const browser = browserAccessPlan(params, request.id);
+    const confirm = Boolean(browser) || approvedAccess.has(request.id);
     const result = await runCloudPrepare({ ...preparationTarget, region, project: params.project, provider: 'cloudrun',
-      gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), ...request.options, adminAuth: 'default', confirm });
+      gcpProjectId: environmentProjectId ?? await scopedGcpProjectId(params.project), ...request.options, adminAuth: 'default', confirm, ...browser });
     if (!result.success) return { status: 'blocked', message: String(result.error ?? 'Google Cloud access setup failed.'), details: result };
     if (!confirm) return { status: 'needs_access', accessId: request.id, access: request.description, grants: result };
     if (request.id === 'storage-s3') {
@@ -619,10 +634,11 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
   const trust = createHash('sha256').update(JSON.stringify([repositoryId, repository, releases])).digest('hex');
   if (!ci || ci.trust !== trust) {
     try {
-      const confirm = params.approveAccess?.includes('ci-release') === true;
+      const browser = browserAccessPlan(params, 'ci-release');
+      const confirm = Boolean(browser) || params.approveAccess?.includes('ci-release') === true;
       const granted = await grantCiReleaseAccess({
         projectId: params.project.id, projectName: params.project.name, adminToken: await getDefaultAdminAccessToken(), gcpProjectId: context.gcpProjectId, repository: observed.full_name!, repositoryId, releases,
-        runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, confirm,
+        runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, confirm, ...browser,
       });
       if (!confirm) return {
         status: 'needs_access', accessId: 'ci-release',

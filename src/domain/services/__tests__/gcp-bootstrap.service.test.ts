@@ -1227,7 +1227,8 @@ describe('runGcpBootstrap', () => {
           validatedCredentials: credentials,
         }
       : { success: false, error: `Cloud SQL rejected ${PRIVATE_KEY}` });
-    const dependencies = makeDependencies(client, { verifyProvider });
+    const finishReview = vi.fn(() => true);
+    const dependencies = makeDependencies(client, { verifyProvider, setupProject: vi.fn(async () => ({ success: true, mode: 'confirm' as const, planId: 'saved-setup', finishReview })) });
 
     const result = await runGcpBootstrap({
       project: seedProject(),
@@ -1237,6 +1238,7 @@ describe('runGcpBootstrap', () => {
     }, dependencies);
 
     expect(verifyProvider).toHaveBeenCalledTimes(2);
+    expect(finishReview.mock.calls).toEqual([['failed']]);
     expect(client.deleteServiceAccountKey).toHaveBeenCalledWith(KEY_NAME);
     expect(new ConnectionRepository().findByProviderAndScope('cloudrun', SCOPE)).toBeNull();
     expect(new ConnectionRepository().findByProviderAndScope('cloudsql', SCOPE)).toBeNull();

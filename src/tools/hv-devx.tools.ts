@@ -42,7 +42,7 @@ function redactRunPlan(plan: unknown): unknown {
 export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_runs',
-    'Inspect run history. action="list" (default) shows recent deployment/apply runs. action="get" returns the plan and receipts for one run. action="report" writes a local HTML review of an exact saved plan and returns htmlPath. action="audit" lists recent audit events.',
+    'Inspect run history. action="list" (default) shows recent deployment/apply runs. action="get" returns the plan and receipts for one run. action="report" writes a local HTML review of an exact saved plan and returns its reviewUrl when the local server is available, plus its export path. action="audit" lists recent audit events.',
     {
       action: z.enum(['list', 'get', 'audit', 'report']).optional().describe('Operation (default: list)'),
       runId: z.string().optional().describe('Exact run id for action="get" or saved plan id for action="report".'),

@@ -442,6 +442,10 @@ export class SqliteAdapter {
     this.hardenDatabaseFiles();
   }
 
+  static currentDatabase(): Database.Database | undefined {
+    return SqliteAdapter.instance?.db;
+  }
+
   static getInstance(dbPath?: string): SqliteAdapter {
     if (!SqliteAdapter.instance) {
       SqliteAdapter.instance = new SqliteAdapter(dbPath);

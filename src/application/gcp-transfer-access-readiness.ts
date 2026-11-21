@@ -38,6 +38,7 @@ export interface AccessProbeRequest {
   fileOnly?: boolean;
   confirm: boolean;
   planId?: string;
+  requireBrowserApproval?: boolean;
 }
 /** Only these fixed messages may cross the command boundary. Google bodies, signers and URLs stay private. */
 export function originalProbeScope(input: AccessProbeRequest) {

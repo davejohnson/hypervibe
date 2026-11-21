@@ -62,6 +62,7 @@ async function prepareMigrationAccess(input: Parameters<MigrationAccessCapabilit
       runtimeEmail: input.runtimeEmail, deployEmail: input.deployEmail, token: input.token,
       ...(input.mode === 'verify-export-file-access' ? { fileOnly: true } : {}),
       confirm: input.planId !== undefined, planId: input.planId,
+      ...(input.requireBrowserApproval && { requireBrowserApproval: true }),
     });
   }
   const restrictApp = input.mode === 'restrict-app-access';
@@ -98,6 +99,7 @@ async function prepareMigrationAccess(input: Parameters<MigrationAccessCapabilit
       auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: token, GOOGLE_PROJECT: gcpProjectId }, redact: [token] },
       confirm: !!input.planId,
       gcpSetupPlanId: input.planId,
+      ...(input.requireBrowserApproval && { requireBrowserApproval: true }),
     };
     const readIsolation = (slotEvidence: typeof evidence) => readTransferIsolationEvidence(token, {
       target: scope, targetEnvironmentName: target.name, runtimeEmail: input.runtimeEmail, slotEvidence,

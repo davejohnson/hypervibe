@@ -14,6 +14,8 @@ type SetupScope = { projectId: string; gcpProjectId: string; projectName?: strin
 interface ReportSource {
   planId: string;
   setupPurpose?: PlanReport['setupPurpose'];
+  bootstrapConnection?: PlanReport['bootstrapConnection'];
+  ciReleaseAccess?: PlanReport['ciReleaseAccess'];
   projectName?: string;
   createdAt?: string;
   planned: { actions: unknown; blockers?: unknown };
@@ -37,7 +39,7 @@ export function setupPlansDirectory({ projectId, gcpProjectId, dataDir = getData
   return plans;
 }
 
-function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
+export function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
   if (!setupId.test(source.planId) || !Array.isArray(source.planned?.actions)) {
     throw new Error('The saved Google Cloud setup plan is incomplete.');
   }
@@ -46,7 +48,7 @@ function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
     target: scope.gcpProjectId, cloudTarget: { provider: 'gcp', projectId: scope.gcpProjectId },
     scope: 'Google Cloud project setup', createdAt: source.createdAt,
     actions: source.planned.actions, blocked: source.planned.blockers, approval: 'whole-plan',
-    setupPurpose: source.setupPurpose,
+    setupPurpose: source.setupPurpose, bootstrapConnection: source.bootstrapConnection, ciReleaseAccess: source.ciReleaseAccess,
   });
   if (report.actions.length !== source.planned.actions.length) throw new Error('The saved Google Cloud setup actions could not be read.');
 
@@ -86,7 +88,7 @@ function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
 
 // A checksum binds the saved display model to its local owner. It detects damaged or
 // misplaced reports; confirmation always reads the engine's original intent manifest.
-function checksum(projectId: string, report: PlanReport): string {
+export function setupReportChecksum(projectId: string, report: PlanReport): string {
   return createHash('sha256').update(JSON.stringify([projectId, report])).digest('hex');
 }
 
@@ -98,7 +100,7 @@ export function saveSetupReport(scope: SetupScope, source: ReportSource, redact:
   const rendered = writePlanReport(directory, report);
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(temporary, JSON.stringify({ projectId: scope.projectId, checksum: checksum(scope.projectId, report), report }),
+    fs.writeFileSync(temporary, JSON.stringify({ projectId: scope.projectId, checksum: setupReportChecksum(scope.projectId, report), report }),
       { mode: PRIVATE_FILE_MODE, flag: 'wx' });
     fs.renameSync(temporary, file);
   } finally {
@@ -119,7 +121,7 @@ function storedReport(directory: string, scope: SetupScope, planId: string): Pla
   const snapshot = readStoredJson(path.join(directory, `${planId}.report.json`));
   const report = snapshot?.report as PlanReport | undefined;
   if (snapshot?.projectId === scope.projectId && report?.planId === planId && report.target === scope.gcpProjectId
-    && snapshot.checksum === checksum(scope.projectId, report)) return report;
+    && snapshot.checksum === setupReportChecksum(scope.projectId, report)) return report;
 }
 
 /** Preserve display data before a new preview replaces the previous intent manifest. */

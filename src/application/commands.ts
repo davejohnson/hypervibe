@@ -1,3 +1,4 @@
+import { withCommandReview } from './command-review.js';
 import { z } from 'zod';
 import './providers.js';
 import type { CommandContext } from './context.js';
@@ -190,7 +191,8 @@ export class CommandRegistry implements CommandRegistrar {
     }
 
     try {
-      return await definition.execute(parsed.data);
+      const result = await definition.execute(parsed.data);
+      return withCommandReview(id, parsed.data, result);
     } catch (error) {
       return commandErrorFromUnknown(error);
     }

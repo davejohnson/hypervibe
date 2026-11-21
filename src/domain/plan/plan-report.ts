@@ -31,6 +31,8 @@ export interface PlanReport {
   environment?: string;
   scope: string;
   setupPurpose?: 'railway-transfer' | 'railway-transfer-isolation';
+  bootstrapConnection?: { scope: string; deploymentAccount: string };
+  ciReleaseAccess?: string[];
   target?: string;
   cloudTarget?: ReportCloudTarget;
   billingAccount?: string;
@@ -135,6 +137,8 @@ export function makePlanReport(input: Omit<PlanReport, 'actions' | 'blocked' | '
     ...(input.approval ? { approval: input.approval } : {}),
     ...((input.setupPurpose === 'railway-transfer' || input.setupPurpose === 'railway-transfer-isolation')
       ? { setupPurpose: input.setupPurpose } : {}),
+    ...(input.bootstrapConnection && { bootstrapConnection: { scope: display(input.bootstrapConnection.scope), deploymentAccount: display(input.bootstrapConnection.deploymentAccount) } }),
+    ...(Array.isArray(input.ciReleaseAccess) && { ciReleaseAccess: strings(input.ciReleaseAccess) }),
     actions, blocked: [...blocked], warnings,
   };
 }
