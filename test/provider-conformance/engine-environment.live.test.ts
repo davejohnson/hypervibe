@@ -11,7 +11,7 @@ import { AzureTokens } from '../../src/adapters/providers/azure/azure-ops.client
 import { CloudRunAdapter, CloudRunCredentialsSchema } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
 import { getSecretStore, SecretStore } from '../../src/adapters/secrets/secret-store.js';
 import { assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
-import { ENGINE_FIXTURE_ENTRYPOINT, engineFixtureEmptiedEnvironment, engineFixtureEntrypointDockerfile, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
+import { ENGINE_FIXTURE_ENTRYPOINT, engineFixtureEntrypointDockerfile, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
   readAzureDatabaseExposure, readAzureInventory, readGcpDatabaseExposure, readGcpInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
 import { readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -230,19 +230,6 @@ live('AWS, Azure and Google Cloud engine disposable environment fixture', () => 
       if (!cleanupOnly) assertFixtureLifecycleConsent(process.env.HYPERVIBE_LIVE_AUTHORIZE_LIFECYCLE);
 
       const tearDown = async (name: string) => {
-        if (cloud === 'gcp') {
-          // No teardown plan on Google Cloud: empty the environment, apply until nothing is left to change, then drop it from the spec.
-          if (!inSpec(name)) return;
-          await setSpecEnvironment(name, engineFixtureEmptiedEnvironment(marker.region));
-          for (let attempt = 0; ; attempt++) {
-            if (attempt === 6) throw new Error(`Emptying ${name} did not finish within its bounded attempts.`);
-            const envelope = await plan({}, name);
-            if (!changesOf(envelope).length) break;
-            await apply(envelope);
-          }
-          await setSpecEnvironment(name, undefined);
-          return;
-        }
         // A teardown that reports leftovers is planned again, as its own message asks.
         for (let attempt = 0; attempt < 4 && inSpec(name); attempt++) {
           await apply(await plan({ scope: 'teardown', ...(cloud === 'aws' && name === environmentName ? { deleteFinalSnapshot: true } : {}) }, name));

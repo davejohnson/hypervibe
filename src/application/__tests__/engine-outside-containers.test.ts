@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { createCommandContext } from '../context.js';
 import * as domainPlanning from '../infrastructure-engine-domain.js';
-import { gcpSecretStore, planInfrastructureEngine, strayStateResources } from '../infrastructure-engine.js';
+import { gcpSecretStore, planGcpTeardown, planInfrastructureEngine, strayStateResources } from '../infrastructure-engine.js';
 import { CloudRunAdapter } from '../../adapters/providers/gcp/cloudrun.adapter.js';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
@@ -113,6 +113,48 @@ describe('resources left only in engine state by an apply that was cut off', () 
     expect(strayStateResources(['google_cloud_run_v2_service.web', 'google_cloud_run_v2_job.nightly_report', 'google_cloud_run_v2_service_iam_member.web_public',
       'google_storage_bucket.storage_user_files', 'google_pubsub_topic.queue_jobs', 'google_sql_database_instance.db']))
       .toEqual({ queues: ['jobs'], services: ['web', 'nightly-report'], storage: ['user-files'] });
+  });
+});
+
+describe('Google Cloud teardown plan', () => {
+  it('plans toward an emptied environment: buckets are emptied first, everything recorded is removed, and a last step checks nothing is left', async () => {
+    const f = fixture();
+    f.ctx.repos.environments.updatePlatformBindings(f.environment.id, { services: { web: { serviceId: 'web-1' } },
+      engine: { kind: 'opentofu', storage: ['files'], secrets: ['hv-staging-legacy-key'], importedSecrets: ['LEGACY_KEY'] } });
+    f.enginePlan.mockImplementation(async ({ configuration }) => {
+      f.configurations.push(configuration);
+      const segment = { id: 'engine-segment', engine: 'opentofu' as const, planDigest: 'a'.repeat(64), configurationDigest: 'b'.repeat(64), engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } };
+      const mapped = [...new Map(Object.values(configuration.resources).map((resource) => [resource.actionId, resource])).values()]
+        .filter((resource) => !resource.actionId.startsWith('secret-runtime-access:'));
+      return { ok: true, segmentId: segment.id, segment, planFile: '/not-executed', blockers: [], unmanagedDeletes: [],
+        actions: mapped.map((resource) => ({ id: resource.actionId, type: 'destroy' as const, resource: { kind: resource.kind, name: resource.name, provider: 'gcp' }, verified: true, reason: 'engine preview', metadata: { engineSegment: { ...segment, addresses: [] } } })) };
+    });
+    const planned = await planGcpTeardown(f.ctx, { project: f.project, spec: f.spec, specRevision: 1, environmentName: 'staging' });
+    if ('blocked' in planned) throw new Error(planned.blocked.join('; '));
+    const ids = planned.actions.map((action) => action.id);
+    expect(ids[0]).toBe('storage-empty:files');
+    expect(ids.at(-1)).toBe('cleanup:leftovers');
+    expect(ids).toEqual(expect.arrayContaining(['service:web', 'storage:files']));
+    expect(planned.actions.find((action) => action.id === 'storage:files')!.dependsOn).toContain('storage-empty:files');
+    expect(planned.actions[0]).toMatchObject({ dataBearing: true, requiresConfirm: true, metadata: { bucket: expect.stringMatching(/staging-files$/), environmentLabel: f.environment.id.toLowerCase() } });
+    expect(planned.actions.at(-1)).toMatchObject({ requiresConfirm: true, dependsOn: expect.arrayContaining(['storage-empty:files', 'service:web', 'storage:files']),
+      metadata: { workloads: [{ name: 'web', kind: 'services', resource: 'web-1' }], buckets: [expect.stringMatching(/staging-files$/)] } });
+    // Nothing the spec declares is kept: no service is configured and the delegated secret no longer targets the environment.
+    expect(ids).not.toContain('secret-container:hv-staging-api-key');
+    // A value imported during a migration is not kept either: its container is mapped for removal but no longer declared.
+    expect(ids).toContain('secret-container:hv-staging-legacy-key');
+    expect(JSON.stringify(f.configurations.at(-1)!.files)).not.toContain('hv-staging-legacy-key');
+    expect(f.configurations.at(-1)!.resources['google_cloud_run_v2_service.web']).toMatchObject({ actionId: 'service:web' });
+    expect(planned.warnings[0]).toContain('cannot be undone');
+    // The saved spec still has the environment until the last step runs.
+    expect(f.spec.environments.staging!.services.web).toBeDefined();
+  });
+
+  it('refuses while the environment still has a custom domain', async () => {
+    const f = fixture();
+    const spec = projectSpecSchema.parse({ version: 1, project: f.project.name, environments: { staging: { hosting: { provider: 'cloudrun' }, domain: 'app.example.com', services: { web: {} } } } });
+    expect(await planGcpTeardown(f.ctx, { project: f.project, spec, specRevision: 1, environmentName: 'staging' })).toMatchObject({ blocked: [expect.stringContaining('custom domains')] });
+    expect(f.enginePlan).not.toHaveBeenCalled();
   });
 });
 

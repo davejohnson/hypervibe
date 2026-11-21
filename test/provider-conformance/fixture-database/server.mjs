@@ -71,10 +71,8 @@ async function storageRoundTrip() {
       { method: 'POST', headers: { ...headers, 'content-type': 'text/plain' }, body: text, signal: AbortSignal.timeout(10_000) });
     if (put.status !== 200) return false;
     const got = await fetch(`${object}?alt=media`, { headers, signal: AbortSignal.timeout(10_000) });
-    const same = got.status === 200 && await got.text() === text;
-    // Google Cloud has no teardown that empties a bucket, and refuses to delete one that holds a file.
-    const removed = await fetch(object, { method: 'DELETE', headers, signal: AbortSignal.timeout(10_000) });
-    return same && [204, 404].includes(removed.status);
+    // The file stays: teardown has to empty the bucket itself.
+    return got.status === 200 && await got.text() === text;
   }
   return false;
 }

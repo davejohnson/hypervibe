@@ -76,6 +76,7 @@ export interface CloudEngine {
 const gcp: CloudEngine = {
   id: 'gcp', hostingProvider: 'cloudrun', migration: 'full',
   plan: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpInfrastructureEngine(ctx, params),
+  planTeardown: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpTeardown(ctx, params),
   apply: async (ctx, params) => (await import('./infrastructure-engine.js')).applyGcpInfrastructureEngine(ctx, params),
   release: async (ctx, params) => (await import('./infrastructure-engine.js')).releaseGcpEngineServices(ctx, params),
   secretStore: async (ctx, project, spec, environmentName) => (await import('./infrastructure-engine.js')).gcpSecretStore(ctx, project, spec, environmentName),

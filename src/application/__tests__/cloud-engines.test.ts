@@ -25,6 +25,6 @@ describe('cloud engine registry', () => {
   });
 
   it('offers teardown only where an engine implements it', () => {
-    expect(cloudEngines.filter((engine) => engine.planTeardown).map((engine) => engine.id)).toEqual(['aws', 'azure']);
+    expect(cloudEngines.filter((engine) => engine.planTeardown).map((engine) => engine.id)).toEqual(['gcp', 'aws', 'azure']);
   });
 });
