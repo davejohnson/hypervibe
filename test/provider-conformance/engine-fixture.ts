@@ -34,8 +34,8 @@ export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'c
     // A region is given only when the connection's default cannot be used, as when Azure refuses a new subscription a database there.
     hosting: { ...SPEC_NAMES[cloud].hosting, ...(region ? { region } : cloud === 'gcp' ? { region: connectionRegion } : {}) },
     database: SPEC_NAMES[cloud].database,
-    // Google Cloud also gets a cache and a queue, so teardown is shown to remove them. The app does not use them.
-    ...(cloud === 'gcp' ? { cache: { provider: 'memorystore', region: region ?? connectionRegion }, queues: { jobs: {} } } : {}),
+    // Google Cloud also gets a cache, so teardown is shown to remove it. The app does not use it.
+    ...(cloud === 'gcp' ? { cache: { provider: 'memorystore', region: region ?? connectionRegion } } : {}),
     storage: { files: { provider: SPEC_NAMES[cloud].storage, type: 'bucket', region: region ?? connectionRegion, injectInto: ['web'] } },
     services: {
       web: { workloadKind: 'web', ...(webStart ? { startCommand: webStart } : {}), healthCheckPath: '/health', public: true },
