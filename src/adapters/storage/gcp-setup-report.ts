@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { makePlanReport, type PlanReport } from '../../domain/plan/plan-report.js';
+import { makePlanReport, reportBucketCopy, type PlanReport } from '../../domain/plan/plan-report.js';
 import { redactExactValues } from '../../utils/redact-exact-values.js';
 import { engineStatePaths } from '../engine/opentofu/workspace.js';
 import { getDataDir, hardenPrivateFile, PRIVATE_FILE_MODE } from './paths.js';
@@ -14,6 +14,7 @@ type SetupScope = { projectId: string; gcpProjectId: string; projectName?: strin
 interface ReportSource {
   planId: string;
   setupPurpose?: PlanReport['setupPurpose'];
+  bucketCopy?: PlanReport['bucketCopy'];
   bootstrapConnection?: PlanReport['bootstrapConnection'];
   ciReleaseAccess?: PlanReport['ciReleaseAccess'];
   projectName?: string;
@@ -48,7 +49,7 @@ export function setupReport(scope: SetupScope, source: ReportSource): PlanReport
     target: scope.gcpProjectId, cloudTarget: { provider: 'gcp', projectId: scope.gcpProjectId },
     scope: 'Google Cloud project setup', createdAt: source.createdAt,
     actions: source.planned.actions, blocked: source.planned.blockers, approval: 'whole-plan',
-    setupPurpose: source.setupPurpose, bootstrapConnection: source.bootstrapConnection, ciReleaseAccess: source.ciReleaseAccess,
+    setupPurpose: source.setupPurpose, bucketCopy: source.bucketCopy, bootstrapConnection: source.bootstrapConnection, ciReleaseAccess: source.ciReleaseAccess,
   });
   if (report.actions.length !== source.planned.actions.length) throw new Error('The saved Google Cloud setup actions could not be read.');
 
@@ -150,10 +151,11 @@ export function findSavedSetupReport(projectId: string, gcpProjectId: string, pl
     const connection = record(saved.bootstrapConnection);
     return saveSetupReport(scope, {
       planId, planned: { actions: record(saved.planned).actions, blockers: record(saved.planned).blockers },
-      setupPurpose: saved.setupPurpose === 'railway-transfer' || saved.setupPurpose === 'railway-transfer-isolation'
+      setupPurpose: saved.setupPurpose === 'railway-transfer' || saved.setupPurpose === 'railway-transfer-isolation' || saved.setupPurpose === 'railway-bucket-copy'
         ? saved.setupPurpose : undefined,
       bootstrapConnection: typeof connection.scope === 'string' && typeof connection.deploymentAccount === 'string'
         ? { scope: connection.scope, deploymentAccount: connection.deploymentAccount } : undefined,
+      bucketCopy: reportBucketCopy(saved.bucketCopy),
       ciReleaseAccess: Array.isArray(saved.ciReleaseAccess) ? saved.ciReleaseAccess.filter((grant): grant is string => typeof grant === 'string') : undefined,
       configuration: saved.configuration, projectName: typeof saved.projectName === 'string' ? saved.projectName : undefined,
       createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : fs.statSync(file).mtime.toISOString(),

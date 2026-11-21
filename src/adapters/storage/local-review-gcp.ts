@@ -166,7 +166,7 @@ function setupReviews(directory: string, scope: Scope, history: SetupHistory, wa
           planId:id, project:value.project, scope:'Google Cloud project setup', target:scope.gcpProjectId,
           cloudTarget:{provider:'gcp',projectId:scope.gcpProjectId}, approval:'whole-plan',
           createdAt:typeof value.createdAt === 'string' ? value.createdAt : undefined,
-          setupPurpose:value.setupPurpose, warnings:value.warnings, blocked:value.blocked, ciReleaseAccess:value.ciReleaseAccess,
+          setupPurpose:value.setupPurpose, bucketCopy:value.bucketCopy, warnings:value.warnings, blocked:value.blocked, ciReleaseAccess:value.ciReleaseAccess,
           billingAccount:typeof value.billingAccount === 'string' && /^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/.test(value.billingAccount) ? value.billingAccount : undefined,
           bootstrapConnection:typeof connection.scope === 'string' && typeof connection.deploymentAccount === 'string'
             ? {scope:connection.scope,deploymentAccount:connection.deploymentAccount} : undefined,

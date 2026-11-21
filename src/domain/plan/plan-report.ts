@@ -30,7 +30,8 @@ export interface PlanReport {
   project: string;
   environment?: string;
   scope: string;
-  setupPurpose?: 'railway-transfer' | 'railway-transfer-isolation';
+  setupPurpose?: 'railway-transfer' | 'railway-transfer-isolation' | 'railway-bucket-copy';
+  bucketCopy?: { storageName: string; sourceBucket: string; targetBucket: string; copyAccount: string };
   bootstrapConnection?: { scope: string; deploymentAccount: string };
   ciReleaseAccess?: string[];
   target?: string;
@@ -106,10 +107,18 @@ function actionForReport(value: unknown, confirmIds: ReadonlySet<string> | 'all'
   };
 }
 
+export function reportBucketCopy(value: unknown): PlanReport['bucketCopy'] {
+  const item = record(value);
+  const safeName = (field: unknown): field is string => typeof field === 'string' && /^[A-Za-z0-9][A-Za-z0-9._@-]{0,253}$/.test(field);
+  if (!item || !safeName(item.storageName) || !safeName(item.sourceBucket) || !safeName(item.targetBucket) || !safeName(item.copyAccount)) return;
+  return { storageName: item.storageName, sourceBucket: item.sourceBucket, targetBucket: item.targetBucket, copyAccount: item.copyAccount };
+}
+
 export function makePlanReport(input: Omit<PlanReport, 'actions' | 'blocked' | 'warnings'> & {
   actions: unknown; blocked?: unknown; warnings?: unknown;
   confirmActions?: readonly string[] | 'all';
 }): PlanReport {
+  const bucketCopy = input.setupPurpose === 'railway-bucket-copy' ? reportBucketCopy(input.bucketCopy) : undefined;
   const warnings = strings(input.warnings, reviewMessage);
   const blocked = new Set(strings(input.blocked, reviewMessage));
   const actions: PlanReportAction[] = [];
@@ -135,8 +144,9 @@ export function makePlanReport(input: Omit<PlanReport, 'actions' | 'blocked' | '
     ...(input.billingAccount ? { billingAccount: display(input.billingAccount) } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.approval ? { approval: input.approval } : {}),
-    ...((input.setupPurpose === 'railway-transfer' || input.setupPurpose === 'railway-transfer-isolation')
+    ...((input.setupPurpose === 'railway-transfer' || input.setupPurpose === 'railway-transfer-isolation' || input.setupPurpose === 'railway-bucket-copy')
       ? { setupPurpose: input.setupPurpose } : {}),
+    ...(bucketCopy && { bucketCopy }),
     ...(input.bootstrapConnection && { bootstrapConnection: { scope: display(input.bootstrapConnection.scope), deploymentAccount: display(input.bootstrapConnection.deploymentAccount) } }),
     ...(Array.isArray(input.ciReleaseAccess) && { ciReleaseAccess: strings(input.ciReleaseAccess) }),
     actions, blocked: [...blocked], warnings,

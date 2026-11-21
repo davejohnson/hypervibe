@@ -8,14 +8,23 @@ whole databases and buckets through a separate reviewed Hypervibe plan.
 
 Prepare a separate Cloud Run environment and check the app on its temporary
 hostname. A working target does not establish that the production data can move.
-The guided GCP transfer still needs a saved OpenTofu plan for the actual
-copy job and a private handoff for the database dump URL and bucket credentials.
+The guided GCP transfer still needs a separately approved execution and a private handoff for the database dump URL and bucket credentials.
 Railway PostgreSQL and Railway bucket copies that need this handoff are blocked.
 A fresh comparison of private Railway and Cloud SQL databases also needs
 reviewed native jobs. A historical receipt only describes the earlier copy.
 The application pause and forwarding flow below is a separate capability.
 Follow [the private transfer implementation](https://github.com/davejohnson/hypervibe/issues/747)
 and [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
+
+To prepare a job for one file bucket, use `hv_connections` with action
+`prepare`, provider `cloudrun`, `migrationAccess="prepare-bucket-copy"`,
+`migrationStorage` set to the declared storage name, the Railway
+`migrationSourceEnvironment` and the destination `environment`. The saved review
+shows the unscheduled job and the grants allowing its dedicated account to
+read and add objects in that Google Cloud bucket. Approve the review in the
+browser and resume the same request with its `gcpSetupPlanId`. Setup leaves
+the job idle. A separately reviewed private credential handoff and execution
+are still needed to transfer files. PostgreSQL migration has its own prerequisites.
 
 For a prepared Railway source and Cloud Run destination, preview the copy
 account and its empty global Secret Manager container with
