@@ -34,6 +34,8 @@ export function engineFixtureEnvironment(cloud: EngineFixtureCloud, revision: 'c
     // A region is given only when the connection's default cannot be used, as when Azure refuses a new subscription a database there.
     hosting: { ...SPEC_NAMES[cloud].hosting, ...(region ? { region } : cloud === 'gcp' ? { region: connectionRegion } : {}) },
     database: SPEC_NAMES[cloud].database,
+    // Google Cloud also gets a cache and a queue, so teardown is shown to remove them. The app does not use them.
+    ...(cloud === 'gcp' ? { cache: { provider: 'memorystore', region: region ?? connectionRegion }, queues: { jobs: {} } } : {}),
     storage: { files: { provider: SPEC_NAMES[cloud].storage, type: 'bucket', region: region ?? connectionRegion, injectInto: ['web'] } },
     services: {
       web: { workloadKind: 'web', ...(webStart ? { startCommand: webStart } : {}), healthCheckPath: '/health', public: true },
@@ -179,8 +181,8 @@ async function gcpList(access: GcpFixtureAccess, url: string, key: string): Prom
 
 /**
  * What an environment can create in the fixture's Google project and region: Cloud Run
- * services, jobs and worker pools, database instances, buckets, secrets, schedules and
- * workflows. Images in the project's shared repository are not listed. A failed read throws.
+ * services, jobs and worker pools, database instances, buckets, secrets, schedules,
+ * workflows, caches and queues. Images in the project's shared repository are not listed. A failed read throws.
  */
 export async function readGcpInventory(access: GcpFixtureAccess): Promise<NativeFixtureResource[]> {
   const place = `projects/${access.projectId}/locations/${access.region}`;
@@ -193,6 +195,9 @@ export async function readGcpInventory(access: GcpFixtureAccess): Promise<Native
     ['secret', `https://secretmanager.googleapis.com/v1/projects/${access.projectId}/secrets`, 'secrets'],
     ['schedule', `https://cloudscheduler.googleapis.com/v1/${place}/jobs`, 'jobs'],
     ['workflow', `https://workflows.googleapis.com/v1/${place}/workflows`, 'workflows'],
+    ['cache', `https://redis.googleapis.com/v1/${place}/instances`, 'instances'],
+    ['queue-topic', `https://pubsub.googleapis.com/v1/projects/${access.projectId}/topics`, 'topics'],
+    ['queue-subscription', `https://pubsub.googleapis.com/v1/projects/${access.projectId}/subscriptions`, 'subscriptions'],
   ];
   const found: NativeFixtureResource[] = [];
   for (const [type, url, key] of kinds) {

@@ -44,6 +44,10 @@ export function createStorageHmacKey(token: string, gcpProjectId: string, servic
   });
 }
 
+export function readPubsubTopic(token: string, gcpProjectId: string, topicId: string): Promise<Response> {
+  return fetchWithRetry(`https://pubsub.googleapis.com/v1/projects/${gcpProjectId}/topics/${topicId}`, { headers: { Authorization: `Bearer ${token}` } });
+}
+
 export function readBucket(token: string, bucket: string): Promise<Response> {
   return fetchWithRetry(`https://storage.googleapis.com/storage/v1/b/${bucket}`, { headers: { Authorization: `Bearer ${token}` } });
 }

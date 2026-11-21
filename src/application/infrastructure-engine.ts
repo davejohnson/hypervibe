@@ -17,7 +17,7 @@ import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretC
 import {
   cloudRunGet, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type JobRunResult, type PendingJobRun, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
-import { createStorageHmacKey, deleteBucketObject, listBucketObjects, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
+import { createStorageHmacKey, deleteBucketObject, listBucketObjects, readBucket, readPubsubTopic, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan, specWithoutEnvironment } from './engine-shared.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
@@ -814,11 +814,13 @@ function gcpTeardownActions(planned: PlanAction[], context: EngineContext, envir
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'gcp' },
-    reason: `Hypervibe will confirm with Google that ${environmentName}'s recorded services, jobs, workers, database, buckets and secrets are gone from ${context.gcpProjectId}, then remove ${environmentName} from the spec. Schedules, queues and a cache are removed by the steps above and are not read again.`,
+    reason: `Hypervibe will confirm with Google that ${environmentName}'s recorded services, jobs, workers, database, cache, queues, buckets and secrets are gone from ${context.gcpProjectId}, then remove ${environmentName} from the spec. Schedules are removed by the steps above and are not read again.`,
     ...(changing.length ? { dependsOn: changing } : {}),
     metadata: { operation: GCP_TEARDOWN_CLEANUP_OPERATION, gcpProjectId: context.gcpProjectId,
       workloads: [...boundWorkloads(context.environment), ...(binding.releaseJob ? [{ name: 'release-command', kind: 'jobs' as const, resource: binding.releaseJob }] : [])],
-      ...(binding.database?.instanceName ? { instanceName: binding.database.instanceName } : {}), buckets: (binding.storage ?? []).map(bucketOf) },
+      ...(binding.database?.instanceName ? { instanceName: binding.database.instanceName } : {}), buckets: (binding.storage ?? []).map(bucketOf),
+      ...(binding.cache?.instanceName ? { cacheInstanceName: binding.cache.instanceName } : {}),
+      topics: (binding.queues ?? []).map((name) => pubsubQueueResourceIds({ name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, name, context.gcpProjectId).topicId) },
   };
   return [...empties, ...ordered, cleanup];
 }
@@ -853,7 +855,7 @@ export async function emptyGcpBucket(token: string, action: PlanAction): Promise
 /** The last teardown step: every piece the plan removed must be confirmed gone before the environment leaves the spec. */
 export async function finishGcpTeardown(ctx: CommandContext, token: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'environment'>,
   params: { project: Project; spec: ProjectSpec }, environmentName: string, action: PlanAction): Promise<ActionResult> {
-  const meta = action.metadata as { workloads: Array<{ kind: WorkloadKind; resource: string }>; instanceName?: string; buckets: string[] };
+  const meta = action.metadata as { workloads: Array<{ kind: WorkloadKind; resource: string }>; instanceName?: string; buckets: string[]; cacheInstanceName?: string; topics?: string[] };
   const left: string[] = [];
   for (const workload of meta.workloads) {
     const observed = await cloudRunGet(token, context.gcpProjectId, context.region, workload.resource, workload.kind);
@@ -863,6 +865,8 @@ export async function finishGcpTeardown(ctx: CommandContext, token: string, cont
   const reads: Array<[string, Promise<Response>]> = [
     ...(meta.instanceName ? [[meta.instanceName, sqlAdmin(token, context.gcpProjectId, `instances/${meta.instanceName}`)] as [string, Promise<Response>]] : []),
     ...meta.buckets.map((bucket) => [bucket, readBucket(token, bucket)] as [string, Promise<Response>]),
+    ...(meta.cacheInstanceName ? [[meta.cacheInstanceName, readRedisInstance(token, context.gcpProjectId, context.region, meta.cacheInstanceName)] as [string, Promise<Response>]] : []),
+    ...(meta.topics ?? []).map((topic) => [topic, readPubsubTopic(token, context.gcpProjectId, topic)] as [string, Promise<Response>]),
   ];
   for (const [name, pending] of reads) {
     const response = await pending;
@@ -878,7 +882,7 @@ export async function finishGcpTeardown(ctx: CommandContext, token: string, cont
   ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, services: {}, engine: {}, gcp: { tornDownAt: new Date().toISOString() } });
   // The environment is gone; removing it from the spec keeps the next plan from recreating it.
   new SpecStore().merge(params.project, specWithoutEnvironment(params.spec, environmentName));
-  return { success: true, message: `Google confirms ${environmentName}'s services, jobs, workers, database, buckets and secrets are gone from ${context.gcpProjectId}. It was removed from the spec.` };
+  return { success: true, message: `Google confirms ${environmentName}'s services, jobs, workers, database, cache, queues, buckets and secrets are gone from ${context.gcpProjectId}. It was removed from the spec.` };
 }
 
 export const GCP_STORAGE_EMPTY_OPERATION = 'gcpStorageEmpty';
