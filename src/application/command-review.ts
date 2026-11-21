@@ -25,6 +25,9 @@ export async function withCommandReview(command: string, input: Fields, result: 
   try {
     const profile = localReviewProfile();
     if (!profile) return result;
+    const externalServer = process.env.VITEST || process.env.CI;
+    const running = externalServer ? await currentLocalReviewOrigin() : undefined;
+    if (externalServer && !running) return result;
     const catalog = new LocalReviewCatalog(profile);
     let artifact = catalog.get(id);
     const fallback = command === 'hv_apply' && result.ok ? input.planId : command === 'hv_deploy' ? data.planId : undefined;
@@ -33,8 +36,7 @@ export async function withCommandReview(command: string, input: Fields, result: 
       artifact = catalog.get(id + '-result') ?? artifact;
     }
     if (!artifact) return result;
-    const origin = process.env.VITEST || process.env.CI ? await currentLocalReviewOrigin() : await ensureLocalReviewOrigin();
-    if (!origin) return result;
+    const origin = running ?? await ensureLocalReviewOrigin();
     const reviewUrl = localReviewUrl(origin, artifact.id);
     const shown = { ...data, reviewUrl, reviewStatus: artifact.status };
     if (!result.ok) return { ...result, error: { ...result.error!, details: shown } };

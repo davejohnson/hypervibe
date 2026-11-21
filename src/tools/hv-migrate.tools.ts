@@ -51,8 +51,12 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
         ...(planId ? { planId } : {}), ...(confirmActions ? { confirmActions } : {}), ...(importSecrets ? { importSecrets } : {}), ...(copyData ? { copyData } : {}), ...(refreshData ? { refreshData } : {}), ...(verifyOnly ? { verifyOnly } : {}), ...(cutover ? { cutover } : {}), ...(confirmCutover ? { confirmCutover } : {}),
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
       });
-      const resultRunId = verifyOnly && (result.status === 'verified' || result.status === 'differs' || result.status === 'blocked')
-        ? saveMigrationVerification(ctx, project.id, from, to, result) : undefined;
+      let resultRunId: string | undefined;
+      let warnings: string[] | undefined;
+      if (verifyOnly && (result.status === 'verified' || result.status === 'differs' || result.status === 'blocked')) {
+        try { resultRunId = saveMigrationVerification(ctx, project.id, from, to, result); }
+        catch { warnings = ['The local review library could not save this verification result.']; }
+      }
       const ask = (message: string) => ({ agentInstruction: { action: 'ask_user' as const, message }, next: ['hv_migrate'] });
       switch (result.status) {
         case 'migrated':
@@ -63,7 +67,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
           return commandSuccess(result, { hint: result.message, next: ['hv_health', 'hv_logs'] });
         case 'verified':
         case 'differs':
-          return commandSuccess({ ...result, ...(resultRunId && { resultRunId }) }, { hint: result.message, next: ['hv_migrate'] });
+          return commandSuccess({ ...result, ...(resultRunId && { resultRunId }) }, { hint: result.message, warnings, next: ['hv_migrate'] });
         case 'needs_secret_import':
           return commandSuccess(result, ask('List the setting names (not values) and ask the user to approve copying them, then call again with importSecrets=true.'));
         case 'needs_copy_approval':
@@ -80,7 +84,9 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
           return commandSuccess(result, { hint: result.planId ? `Continue hv_migrate with planId ${JSON.stringify(result.planId)} and the same approved confirmActions ${JSON.stringify(result.confirmActions ?? [])}.` : 'Some steps are still settling. Call hv_migrate again shortly.', next: ['hv_migrate'] });
         case 'blocked':
           return commandError('VALIDATION', result.message, {
-            details: resultRunId ? { ...(result.details ? { checks: result.details } : {}), resultRunId } : result.details,
+            details: resultRunId ? { ...(result.details && typeof result.details === 'object' && !Array.isArray(result.details)
+              ? result.details : result.details === undefined ? {} : { checks: result.details }), resultRunId } : result.details,
+            warnings,
             agentInstruction: { action: 'stop_and_report', message: 'Explain the blocker in plain language. Do not work around it with provider tools.' },
             next: result.next ?? ['hv_migrate', 'hv_spec'],
           });

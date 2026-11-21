@@ -37,7 +37,8 @@ function probeReviews(directory: string, {projectId,gcpProjectId}: Scope, wanted
       try {
         const saved = decodeProbe(row,projectId,gcpProjectId);
         if (!saved || !['ready','running','passed','failed'].includes(saved.run.status)
-          || !Array.isArray(saved.plan.actions) || typeof saved.plan.projectName !== 'string') throw new Error();
+          || !Array.isArray(saved.plan.actions) || typeof saved.plan.projectName !== 'string'
+          || typeof saved.plan.createdAt !== 'string' || (saved.run.finishedAt !== undefined && typeof saved.run.finishedAt !== 'string')) throw new Error();
         return [saved];
       } catch {
         // A damaged receipt may hide an active run. Keep this partition read-only.
@@ -48,32 +49,44 @@ function probeReviews(directory: string, {projectId,gcpProjectId}: Scope, wanted
       }
     });
     const activeSlots = new Set(records.filter(({run}) => run.status === 'running').map(({plan}) => transferSlot(plan.scope.target).id));
-    const items = records.filter(({plan}) => !wanted || plan.planId===wanted).map(({plan,run}) => {
-      const report = makePlanReport({planId:plan.planId,scope:plan.fileOnly ? transferFileAccessCheckScope : transferAccessCheckScope,
-        project:plan.projectName,environment:plan.scope.targetEnvironmentName,target:gcpProjectId,cloudTarget:{provider:'gcp',projectId:gcpProjectId},
-        createdAt:plan.createdAt,approval:'whole-plan',actions:plan.actions});
-      const status = {ready:'Review only',running:'Running',passed:'Passed',failed:'Failed'}[run.status];
-      const item = reportArtifact(report,status);
-      item.ownerId = projectId;
-      item.originalDigest = reviewDigest('probe',projectId,gcpProjectId,plan.planId,plan);
-      if (run.status === 'ready') {
-        const verified = plan.workloadDigest === probeWorkloadDigest && isDeepStrictEqual(plan.actions,probeActions(plan));
-        if (!damaged && verified && !activeSlots.has(transferSlot(plan.scope.target).id)) {
-          item.status = 'Awaiting approval';
-          item.approval = {digest:item.originalDigest};
+    const items: NativeReviewArtifact[] = [];
+    for (const {plan,run} of records.filter(({plan}) => !wanted || plan.planId===wanted)) {
+      try {
+        const report = makePlanReport({planId:plan.planId,scope:plan.fileOnly ? transferFileAccessCheckScope : transferAccessCheckScope,
+          project:plan.projectName,environment:plan.scope.targetEnvironmentName,target:gcpProjectId,cloudTarget:{provider:'gcp',projectId:gcpProjectId},
+          createdAt:plan.createdAt,approval:'whole-plan',actions:plan.actions});
+        const status = {ready:'Review only',running:'Running',passed:'Passed',failed:'Failed'}[run.status];
+        const item = reportArtifact(report,status);
+        item.ownerId = projectId;
+        item.originalDigest = reviewDigest('probe',projectId,gcpProjectId,plan.planId,plan);
+        if (run.status === 'ready') {
+          const verified = plan.workloadDigest === probeWorkloadDigest && isDeepStrictEqual(plan.actions,probeActions(plan));
+          if (!damaged && verified && !activeSlots.has(transferSlot(plan.scope.target).id)) {
+            item.status = 'Awaiting approval';
+            item.approval = {digest:item.originalDigest};
+          }
+        } else if (['running','passed','failed'].includes(run.status)) {
+          item.previouslyApproved = true;
+          item.details.push('Approved for this access check.');
+          if (run.finishedAt) item.details.push('Finished '+run.finishedAt+'.');
+          item.details.push(...evidenceDetails({...run,softDeleteSeconds:plan.softDeleteSeconds}));
+          if (!plan.fileOnly && run.copyPassed) item.details.push('The copy account read the test secret and downloaded the file.');
+          if (!plan.fileOnly && run.status === 'failed' && !run.appPassed) item.details.push('The test did not verify the app’s access restrictions.');
+          if (run.status === 'passed' || run.status === 'failed') item.details.push('The recorded temporary resources were cleaned up.');
         }
-        if (damaged) item.details.push('An access-check receipt for this project could not be verified.');
-      } else if (['running','passed','failed'].includes(run.status)) {
-        item.previouslyApproved = true;
-        item.details.push('Approved for this access check.');
-        if (run.finishedAt) item.details.push('Finished '+run.finishedAt+'.');
-        item.details.push(...evidenceDetails({...run,softDeleteSeconds:plan.softDeleteSeconds}));
-        if (!plan.fileOnly && run.copyPassed) item.details.push('The copy account read the test secret and downloaded the file.');
-        if (!plan.fileOnly && run.status === 'failed' && !run.appPassed) item.details.push('The test did not verify the app’s access restrictions.');
-        if (run.status === 'passed' || run.status === 'failed') item.details.push('The recorded temporary resources were cleaned up.');
+        items.push(item);
+      } catch {
+        damaged = true;
+        unavailable.push(unreadableReview(plan.planId));
       }
-      return item;
-    });
+    }
+    if (damaged) for (const item of items) {
+      if (item.approval || item.status === 'Review only') {
+        delete item.approval;
+        item.status = 'Review only';
+        item.details.push('An access-check receipt for this project could not be verified.');
+      }
+    }
     const related: NativeReviewArtifact[] = items.flatMap(item => item.status === 'Passed' || item.status === 'Failed'
       ? [item, {id:item.id+'-result',kind:'result',title:item.title+' result',planId:item.id,project:item.project,
         createdAt:records.find(row => row.plan.planId === item.id)?.run.finishedAt,
@@ -215,7 +228,10 @@ export function gcpReviewPlans(root: string, history: SetupHistory, wanted?: str
         const directory = path.join(shared,'plans');
         if (!fs.lstatSync(shared,{throwIfNoEntry:false})?.isDirectory() || !fs.lstatSync(directory,{throwIfNoEntry:false})?.isDirectory()) continue;
         const scope = {projectId:path.basename(project),gcpProjectId:path.basename(target)};
-        if (!wanted || wanted.startsWith('probe-')) result.push(...probeReviews(directory,scope,wanted));
+        if (!wanted || wanted.startsWith('probe-')) {
+          // A broken journal cannot authorize a check. Other projects and setup reports remain readable.
+          try { result.push(...probeReviews(directory,scope,wanted)); } catch { /* No verifiable probe rows. */ }
+        }
         if (!wanted || wanted.startsWith('setup-')) result.push(...setupReviews(directory,scope,history,wanted));
       }
     }

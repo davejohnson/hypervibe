@@ -323,16 +323,17 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       return fail('Preview the same active project with the original billing account. Its current identity and billing status must match the saved recovery.');
     }
     let saved: SetupPreview;
+    let originalReviewDigest: string | undefined;
     if (params.confirm) {
       const preview = readJson<SetupPreview | undefined>(previewFile, undefined);
       if (!preview) return fail('Preview this exact Google Cloud setup before confirming it. No infrastructure was changed.');
+      originalReviewDigest = reviewDigest('setup', params.projectId, params.gcpProjectId, preview.planId, preview);
       if (params.requireBrowserApproval) {
         if (params.contribution.id === 'ci-release' && (!params.ciReleaseAccess?.length || !preview.ciReleaseAccess?.length
           || digest(params.ciReleaseAccess) !== digest(preview.ciReleaseAccess))) {
           return fail('Preview GitHub release access again to review the workflows, branches, environments and triggers before approving.');
         }
-        const fingerprint = reviewDigest('setup', params.projectId, params.gcpProjectId, preview.planId, preview);
-        if (preview.planId !== params.gcpSetupPlanId || !readReviewApproval(dataDir, preview.planId, fingerprint)
+        if (preview.planId !== params.gcpSetupPlanId || !readReviewApproval(dataDir, preview.planId, originalReviewDigest)
           || (bootstrap && (!preview.bootstrapConnection || !params.bootstrapConnection
             || digest(preview.bootstrapConnection) !== digest(params.bootstrapConnection)))) {
           return { ...fail('This exact setup and its connection scope still need approval. Open the saved review before continuing.'),
@@ -477,7 +478,8 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       return { success: true, mode, planId: saved.planId, actions: planned.actions, ...(saved.requiresPlanId ? { requiresPlanId: true } : {}), ...report };
     }
     const report = saveSetupReport(params, saved, params.auth.redact);
-    const executionDigest = reviewDigest('setup', params.projectId, params.gcpProjectId, saved.planId, saved);
+    // Older preview files gain display defaults when rendered. Keep the receipt bound to the original saved document.
+    const executionDigest = originalReviewDigest!;
     recordSetupReviewExecution(dataDir, params.projectId, params.gcpProjectId, saved.planId, executionDigest, 'running');
     executing = { planId: saved.planId, digest: executionDigest };
     const addresses = saved.planned.actions.filter((action) => action.type !== 'noop').flatMap((action) => engineSegmentOf(action)?.addresses ?? []);
