@@ -121,9 +121,9 @@ reviewed plan; every action needs its own confirmation:
    Buckets are created without `force_destroy`, so deleting files is never a
    side effect of another change.
 2. OpenTofu destroys what it created: services, workers, jobs, schedules, queues,
-   buckets, the database instance and the secrets Hypervibe generated.
-3. Hypervibe reads the services, the database instance, the buckets and its
-   secrets again. If any still exists, or cannot be read, the apply fails and the
+   the cache, buckets, the database instance and the secrets Hypervibe generated.
+3. Hypervibe reads the services, the database instance, the cache, the queues,
+   the buckets and its secrets again. If any still exists, or cannot be read, the apply fails and the
    environment stays in the spec; run the teardown plan again.
 4. Only then are the environment's bindings cleared and the environment removed
    from the spec, so the next plan does not recreate it.
