@@ -7,6 +7,7 @@ import type { ProjectSpec } from '../../../domain/spec/spec.schema.js';
 import { awsCiAccess } from './aws-ci-auth.js';
 import { AWS_DOCKERFILE, awsReleaseDockerfile, buildImage, releaseTask, releaseWebService, awsRequiredDockerfile, awsWorkloadImages, inspectAwsBuildProject, usesAwsWebCommand, type AwsBuildTarget } from './aws-release.client.js';
 import { matchesTaskDefinitionFamily, taskDefinitionIdentity } from './aws-task-identity.js';
+import { awsWorkloadRoleArn } from './aws-secret-scope.js';
 
 export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context: GitHubOidcContext, spec: ProjectSpec): Promise<EngineCiReleaseTarget> {
   const access = await awsCiAccess(binding, context); const a = binding.aws!;
@@ -40,7 +41,8 @@ export async function createAwsCiReleaseTarget(binding: EngineCiBinding, context
     const current = found.taskDefinition;
     if (!matchesTaskDefinitionFamily(current?.taskDefinitionArn, w.taskDefinitionArn!) || current?.family !== recorded.family
       || (w.resourceType === 'ecs-service' && current.taskDefinitionArn !== definition) || !current.containerDefinitions?.some((c) => c.name === 'app') || current.status !== 'ACTIVE') throw new Error('AWS did not confirm the bound current task definition.');
-    const role = `arn:aws:iam::${a.accountId}:role/hypervibe/app/${binding.prefix}-runtime`;
+    // A service a limited secret names runs as its own role; every other workload as the shared runtime role.
+    const role = awsWorkloadRoleArn(spec, binding.environmentName, { accountId: a.accountId, prefix: binding.prefix }, name, recorded.family);
     if (current.taskRoleArn !== role || current.executionRoleArn !== role) throw new Error('The ECS task uses runtime roles outside the applied release scope.');
     taskDefinitions.set(name, current.taskDefinitionArn!);
   };

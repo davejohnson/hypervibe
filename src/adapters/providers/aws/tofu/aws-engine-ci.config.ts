@@ -1,6 +1,7 @@
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { assertEngineCiIntent } from '../../../../domain/spec/engine-ci.js';
 import type { AwsEngineInput } from './aws-engine.config.js';
+import { awsTaskRoleArns } from './aws-engine.identity.js';
 
 /** A separate role per environment; the setup boundary caps it, its own policy grants only releases. */
 export function addAwsCiConfiguration(input: AwsEngineInput, files: EngineConfiguration['files'], resources: Record<string, EngineResourceMapping>): void {
@@ -12,6 +13,9 @@ export function addAwsCiConfiguration(input: AwsEngineInput, files: EngineConfig
   const express = (input.services ?? []).filter((service) => service.public);
   const services = [...(input.workers ?? []), ...(input.services ?? []).filter((service) => !service.public)];
   const tasks = [...services, ...(input.jobs ?? [])];
+  // The roles a release hands back to ECS: the shared runtime role, and the own role of each service a limited secret names.
+  const passed = input.secretScopes && Object.keys(input.secretScopes).length ? awsTaskRoleArns(input, [...express, ...tasks])
+    : `arn:aws:iam::${input.accountId}:role/hypervibe/app/${input.prefix}-runtime`;
   const taskFamilies = tasks.map((task) => `arn:aws:ecs:${scope}:task-definition/${task.resourceName}:*`);
   const statements = [
     statement('BuildImage', ['codebuild:BatchGetProjects', 'codebuild:StartBuild', 'codebuild:BatchGetBuilds'], [`arn:aws:codebuild:${scope}:project/${input.prefix}-images`]),
@@ -22,7 +26,7 @@ export function addAwsCiConfiguration(input: AwsEngineInput, files: EngineConfig
       statement('ReadWebRollout', ['ecs:DescribeServiceDeployments'], express.map((service) => `arn:aws:ecs:${scope}:service-deployment/${input.prefix}/${service.resourceName}/*`)),
     ] : []),
     ...(express.length || tasks.length ? [
-      statement('PassRuntimeRole', ['iam:PassRole'], `arn:aws:iam::${input.accountId}:role/hypervibe/app/${input.prefix}-runtime`, { Condition: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } } }),
+      statement('PassRuntimeRole', ['iam:PassRole'], passed, { Condition: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } } }),
     ] : []),
     ...(tasks.length ? [
       // DescribeTaskDefinition has no resource-level scope; writes remain family-scoped.

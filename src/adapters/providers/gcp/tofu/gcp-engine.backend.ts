@@ -131,6 +131,11 @@ export interface GcpCloudRunEngineInput {
   retiredStorage?: string[];
   runtimeServiceAccountEmail?: string;
   /**
+   * This project has (or had) services running as their own identity. Their per-bucket grants keep an
+   * address mapping even after a service returns to the shared identity, so the removal is reviewable.
+   */
+  serviceIdentityAddresses?: boolean;
+  /**
    * Existing resources Hypervibe itself attempted to create (exact recorded
    * identity and ownership label) that engine state does not track yet.
    */
@@ -558,6 +563,8 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       for (const address of wakerAddresses(key)) resources[address] = mapping;
       if (service.pendingWorkQuery) {
         if (!input.database) throw new Error(`Worker ${service.logicalName} counts pending work in the database, so it needs one.`);
+        // The waker acts as the pool's identity and reads the database as the shared identity's login.
+        if (service.runtimeServiceAccountEmail !== input.runtimeServiceAccountEmail) throw new Error(`On-demand worker ${service.logicalName} must run as the shared runtime identity.`);
         workflows[`${key}_waker`] = {
           name: `${service.resourceName}-waker`.slice(0, 64),
           project: input.projectId,
@@ -760,12 +767,26 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       role: 'roles/storage.objectUser',
       member: `serviceAccount:${input.runtimeServiceAccountEmail}`,
     };
+    // A service with its own identity reaches only the buckets it is wired to.
+    for (const service of input.services) {
+      if (service.runtimeServiceAccountEmail === input.runtimeServiceAccountEmail || !bucket.injectInto.includes(service.logicalName)) continue;
+      const address = `${key}_service_${engineKey(service.logicalName)}`;
+      bucketIam[address] = {
+        bucket: `\${google_storage_bucket.${key}.name}`,
+        role: 'roles/storage.objectUser',
+        member: `serviceAccount:${service.runtimeServiceAccountEmail}`,
+      };
+    }
   }
   for (const name of [...(input.storage ?? []).map((bucket) => bucket.name), ...(input.retiredStorage ?? [])]) {
     const key = storageEngineKey(name);
     const mapping: EngineResourceMapping = { actionId: `storage:${name}`, kind: 'storage', name, dataBearing: true, billable: true };
     resources[`google_storage_bucket.${key}`] = mapping;
     resources[`google_storage_bucket_iam_member.${key}_runtime`] = mapping;
+    const own = input.services.filter((service) => service.runtimeServiceAccountEmail !== input.runtimeServiceAccountEmail).map((service) => service.logicalName);
+    for (const service of input.serviceIdentityAddresses ? [...input.services.map((entry) => entry.logicalName), ...(input.retiredServices ?? [])] : own) {
+      resources[`google_storage_bucket_iam_member.${key}_service_${engineKey(service)}`] = mapping;
+    }
   }
   const domainMappings: Record<string, unknown> = {};
   for (const { domain, service } of input.domains ?? []) {
