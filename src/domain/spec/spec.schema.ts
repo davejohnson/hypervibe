@@ -2576,6 +2576,20 @@ export const projectSpecSchema = z.object({
               message: `${secretKind} "${key}" names service "${serviceName}", which environment "${environmentName}" does not declare` });
           }
         }
+        // Cloud Run: shapes whose access boundary Hypervibe cannot enforce are refused, not weakened.
+        if (environment.hosting.provider === 'cloudrun') {
+          if (environment.hosting.gcpRuntimeSecretGrants) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secrets', key, 'services'],
+              message: `${secretKind} "${key}" is limited to named services, which cannot be combined with gcpRuntimeSecretGrants in "${environmentName}": that setting grants each secret to the shared runtime identity` });
+          }
+          for (const serviceName of secret.services) {
+            const service = environment.services[serviceName];
+            if (service?.workloadKind === 'worker' && service.onDemand) {
+              ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secrets', key, 'services'],
+                message: `${secretKind} "${key}" names "${serviceName}", an on-demand worker in "${environmentName}". Its waker must act as the worker's identity, which Hypervibe cannot isolate yet. Name another service or remove onDemand` });
+            }
+          }
+        }
       }
     }
     if (secret.ownership === 'hypervibe' && secret.conflictsWith?.includes(key)) {

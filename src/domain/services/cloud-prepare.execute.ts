@@ -8,8 +8,9 @@ import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.c
 import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/providers/gcp/google-browser-signin.js';
 import { migrationAccessModes, providerRegistry, type MigrationAccess } from '../registry/provider.registry.js';
 import { GoogleAuth } from 'google-auth-library';
-import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress, isolationGrants, type TransferIsolationScope } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress, isolationGrants, readSecretScopeInput, secretScopePolicyProblems, SECRET_ACCESSOR_ROLE, type TransferIsolationScope } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import { getGcpProjectSetupContribution, getGcpRuntimeIsolation, runGcpProjectSetup } from './gcp-project-setup.service.js';
+import { GCP_SECRET_SCOPE_CONTRIBUTION } from './gcp-secret-scope.js';
 import type { Project } from '../entities/project.entity.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import { GCP_PROJECT_ID_PATTERN, gcpConnectionScope } from './gcp-environment-target.js';
@@ -845,6 +846,15 @@ async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePla
   }
   const policy = await getProjectIamPolicy(token, plan.gcpProjectId);
   const restricted = isolation ? verifyRuntimeRestrictions(policy, isolation) : new Set<string>();
+  // Secrets limited to named services narrow the same grant with their own reviewed condition.
+  const scopeSetup = getGcpProjectSetupContribution(localProjectId, plan.gcpProjectId, GCP_SECRET_SCOPE_CONTRIBUTION);
+  const scope = scopeSetup && readSecretScopeInput(scopeSetup);
+  if (scopeSetup && !scope) throw new Error('The saved service identity setup does not match what Hypervibe builds.');
+  if (scope?.runtimeExcludedSecretIds.length && plan.runtimeMember === `serviceAccount:${scope.runtimeServiceAccountEmail}`) {
+    const problems = secretScopePolicyProblems(policy, { ...scope, identities: [] });
+    if (problems.length) throw new Error(`The app's Secret Manager restriction does not match the saved project setup. ${problems.join(' ')}`);
+    restricted.add(SECRET_ACCESSOR_ROLE);
+  }
   if (isolation) {
     const account = await client.getServiceAccount(plan.gcpProjectId, isolation.runtimeEmail.split('@')[0]!);
     const project = await client.getProject(plan.gcpProjectId);

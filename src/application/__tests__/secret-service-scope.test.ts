@@ -3,7 +3,7 @@ import { projectSpecSchema, type ProjectSpec } from '../../domain/spec/spec.sche
 import { engineEnvironmentProblems } from '../../domain/services/infrastructure-engine-selection.js';
 import { credentialRuntimeServices } from '../../domain/services/credential-runtime-consumers.js';
 import { secretServiceScopeProblems, secretServicesFor } from '../../domain/services/secret-service-scope.js';
-import { buildCloudRunConfiguration, secretEngineKey } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { buildCloudRunConfiguration } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { buildEngineInput } from '../infrastructure-engine.js';
 import { awsEngineProblems } from '../infrastructure-engine-aws.js';
 import { azureEngineProblems } from '../infrastructure-engine-azure.js';
@@ -138,18 +138,11 @@ describe('a secret limited to named services on Cloud Run', () => {
     expect(env.release).not.toContain('SOURCE_KEY');
   });
 
-  it('ties a per-secret access grant only to the workloads that still reference the secret', () => {
-    const spec = parse({ SOURCE_KEY: { ...delegated, services: ['catchup'] } }, 'cloudrun', { gcpRuntimeSecretGrants: 'per-secret' });
-    const labels = { 'managed-by': 'hypervibe', 'hv-environment': 'env-123' };
-    const ids = ['hv-staging-source-key', 'hv-staging-database-url'];
-    const { files } = generatedEnv(spec, { secrets: ids.map(secretId => ({ secretId, labels })) });
-    const grant = `google_secret_manager_secret_iam_member.${secretEngineKey('hv-staging-source-key')}`;
-    const jobs = files['jobs.tf.json'].resource.google_cloud_run_v2_job;
-    expect(jobs.catchup.depends_on).toContain(grant);
-    expect(jobs.release_command.depends_on).not.toContain(grant);
-    expect(files['cloudrun.tf.json'].resource.google_cloud_run_v2_service.web.depends_on).not.toContain(grant);
-    // One runtime identity runs every workload, so the grant itself still names that identity.
-    expect(files['secrets.tf.json'].resource.google_secret_manager_secret_iam_member[secretEngineKey('hv-staging-source-key')].member).toBe(`serviceAccount:${runtime}`);
+  it('refuses per-secret grants to the shared identity together with a limited secret', () => {
+    // gcpRuntimeSecretGrants grants each referenced secret to the one shared identity; a limited secret must never be granted to it.
+    const result = projectSpecSchema.safeParse(document({ SOURCE_KEY: { ...delegated, services: ['catchup'] } }, 'cloudrun', { gcpRuntimeSecretGrants: 'per-secret' }));
+    expect(result.error?.issues.map(issue => issue.message)).toEqual([expect.stringContaining('cannot be combined with gcpRuntimeSecretGrants')]);
+    expect(projectSpecSchema.safeParse(document({ SOURCE_KEY: delegated }, 'cloudrun', { gcpRuntimeSecretGrants: 'per-secret' })).success).toBe(true);
   });
 
   it('reports the services that hold a secret', () => {
