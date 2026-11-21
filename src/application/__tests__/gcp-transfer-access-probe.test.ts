@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { Project } from '../../domain/entities/project.entity.js';
+import * as probeStorage from '../../adapters/storage/transfer-access-probe.js';
 import { setupPlansDirectory } from '../../adapters/storage/gcp-setup-report.js';
 import {
   findTransferAccessProbeReport,
@@ -358,4 +359,30 @@ it('exports and finishes cleanup for an untagged full run approved with an older
   expect(log).toEqual(['destroy-version', 'delete-file']);
   expect(del).toHaveBeenCalledWith(object);
   expect(runJob).not.toHaveBeenCalled();
+});
+
+it('retains the job receipt and verified execution when recording the deletion fails once', async () => {
+  const id = await preview(true);
+  const receipt = { gcpProjectId: target.projectId, region: target.targetRegion, jobId: 'short-job', secretIds: [] };
+  const write = probeStorage.storeProbe;
+  let failNextWrite = false;
+  vi.spyOn(probeStorage, 'storeProbe').mockImplementation((...args) => {
+    if (failNextWrite) {
+      failNextWrite = false;
+      throw new Error('Transient journal failure');
+    }
+    return write(...args);
+  });
+  runJob.mockImplementationOnce(async ctx => {
+    ctx.recordTransferResources(receipt);
+    failNextWrite = true;
+    expect(() => ctx.recordTransferResources(null)).toThrow('Transient journal failure');
+    return { ok: false, accessPassed: true, fileEvidence: denied };
+  });
+  const recover = vi.spyOn(jobs, 'recoverTerminalTransferResources').mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+  expect(await confirm(id, true)).toMatchObject({ success: false, error: expect.stringContaining(id) });
+  expect(loadProbe(project.id, target.projectId, id)!.run).toMatchObject({ status: 'running', job: receipt, appPassed: true });
+  expect(await confirm(id, true)).toMatchObject({ success: true, fileEvidence: denied });
+  expect(recover).toHaveBeenCalledTimes(2);
+  expect(runJob).toHaveBeenCalledTimes(1);
 });

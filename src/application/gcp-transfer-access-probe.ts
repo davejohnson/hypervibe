@@ -143,14 +143,15 @@ async function runSavedCheck(input: AccessProbeRequest) {
           isDeepStrictEqual(plan.actions, probeActions(proposed)))),
     'The access check or its Google Cloud settings changed. Preview the test again.',
   );
-  const run = saved!.run;
+  let run = saved!.run;
   requireProbe(
     !plan.fileOnly || (!run.version && !run.destroyed && run.pending !== 'version'),
     'The recorded test resources do not match the reviewed file check.',
   );
   const save = (update: Partial<ProbeRun>) => {
-    Object.assign(run, update);
-    storeProbe(plan, run);
+    const next = { ...run, ...update };
+    storeProbe(plan, next);
+    run = next;
   };
   const ctx = {
     gcpProjectId: target.projectId,
