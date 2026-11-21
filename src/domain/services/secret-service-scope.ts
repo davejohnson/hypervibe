@@ -5,7 +5,7 @@ import type { ProjectSpec } from '../spec/spec.schema.js';
  * Every other provider gives an environment's secrets to all of its services, so
  * a secret that names services is refused there instead of reaching all of them.
  */
-export const SECRET_SERVICE_SCOPE_PROVIDERS: readonly string[] = ['cloudrun'];
+export const SECRET_SERVICE_SCOPE_PROVIDERS: readonly string[] = ['cloudrun', 'aws'];
 
 type ScopeSpec = {
   environments: Record<string, { hosting: { provider: string }; services: Record<string, unknown> } | undefined>;

@@ -5,7 +5,6 @@ import { credentialRuntimeServices } from '../../domain/services/credential-runt
 import { secretServiceScopeProblems, secretServicesFor } from '../../domain/services/secret-service-scope.js';
 import { buildCloudRunConfiguration } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { buildEngineInput } from '../infrastructure-engine.js';
-import { awsEngineProblems } from '../infrastructure-engine-aws.js';
 import { azureEngineProblems } from '../infrastructure-engine-azure.js';
 
 // Contract (docs/development/connections.md): a secret that names services reaches
@@ -75,7 +74,7 @@ describe('declaring the services a secret reaches', () => {
       message: 'Hypervibe-owned secret "SIGNING_KEY" names service "api", which environment "staging" does not declare' }]);
   });
 
-  it.each(['railway', 'aws', 'azure'])('refuses named services on %s instead of giving the secret to every service', (provider) => {
+  it.each(['railway', 'azure'])('refuses named services on %s instead of giving the secret to every service', (provider) => {
     expect(projectSpecSchema.safeParse(document({ SOURCE_KEY: delegated }, provider)).success).toBe(true);
     const found = issues({ SOURCE_KEY: { ...delegated, services: ['catchup'] } }, provider);
     expect(found).toEqual([{ path: 'secrets.SOURCE_KEY.services', message: expect.stringContaining(`hosting provider "${provider}" does not support yet`) }]);
@@ -161,7 +160,7 @@ describe('planning a spec that reached a provider without service scoping', () =
     return { ...spec, secrets: { ...spec.secrets, SOURCE_KEY: { ...spec.secrets.SOURCE_KEY!, services: ['catchup'] } } } as ProjectSpec;
   };
 
-  it.each([['aws', awsEngineProblems], ['azure', azureEngineProblems]] as const)('blocks the %s plan', (provider, problems) => {
+  it.each([['azure', azureEngineProblems]] as const)('blocks the %s plan', (provider, problems) => {
     const expected = expect.stringContaining('Secret SOURCE_KEY is limited to named services');
     expect(problems(unvalidated(provider), 'staging')).toContainEqual(expected);
     expect(engineEnvironmentProblems(unvalidated(provider), 'staging')).toContainEqual(expected);
