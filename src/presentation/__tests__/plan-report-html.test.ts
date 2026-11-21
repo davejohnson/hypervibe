@@ -140,6 +140,18 @@ describe('standalone infrastructure plan report', () => {
     expect(renderPlanReportHtml(report([]))).not.toContain('Approve the whole plan');
   });
 
+  it('describes only the file and the app job in an export file access check', () => {
+    const html = renderPlanReportHtml(report([action('app', 'Check direct file access'),
+      action('cleanup', 'Remove test resources', { reason: 'The deleted file is recoverable for 7 days.' })], {
+      scope: 'Google Cloud export file access check', approval: 'whole-plan',
+    }));
+    expect(html).toContain('<span class="brand-topic">Export file access check</span>');
+    expect(html).toMatch(/one temporary Cloud Run job/i);
+    expect(html).toMatch(/app account/i);
+    expect(html).toContain('7 days');
+    expect(html).not.toMatch(/infrastructure plan|verified at planning time|two temporary Cloud Run jobs|test secret|copy account/i);
+  });
+
   it('explains replacing app access grants without reporting a data replacement or suppressing a real warning', () => {
     const actions = [action('runtime-access', 'App access to secrets', { type: 'replace' }),
       action('transfer-slot:secret:fixture', 'The copy job’s secret', { kind: 'secret', type: 'noop' })];

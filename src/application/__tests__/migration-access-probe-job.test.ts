@@ -28,6 +28,7 @@ const input = {
 const name = `projects/${input.projectNumber}/secrets/${input.secretId}/versions/7`;
 const secret = 'https://secretmanager.googleapis.com/v1/' + name + ':access';
 const object = `https://storage.googleapis.com/storage/v1/b/${input.bucket}/o/${encodeURIComponent(input.object)}?alt=media&generation=${input.generation}`;
+const metadata = object.replace('?alt=media&', '?');
 const date = '20261120T180000Z';
 const query = new URLSearchParams({
   generation: input.generation,
@@ -62,15 +63,18 @@ const secretResult = (value = { marker, url: signed }, resource = name) =>
   json({ name: resource, payload: { data: Buffer.from(JSON.stringify(value)).toString('base64') } });
 
 interface FixtureOptions {
-  role?: 'app' | 'copy';
+  role?: 'app' | 'copy' | 'file-app';
   email?: string;
   observedEmail?: string;
   observedScriptChanged?: boolean;
   secret?: Response;
   object?: Response;
+  metadata?: Response;
   file?: Response;
   token?: Response;
   failedCount?: number;
+  deletionRejected?: boolean;
+  logResult?: Record<string, unknown>;
 }
 interface CreatedJob {
   template: {
@@ -117,6 +121,7 @@ function fixture(options: FixtureOptions = {}) {
       return options.file ?? new Response(marker);
     }
     expect(headers.get('authorization')).toBe('Bearer runtime-token-fixture');
+    if (dest === metadata) return options.metadata ?? accessDenial('storage.objects.get');
     if (dest === secret)
       return (
         options.secret ?? (options.role === 'copy' ? secretResult() : accessDenial('secretmanager.versions.access'))
@@ -147,7 +152,8 @@ function fixture(options: FixtureOptions = {}) {
       loggingQuotaProjects.push(new Headers(init.headers).get('X-Goog-User-Project'));
     if (url.hostname === 'logging.googleapis.com')
       return json({
-        entries: String(init.body).includes('HV_RESTORE_ERROR') ? [] : logs.map((textPayload) => ({ textPayload })),
+        entries: String(init.body).includes('HV_RESTORE_ERROR') ? [] :
+          (options.logResult ? ['HV_TRANSFER_RESULT ' + JSON.stringify(options.logResult)] : logs).map((textPayload) => ({ textPayload })),
       });
     if (method === 'POST' && path === `${scope}/jobs`) {
       job = `${scope}/jobs/${url.searchParams.get('jobId')}`;
@@ -177,6 +183,11 @@ function fixture(options: FixtureOptions = {}) {
         /operator-token-fixture|runtime-token-fixture|X-Goog-Signature/,
       );
       const env = Object.fromEntries(container.env.map((v: { name: string; value: string }) => [v.name, v.value]));
+      if (options.role === 'file-app') {
+        expect(Object.keys(env).sort()).toEqual(['BUCKET', 'GENERATION', 'OBJECT', 'PROBE_ROLE', 'PROJECT_NUMBER', 'SERVICE_ACCOUNT']);
+        expect(JSON.stringify(container.env)).not.toContain(marker);
+        expect(env.PROBE_ROLE).toBe('file-app');
+      }
       await runInNewContext(container.args[1], {
         process: { env },
         fetch: worker,
@@ -198,6 +209,7 @@ function fixture(options: FixtureOptions = {}) {
       });
     }
     if (method === 'DELETE' && path === job) {
+      if (options.deletionRejected) return json({}, 403);
       exists = false;
       return json({ name: `${scope}/operations/delete`, done: true, response: {} });
     }
@@ -209,8 +221,9 @@ function fixture(options: FixtureOptions = {}) {
     logs,
     loggingQuotaProjects,
     recorded,
-    run: (override: Partial<typeof input> = {}) =>
-      runAccessProbeJob(
+    run: (override: Partial<typeof input> = {}) => {
+      const { secretId, version, marker, ...common } = { ...input, ...override };
+      return runAccessProbeJob(
         {
           token: local,
           gcpProjectId: project,
@@ -222,16 +235,43 @@ function fixture(options: FixtureOptions = {}) {
             if (value?.probe) controls.push('save ' + value.probe.stage);
           },
         },
-        { ...input, role: options.role ?? 'app', ...override },
-      ),
+        options.role === 'file-app'
+          ? { ...common, role: 'file-app' }
+          : { ...common, role: options.role ?? 'app', secretId, version, marker },
+      );
+    },
   };
 }
 afterEach(() => vi.unstubAllGlobals());
 
 describe('bounded access check in the scoped Cloud Run job', () => {
+  // Anonymous reads returned HTML for media and JSON for metadata (both 401).
+  // This authenticated 403 pair is reconstructed from that split and Google's
+  // permission contract, not a recording of the Cloud Run identity.
+  // https://docs.cloud.google.com/storage/docs/json_api/v1/objects/get
+  // https://docs.cloud.google.com/storage/docs/troubleshooting#403_Forbidden
+  it('corroborates a non-JSON download rejection on the very same generation', async () => {
+    const f = fixture({
+      object: new Response(`<p>${email} does not have storage.objects.get access to the Google Cloud Storage object.</p>`, {
+        status: 403, headers: { 'Content-Type': 'text/html' },
+      }),
+    });
+    expect(await f.run()).toEqual({
+      ok: true,
+      fileEvidence: {
+        outcome: 'denied',
+        media: { status: 403, classification: 'non-json-forbidden' },
+        metadata: { status: 403, classification: 'permission-denied' },
+      },
+    });
+    expect(f.visited.slice(-3)).toEqual([secret, object, metadata]);
+  });
   it('requires permission-specific denials from both APIs and cleans up the owned job', async () => {
     const f = fixture();
-    expect(await f.run()).toEqual({ ok: true });
+    expect(await f.run()).toEqual({
+      ok: true,
+      fileEvidence: { outcome: 'denied', media: { status: 403, classification: 'permission-denied' } },
+    });
     expect(f.visited.slice(-2)).toEqual([secret, object]);
     expect(f.recorded.at(-1)).toBeNull();
     expect(f.recorded.at(-2)?.jobUid).toBe('native-uid');
@@ -243,6 +283,89 @@ describe('bounded access check in the scoped Cloud Run job', () => {
     expect(f.loggingQuotaProjects).toEqual([project]);
     expect(f.logs.join(' ')).not.toMatch(/X-Goog-|runtime-token-fixture/);
     expect(f.logs.join(' ')).not.toContain(marker);
+  });
+  it('tests only the fresh generation as the app without any secret reference or secret access', async () => {
+    const f = fixture({ role: 'file-app', secret: new Response('PRIVATE SECRET') });
+    expect(await f.run()).toMatchObject({ ok: true, fileEvidence: { outcome: 'denied' } });
+    expect(f.visited.filter((url) => url.startsWith('https:'))).toEqual([object]);
+    expect(f.recorded.at(-1)).toBeNull();
+  });
+  it.each([{ marker }, { secretId: input.secretId }, { version: input.version }])(
+    'rejects a file-only job carrying an unexpected challenge or secret reference before any cloud call', async (extra) => {
+      const { marker: omitted, secretId, version, ...scope } = input;
+      const token = vi.fn(async () => 'unused');
+      const ctx = { token, gcpProjectId: project, region, runtimeServiceAccountEmail: email, environmentLabel: 'staging', recordTransferResources: vi.fn() };
+      // @ts-expect-error Simulate an untyped caller trying to submit a forbidden field.
+      expect((await runAccessProbeJob(ctx, { ...scope, role: 'file-app', ...extra })).ok).toBe(false);
+      expect(token).not.toHaveBeenCalled();
+    },
+  );
+  it.each([200, 206])('reports direct file access on HTTP %s without reading the response body', async (status) => {
+    const response = new Response('PRIVATE UNEXPECTED FILE', { status });
+    const cancel = vi.spyOn(response.body!, 'cancel');
+    const f = fixture({ role: 'file-app', object: response });
+    const result = await f.run();
+    expect(result).toMatchObject({ ok: false, fileEvidence: { outcome: 'readable', media: { status, classification: 'readable' } } });
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(f.visited).not.toContain(metadata);
+    expect(JSON.stringify([f.logs, result])).not.toMatch(/PRIVATE UNEXPECTED FILE|runtime-token-fixture/);
+    expect(JSON.stringify([f.logs, result])).not.toContain(marker);
+  });
+  it.each([
+    [401, 'Anonymous caller does not have storage.objects.get access to the Google Cloud Storage object.'],
+    [403, "Request is prohibited by organization's policy."],
+    [403, 'Request had insufficient authentication scopes.'],
+    [403, 'someone-else does not have storage.objects.get access to the Google Cloud Storage object.'],
+    [403, `another-${email} does not have storage.objects.get access to the Google Cloud Storage object.`],
+    [403, 'PRIVATE UNRECOGNIZED ERROR'],
+    [404, 'Not Found'],
+    [503, 'Unavailable'],
+  ] as const)('keeps HTTP %s inconclusive for %s', async (status, body) => {
+    const f = fixture({ role: 'file-app', object: new Response(body, { status }) });
+    const result = await f.run();
+    expect(result).toMatchObject({ ok: false, fileEvidence: { outcome: 'inconclusive', media: { status, classification: 'inconclusive' } } });
+    expect(f.visited).not.toContain(metadata);
+    expect(JSON.stringify([f.logs, result])).not.toContain(body);
+  });
+  it.each([
+    [200, {}, 'readable'],
+    [401, {}, 'inconclusive'],
+    [403, { error: { code: 403, message: 'Forbidden' } }, 'inconclusive'],
+    [403, { error: { code: 403, status: 'PERMISSION_DENIED', details: [{ reason: 'SECURITY_POLICY_VIOLATED' }] } }, 'inconclusive'],
+    [404, {}, 'inconclusive'],
+  ] as const)('requires matching permission evidence even if metadata returns HTTP %s', async (status, body, classification) => {
+    const f = fixture({ role: 'file-app', object: new Response('Forbidden', { status: 403 }), metadata: json(body, status) });
+    expect(await f.run()).toMatchObject({
+      ok: false, fileEvidence: { outcome: 'inconclusive', media: { status: 403, classification: 'non-json-forbidden' }, metadata: { status, classification } },
+    });
+    expect(f.visited.slice(-2)).toEqual([object, metadata]);
+  });
+  it('retains a validated file observation if job cleanup remains unresolved', async () => {
+    const f = fixture({ role: 'file-app', deletionRejected: true });
+    expect(await f.run()).toMatchObject({ ok: false, accessPassed: true, error: expect.stringContaining('Cleanup'), fileEvidence: { outcome: 'denied' } });
+    expect(f.recorded.at(-1)?.jobUid).toBe('native-uid');
+  });
+  it.each([true, false])('rejects a log claiming a failed check only needs cleanup (deletion rejected: %s)', async (deletionRejected) => {
+    const result = await fixture({
+      role: 'file-app', deletionRejected, logResult: {
+        ok: false, check: 'cleanup', accessPassed: true,
+        fileEvidence: { outcome: 'denied', media: { status: 403, classification: 'permission-denied' } },
+      },
+    }).run();
+    expect(result.ok).toBe(false);
+    expect(result.accessPassed).toBeUndefined();
+  });
+  it.each([
+    { ok: true },
+    { ok: true, fileEvidence: { outcome: 'denied', media: { status: 200, classification: 'permission-denied' } } },
+    { ok: true, fileEvidence: { outcome: 'denied', media: { status: 403, classification: 'non-json-forbidden' } } },
+    { ok: true, fileEvidence: { outcome: 'denied', media: { status: 403, classification: 'permission-denied', body: 'PRIVATE' } } },
+    { ok: false, check: 'object-denial', fileEvidence: { outcome: 'inconclusive', media: { status: 98765, classification: 'PRIVATE' } } },
+  ])('never returns malformed, overbroad or contradictory file evidence from a log', async (logResult) => {
+    const result = await fixture({ role: 'file-app', logResult }).run();
+    expect(result.ok).toBe(false);
+    expect(result.fileEvidence).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain('PRIVATE');
   });
   it.each([
     'missing',

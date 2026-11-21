@@ -149,7 +149,7 @@ describe('runCloudPrepare', () => {
     expect(browser).toHaveBeenCalledOnce();
   });
 
-  it('dispatches the access check only for the original Railway and managed Google bindings and connection identities', async () => {
+  it.each(['verify-copy-access', 'verify-export-file-access'] as const)('dispatches %s only for the original Railway and managed Google bindings and connection identities', async migrationAccess => {
     const project = seedProject(RUNTIME_SERVICE_ACCOUNT_EMAIL);
     const environments = new EnvironmentRepository();
     const source = environments.create({ projectId: project.id, name: 'source', platformBindings: {
@@ -165,11 +165,11 @@ describe('runCloudPrepare', () => {
     const run = vi.spyOn(probe, 'runGcpTransferAccessProbe').mockResolvedValue({ success: false, error: 'Stopped before cloud access' });
     const readSlot = vi.spyOn(transferEvidence, 'readTransferSlotEvidence');
     const input = { project, provider: 'cloudrun', environmentName: destination.name, migrationSourceEnvironment: source.name,
-      migrationAccess: 'verify-copy-access' as const, defaultAdminAccessTokenProvider: token };
+      migrationAccess, defaultAdminAccessTokenProvider: token };
     const planId = 'probe-ace24cf3-eab9-42d0-9862-b8cf05713c28';
     for (const invalid of [{ confirm: true }, { gcpSetupPlanId: planId }, { region: 'us-west1' }, { environmentName: 'unmanaged' },
       { runtimeServiceAccountEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL }, { deployServiceAccountEmail: DEPLOY_SERVICE_ACCOUNT_EMAIL },
-      { adminAccessToken: 'separate-token' }, { migrationSourceEnvironment: destination.name }]) {
+      { adminAccessToken: 'separate-token' }, { adminCredentialSource: 'service-account-inline' }, { migrationSourceEnvironment: destination.name }]) {
       expect((await runCloudPrepare({ ...input, ...invalid })).success).toBe(false);
     }
     expect(run).not.toHaveBeenCalled();
@@ -179,6 +179,7 @@ describe('runCloudPrepare', () => {
         project, target: { projectId: project.name, targetRegion: 'us-central1', sourceEnvironmentId: source.id,
           sourceRailwayProjectId: 'railway-project', sourceRailwayEnvironmentId: 'railway-source', targetEnvironmentId: destination.id },
         targetEnvironmentName: destination.name, sourceEnvironmentName: source.name,
+        ...(migrationAccess === 'verify-export-file-access' ? { fileOnly: true } : {}),
         runtimeEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL, deployEmail: DEPLOY_SERVICE_ACCOUNT_EMAIL, token,
         confirm, planId: confirm ? planId : undefined,
       });

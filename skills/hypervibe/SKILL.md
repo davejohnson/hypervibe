@@ -143,6 +143,15 @@ and requires both direct reads by the app account to be denied. Report the outco
 including any period when the deleted file stays recoverable. The private
 handoff and actual data copy require a separate plan.
 
+When only the app's direct export-file access needs retesting, preview
+`migrationAccess="verify-export-file-access"` with the same project, source
+and destination. Show its saved HTML and confirm its exact `gcpSetupPlanId`
+after approval. The plan checks the contents of one disposable export file,
+runs one temporary job as the app account, and cleans up the job and file.
+Google may charge for the job, requests and storage. Report whether the app
+read the file, Google denied access, or the read remains unverified. Include
+cleanup and any soft-delete period. This result covers only direct file access.
+
 `hv_migrate` prepares a separate OpenTofu-managed GCP target. Railway database
 and bucket transfers require a planned private credential handoff that is still
 unavailable. A fresh comparison of private Railway and Cloud SQL databases also

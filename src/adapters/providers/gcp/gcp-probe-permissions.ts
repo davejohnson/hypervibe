@@ -13,7 +13,7 @@ const softDeleteSchema = z.object({
   versioning: z.object({ enabled: z.boolean() }).optional(),
   defaultEventBasedHold: z.boolean().optional(),
 });
-export async function checkProbePermissions(scope: TransferIsolationScope, token: string) {
+export async function checkProbePermissions(scope: TransferIsolationScope, token: string, fileOnly = false) {
   const project = scope.target.projectId,
     slot = transferSlot(scope.target);
   const read = async (url: string, method = 'GET', body?: unknown) => {
@@ -50,8 +50,9 @@ export async function checkProbePermissions(scope: TransferIsolationScope, token
       !policy.data.versioning?.enabled,
     'The original test bucket must allow generation-matched cleanup without an object hold, retention lock or object versioning.',
   );
+  const jobIdentities = fileOnly ? [scope.runtimeEmail] : [scope.runtimeEmail, slot.accountEmail];
   await Promise.all([
-    ...[scope.runtimeEmail, slot.accountEmail].map((email) =>
+    ...jobIdentities.map((email) =>
       permission(
         'https://iam.googleapis.com/v1/projects/' +
           project +
@@ -74,9 +75,9 @@ export async function checkProbePermissions(scope: TransferIsolationScope, token
         'logging.logEntries.list',
         'serviceusage.services.use',
       ],
-      'run and verify the two temporary jobs',
+      'run and verify the temporary Cloud Run job',
     ),
-    permission(
+    fileOnly || permission(
       'https://secretmanager.googleapis.com/v1/projects/' +
         scope.projectNumber +
         '/secrets/' +

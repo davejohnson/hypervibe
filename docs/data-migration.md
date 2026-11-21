@@ -70,6 +70,21 @@ A passing check records the two accounts' access at that time. Moving Railway
 credentials and customer data still requires the separate private handoff
 and approved copy plan.
 
+To retest only the app account's direct access to an export file, preview
+`migrationAccess="verify-export-file-access"` for the same project, source
+and destination. Review the new HTML and confirm its exact `gcpSetupPlanId`.
+Hypervibe writes disposable test data under the destination's export prefix
+and reads it back to verify the contents. One temporary Cloud Run job then
+tries to download that exact file generation as the app account. A successful
+download shows the file is readable. If Google returns a non-JSON 403 for
+the download, the job requests metadata for the same generation to check
+why Google refused it. The check returns the HTTP statuses it observed.
+Only a confirmed permission denial and verified cleanup establish
+that the file check passed. Other errors leave the result unverified.
+Hypervibe removes the job and test file.
+Google may charge for the job, requests and storage, including any soft-delete
+period shown in the preview. This result covers only the direct file read.
+
 For a production rehearsal, include files with known contents and eligible
 queued work. Check every referenced object, run one worker against the target,
 then write a new record there and verify that a restored copy contains it.

@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
-import { makePlanReport, transferAccessCheckScope } from '../../domain/plan/plan-report.js';
+import { makePlanReport, transferAccessCheckScope, transferFileAccessCheckScope } from '../../domain/plan/plan-report.js';
+import type { AccessProbeFileEvidence } from '../providers/gcp/gcp-transfer-probe-workload.js';
 import type { TransferResources } from '../providers/gcp/gcp-data.client.js';
 import type { DestroyedProbeVersion } from '../providers/gcp/gcp-transfer-slot-evidence.js';
 import type { ProbeObject, ProbeVersion } from '../providers/gcp/gcp-transfer-probe-fixtures.js';
@@ -15,6 +16,8 @@ import { writePlanReport } from './write-plan-report.js';
 
 export interface ProbePlan {
   planId: string;
+  /** Earlier plans cover both the copy and app accounts. */
+  fileOnly?: boolean;
   createdAt: string;
   projectId: string;
   projectName: string;
@@ -36,6 +39,8 @@ export interface ProbeRun {
   object?: ProbeObject;
   version?: ProbeVersion;
   job?: TransferResources;
+  operatorReadVerified?: boolean;
+  fileEvidence?: AccessProbeFileEvidence;
   copyPassed?: boolean;
   appPassed?: boolean;
   destroyed?: DestroyedProbeVersion;
@@ -45,8 +50,7 @@ export function probeDigest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
 export function probeActions(plan: Omit<ProbePlan, 'actions'>): PlanAction[] {
-  const { scope } = plan,
-    slot = transferSlot(scope.target);
+  const { scope } = plan;
   const action = (
     id: string,
     type: PlanAction['type'],
@@ -67,6 +71,25 @@ export function probeActions(plan: Omit<ProbePlan, 'actions'>): PlanAction[] {
   const retention = plan.softDeleteSeconds
     ? ` Google keeps the deleted file recoverable for ${plan.softDeleteSeconds / 86400} days.`
     : '';
+  if (plan.fileOnly) {
+    return [
+      action(
+        'file', 'create', 'storage', 'Create and verify one disposable export file',
+        `Write random test bytes to gs://${scope.bucket}/${plan.objectName}. Read back the exact uploaded generation to verify its contents before testing the app.`,
+      ),
+      action(
+        'app', 'create', 'service', 'Run one temporary job as the app',
+        `Use ${scope.runtimeEmail} to request this file generation directly. Check whether Google denies the app access.`,
+        ['file'],
+      ),
+      action(
+        'cleanup', 'destroy', 'maintenance', 'Remove the job and the test file',
+        `Remove the temporary app job and delete the exact file generation, including after a failed test.${retention}`,
+        ['app'],
+      ),
+    ];
+  }
+  const slot = transferSlot(scope.target);
   return [
     action(
       'file',
@@ -135,6 +158,7 @@ function decode(raw: unknown, projectId: string, gcpProjectId: string) {
     plan.projectId !== projectId ||
     plan.scope.target.projectId !== gcpProjectId ||
     plan.planId !== row.id ||
+    (plan.fileOnly !== undefined && typeof plan.fileOnly !== 'boolean') ||
     !probeIdPattern.test(row.id) ||
     row.slot !== transferSlot(plan.scope.target).secretId
   )
@@ -197,7 +221,7 @@ export function findTransferAccessProbeReport(projectId: string, gcpProjectId: s
     directory(projectId, gcpProjectId),
     makePlanReport({
       planId,
-      scope: transferAccessCheckScope,
+      scope: plan.fileOnly ? transferFileAccessCheckScope : transferAccessCheckScope,
       project: plan.projectName,
       environment: plan.scope.targetEnvironmentName,
       target: gcpProjectId,

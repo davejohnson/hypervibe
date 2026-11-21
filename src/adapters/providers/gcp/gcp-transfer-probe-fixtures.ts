@@ -161,11 +161,15 @@ export function transferProbeFixtures(token: string, scope: TransferIsolationSco
     if (response.status !== 200 || !(await bytes(response, 64)).equals(Buffer.from(marker))) reject('Google returned different test object contents.');
   }
 
+  async function assertFileReady(): Promise<void> {
+    await verifyBucket();
+    if ((await liveObjectMetadata()).status !== 404) reject('The planned test object name is already in use.');
+  }
+
   return {
-    objectName, secretName,
+    objectName, secretName, assertFileReady,
     async assertReady(): Promise<void> {
-      await Promise.all([verifyBucket(), verifyParent()]);
-      if ((await liveObjectMetadata()).status !== 404) reject('The planned test object name is already in use.');
+      await Promise.all([assertFileReady(), verifyParent()]);
     },
     // After a lost insert response, verify the secret random marker against the live
     // object checksum and immutable generation bytes before granting cleanup authority.
