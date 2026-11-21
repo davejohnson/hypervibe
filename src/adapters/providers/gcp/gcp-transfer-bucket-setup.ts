@@ -137,7 +137,7 @@ export async function prepareTransferBucketJob(input: Request, target: TransferS
       const source = store.findByProjectAndName(project.id, input.sourceEnvironment), destination = store.findByProjectAndName(project.id, input.targetEnvironment);
       const { sourceBucketId, targetBucket, location } = selectTransferBucket(new SpecStore().getForInspection(project)?.spec, source, destination, target, storageName);
       const railway = await adapterFactory.getStorageOperations('railway', project, { environment: source });
-      if (!railway.success || !railway.adapter.getMigrationBucketName) reject('Restore the Railway connection for this source project.');
+      if (!railway.success || !railway.adapter?.getMigrationBucketName) reject('Restore the Railway connection for this source project.');
       const sourceBucketName = await railway.adapter.getMigrationBucketName({
         projectId: target.sourceRailwayProjectId, environmentId: target.sourceRailwayEnvironmentId,
       }, sourceBucketId)
