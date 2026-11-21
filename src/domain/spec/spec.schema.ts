@@ -2568,7 +2568,7 @@ export const projectSpecSchema = z.object({
         if (!environment) continue;
         if (!SECRET_SERVICE_SCOPE_PROVIDERS.includes(environment.hosting.provider)) {
           ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secrets', key, 'services'],
-            message: `${secretKind} "${key}" is limited to named services, which hosting provider "${environment.hosting.provider}" does not support yet: every service in "${environmentName}" would receive it. Remove services or host "${environmentName}" on Cloud Run` });
+            message: `${secretKind} "${key}" is limited to named services, which hosting provider "${environment.hosting.provider}" does not support yet: every service in "${environmentName}" would receive it. Remove services or host "${environmentName}" on Google Cloud, AWS or Azure` });
         }
         for (const serviceName of secret.services) {
           if (!Object.hasOwn(environment.services, serviceName)) {

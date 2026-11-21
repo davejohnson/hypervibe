@@ -139,11 +139,17 @@ A secret declaration may name the `services` that receive it; without the list
 every service of each targeted environment does. Honor the list exactly or
 refuse the spec: a hosting path that cannot limit a secret must reject it in
 validation and planning, never accept it and inject the secret everywhere. The
-release command holds only what the service it borrows from holds. Limiting the
-injected references is not an access boundary while workloads share one runtime
-identity; say so wherever the setting is documented. Cloud Run implements it
+release command holds only what the service it borrows from holds. The list is
+an access boundary, not only an injection rule: a service it does not name must
+not be able to read the secret from the cloud's secret store with its runtime
+identity, directly or through a permission that identity holds (starting
+another task, passing a role, a project-wide grant). A shape whose boundary
+cannot be enforced is refused, and a boundary that is declared but not yet in
+force blocks further plans and is reported as not enforced. Google Cloud, AWS
+and Azure implement it
 ([engine notes](../opentofu-engine.md#limiting-a-secret-to-named-services));
-AWS, Azure and Railway refuse it.
+Railway refuses it. Deployment and CI identities and account administrators
+remain able to read every secret.
 
 One exception to DG-083 is deliberate: the owner may copy a secret Hypervibe
 generated for their own app, for example to give another app access to it.

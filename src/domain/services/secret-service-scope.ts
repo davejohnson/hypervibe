@@ -35,6 +35,6 @@ export function secretServiceScopeProblems(spec: Pick<ProjectSpec, 'environments
   if (provider === undefined || SECRET_SERVICE_SCOPE_PROVIDERS.includes(provider)) return [];
   return Object.entries(scope.secrets ?? {})
     .filter(([, secret]) => secret?.services && secret.environments.includes(environmentName))
-    .map(([key]) => `Secret ${key} is limited to named services, which hosting provider "${provider}" does not support yet: every service in ${environmentName} would receive it. Remove "services" from the secret or host ${environmentName} on Cloud Run.`)
+    .map(([key]) => `Secret ${key} is limited to named services, which hosting provider "${provider}" does not support yet: every service in ${environmentName} would receive it. Remove "services" from the secret or host ${environmentName} on Google Cloud, AWS or Azure.`)
     .sort();
 }

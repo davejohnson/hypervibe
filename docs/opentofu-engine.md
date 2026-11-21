@@ -137,9 +137,10 @@ Cloud Run receives Secret Manager references.
 
 ### Limiting a secret to named services
 
-A secret declaration may list `services`. Cloud Run then puts its Secret Manager
-reference only in those services, workers and scheduled jobs, in every
-environment the secret targets. Without the list, every service receives it.
+A secret declaration may list `services`. Its reference then goes only to those
+services, workers and scheduled jobs, in every environment the secret targets,
+and only their identities can read it from the cloud's secret store. Without
+the list, every service receives it and nothing changes for an existing spec.
 
 ```json
 "secrets": {
@@ -153,19 +154,121 @@ environment the secret targets. Without the list, every service receives it.
 ```
 
 - Every named service must exist in every environment the secret targets.
-- The release command borrows the web service's configuration, so it holds a
-  limited secret only when the web service does.
-- Adding `services` to a secret that is already live produces an ordinary
-  reviewed update of each service that loses the reference.
-- This limits which workloads have the value in their environment. It is not an
-  access boundary: every workload of an environment runs as one runtime service
-  account, and setup grants that account Secret Accessor on the project. A
-  workload that does not list the secret can still read it through the Secret
-  Manager API. `gcpRuntimeSecretGrants: "per-secret"` grants per secret but to
-  the same account. Separate identities per service are not built.
-- AWS, Azure and Railway cannot limit a secret to named services. A spec that
-  asks for it there is refused; the secret is never given to every service
-  instead. `services` cannot be combined with `credential` tracking.
+- The release command borrows the web service's configuration and identity, so
+  it holds a limited secret only when the web service does.
+- A service that some limited secret names runs as its own identity. Services
+  that no limited secret names keep the shared runtime identity.
+- Railway cannot limit a secret. A spec that asks for it there is refused; the
+  secret is never given to every service instead. `services` cannot be combined
+  with `credential` tracking.
+- People and tools that administer the cloud account can still read every
+  secret: the deployment identity, the CI release identity (it can release a
+  service that runs as the named identity), and account owners. The boundary is
+  between an environment's own services.
+
+#### Google Cloud
+
+Setup grants the shared runtime identity Secret Accessor on the whole project,
+so leaving a secret out of a service's environment is not enough. Two things
+make the limit real, and both are project IAM that only an administrator can
+change, so they are one reviewed setup step
+(`hv_connections provider="cloudrun" action="prepare" environment="<env>" secretScopeAccess="lifecycle"`,
+preview then confirm):
+
+1. Each named service gets its own service account. The deployment identity
+   (and the CI release identity, when CI is set up) may deploy as it. It
+   receives the shared identity's Cloud SQL and Pub/Sub project roles, object
+   access only on the buckets the service is wired to (`injectInto`), and
+   project-wide Secret Accessor.
+2. Every project-wide Secret Accessor grant that must not reach a limited
+   secret carries an IAM condition excluding that secret and its versions: the
+   shared runtime identity's grant, and the grant of every service identity the
+   secret does not name. Changing a condition replaces the grant; the new grant
+   is created before the old one is removed.
+
+A grant is narrowed only once no workload that runs as that identity still
+holds the secret, because Cloud Run cannot start an instance whose identity
+lost a secret it references. Hypervibe records, from each refreshed plan and
+each completed apply, what every workload runs as and references. So:
+
+- **A new limited secret** (no service holds it yet): run the setup step, then
+  `hv_plan` and `hv_apply`.
+- **Narrowing a secret services already hold**, or changing its list: run the
+  setup step (it creates identities and narrows nothing yet), `hv_plan` and
+  `hv_apply` (the named service moves to its identity; the others drop the
+  reference), then the setup step again (it narrows the grants). Between the
+  apply and the second step the plan output says `NOT YET ENFORCED`, and
+  further plans for the environment are blocked until the second step is
+  confirmed and verified against the live project policy.
+
+`hv_plan` is blocked whenever the verified setup is not exactly what the spec
+and the recorded workloads call for: a missing identity, a secret the shared
+identity can still read after services stopped holding it, or a lock that would
+deny a service a secret the plan is about to give it. The record of verified
+setup and of workloads is local to the machine that ran setup and apply.
+
+Refused instead of weakened:
+
+- a limited secret that names an on-demand worker (its waker must act as the
+  worker's identity);
+- `gcpRuntimeSecretGrants` together with a limited secret, and any per-secret
+  grant to the shared identity that is still recorded;
+- a project that carries the migration copy restriction on the same grant.
+
+Not isolated: every identity can read secrets that name no services, including
+those of other environments in the same Google Cloud project. Database access
+is shared (one database login per environment). Pub/Sub roles are project-wide
+for every identity. The shared runtime identity keeps project-wide object
+access where storage setup granted it; only service identities are limited to
+their buckets. A service identity stays in the project after its service stops
+being named.
+
+#### AWS
+
+Each named service runs as its own IAM role (task and execution role), and only
+those roles list the secret's Parameter Store parameter. Every other workload
+keeps the shared runtime role, which in such an environment can no longer read
+the parameter, start tasks, pass roles or change schedules: with those it could
+start the named job with its own command and print the value. Scheduled jobs
+and on-demand worker wakers are started by a separate control role that only
+AWS's scheduler services can assume and that cannot read parameters. The CI
+release role may pass exactly the roles of the workloads it releases. All of
+this is in the environment's own plan; there is no separate setup step.
+
+Limiting a secret on a live environment adds the roles, updates policies,
+schedules and services in place and registers new task definition revisions.
+No bucket, database or stored parameter is replaced. A package token
+(`NPM_TOKEN`, `NODE_AUTH_TOKEN`) cannot be limited. AWS has no release command.
+
+Not isolated: storage buckets (every role keeps every bucket of the
+environment) and the database login are shared by all services.
+
+#### Azure
+
+Each named service runs as its own user-assigned managed identity, the only
+identity attached to that Container App or job. It holds Key Vault Secrets User
+on each secret it receives, one assignment per secret. The shared runtime
+identity keeps no role on a limited secret or on any scope that contains it.
+All of this is in the environment's own plan.
+
+Limiting a secret on a live environment creates the identity and its roles,
+removes the shared identity's role on that secret and updates the apps. For a
+minute or two during that apply a named service that restarts may fail to load
+the secret. A package token and the on-demand worker's scale-rule login cannot
+be limited. Azure has no release command.
+
+Not isolated: the database login is shared. Services that keep the shared
+identity keep storage-account-wide access; a named service has storage access
+only when storage is wired to it (`injectInto`), so a named service that used
+storage without being wired loses it.
+
+#### On every cloud
+
+All services of an environment run the same image, so the limit protects
+against one compromised service, not against whoever writes or releases the
+code. A value that other services held before it was limited stays known to
+them: rotate it after the limit is in force. A named service can still pass
+the value on, for example by writing it to the shared database.
 
 ## Cross-cloud boundaries
 
