@@ -135,6 +135,38 @@ value storage and version publication inside its operational secret boundary.
 Raw credential values do not belong in public plans or generated configuration.
 Cloud Run receives Secret Manager references.
 
+### Limiting a secret to named services
+
+A secret declaration may list `services`. Cloud Run then puts its Secret Manager
+reference only in those services, workers and scheduled jobs, in every
+environment the secret targets. Without the list, every service receives it.
+
+```json
+"secrets": {
+  "SOURCE_API_KEY": {
+    "ownership": "delegated",
+    "principal": "source system administrator",
+    "environments": ["staging"],
+    "services": ["catchup"]
+  }
+}
+```
+
+- Every named service must exist in every environment the secret targets.
+- The release command borrows the web service's configuration, so it holds a
+  limited secret only when the web service does.
+- Adding `services` to a secret that is already live produces an ordinary
+  reviewed update of each service that loses the reference.
+- This limits which workloads have the value in their environment. It is not an
+  access boundary: every workload of an environment runs as one runtime service
+  account, and setup grants that account Secret Accessor on the project. A
+  workload that does not list the secret can still read it through the Secret
+  Manager API. `gcpRuntimeSecretGrants: "per-secret"` grants per secret but to
+  the same account. Separate identities per service are not built.
+- AWS, Azure and Railway cannot limit a secret to named services. A spec that
+  asks for it there is refused; the secret is never given to every service
+  instead. `services` cannot be combined with `credential` tracking.
+
 ## Cross-cloud boundaries
 
 Shared: runner, saved-plan handling, encryption, state layout, approvals, engine

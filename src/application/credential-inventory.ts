@@ -27,6 +27,7 @@ import { parseEnvFile } from '../utils/env-parser.js';
 import { redactExactValues } from '../utils/redact-exact-values.js';
 import { credentialManagement } from '../domain/registry/credential-validation.registry.js';
 import { credentialRuntimeServices } from '../domain/services/credential-runtime-consumers.js';
+import { secretServicesFor } from '../domain/services/secret-service-scope.js';
 import { importedCredentialProvenance } from './cloud-secret-import.js';
 import { credentialOperationEvidence, type CredentialOperationResult } from './credential-operation-verification.js';
 import { adapterFactory, usesGcpEnvironmentConnection } from '../domain/services/adapter.factory.js';
@@ -171,10 +172,11 @@ export async function credentialInventory(ctx: CommandContext, project: Project,
       selectedForDeploy: entry.ownership === 'untracked-input' && file === selectedFile && file.selected.has(key),
     });
   }
-  function hosting(name: string, expectedHash?: string, selected?: string[], serviceHashes?: Record<string, unknown>): Consumer[] {
+  /** `limitedTo`: the services a secret names. A service outside them that still holds it stays listed, so an unapplied narrowing shows. */
+  function hosting(name: string, expectedHash?: string, selected?: string[], serviceHashes?: Record<string, unknown>, limitedTo?: string[]): Consumer[] {
     const retainedConsumers = servicesKnown ? Object.entries(bindings.services ?? {}).filter(([, binding]) =>
       observed!.services.some(service => service.externalId === (binding.serviceId ?? binding.jobName) && service.envVarKeys.includes(name))).map(([name]) => name) : [];
-    return (selected ?? [...new Set([...Object.keys(desired?.services ?? {}), ...retainedConsumers])]).sort().map(service => {
+    return (selected ?? [...new Set([...(limitedTo ?? Object.keys(desired?.services ?? {})), ...retainedConsumers])]).sort().map(service => {
       const acceptedHash = string(serviceHashes?.[service]) ?? expectedHash;
       const bound = bindings.services?.[service];
       const id = bound?.serviceId ?? bound?.jobName;
@@ -266,7 +268,7 @@ export async function credentialInventory(ctx: CommandContext, project: Project,
     if (slot.ownership === 'delegated') candidates(entry, key, acceptedInputHash);
     if (slot.environments.includes(env)) entry.consumers.push(...hosting(key, binding?.valueHash,
       slot.credential?.runtimeConsumers || slot.credential?.stripeWebhook ? credentialRuntimeServices(spec, env, key, slot.credential) : undefined,
-      record(record(roleHistory.hostingHashes)[key])));
+      record(record(roleHistory.hostingHashes)[key]), slot.services ? secretServicesFor(spec, env, key) : undefined));
     for (const target of targets) {
       const receipt = githubBindings.find(item => item.name === key && item.target === target && slot.ownership === 'delegated' && item.principal === slot.principal);
       entry.consumers.push(await githubConsumer(key, target, receipt));
