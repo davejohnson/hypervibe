@@ -66,6 +66,46 @@ describe('dedicated transfer credential slot over Google REST', () => {
     expect(calls).toContain(versionsUrl);
   });
 
+  const destroyed = {
+    name: secret.name + '/versions/1', createTime: '2026-09-03T03:30:01Z', state: 'DESTROYED' as const,
+    projectNumber, secretCreateTime: secret.createTime,
+  };
+  const tombstone = { name: destroyed.name, createTime: destroyed.createTime, state: destroyed.state };
+
+  it('accepts only recorded native destroyed versions across the full unfiltered inventory', async () => {
+    const second = { ...destroyed, name: secret.name + '/versions/2' };
+    transport((path, query) => {
+      if (path !== versionsUrl) return;
+      expect(query.get('fields')).toContain('versions(name,createTime,state)');
+      expect(query.has('filter')).toBe(false);
+      return Response.json(query.has('pageToken') ? { versions: [tombstone], totalSize: 2 }
+        : { versions: [{ ...tombstone, name: second.name }], totalSize: 2, nextPageToken: 'another' });
+    });
+    await expect(readTransferSlotEvidence('test-token', target, [destroyed, second])).resolves.toMatchObject({ secret });
+  });
+
+  it.each([
+    ['an unrelated destroyed version', { ...tombstone, name: secret.name + '/versions/2' }, destroyed],
+    ['a disabled version', { ...tombstone, state: 'DISABLED' }, destroyed],
+    ['an enabled version', { ...tombstone, state: 'ENABLED' }, destroyed],
+    ['a recreated version', { ...tombstone, createTime: '2026-10-01T00:00:00Z' }, destroyed],
+    ['a recreated secret', tombstone, { ...destroyed, secretCreateTime: '2026-01-01T00:00:00Z' }],
+    ['a different project number', tombstone, { ...destroyed, projectNumber: '9999' }],
+    ['an alias', { ...tombstone, name: secret.name + '/versions/latest' }, { ...destroyed, name: secret.name + '/versions/latest' }],
+  ] as const)('blocks %s even with a probe receipt', async (_case, version, proof) => {
+    transport(path => path === versionsUrl ? Response.json({ versions: [version] }) : undefined);
+    await expect(readTransferSlotEvidence('test-token', target, [proof])).rejects.toThrow();
+  });
+
+  it('requires all recorded versions to be present once and bound to an existing secret', async () => {
+    for (const inventory of [{}, { versions: [tombstone, tombstone] }, { versions: [tombstone], totalSize: 2 }]) {
+      transport(path => path === versionsUrl ? Response.json(inventory) : undefined);
+      await expect(readTransferSlotEvidence('test-token', target, [destroyed])).rejects.toThrow();
+    }
+    transport(path => path === secretUrl ? new Response(null, { status: 404 }) : undefined);
+    await expect(readTransferSlotEvidence('test-token', target, [destroyed])).rejects.toThrow();
+  });
+
   it('binds exact project, account and secret identity, accepting omitted protobuf defaults', async () => {
     const calls = transport((path, query) => {
       if (path === secretUrl) return Response.json({ ...secret, name: 'projects/' + projectId + '/secrets/' + secretId });

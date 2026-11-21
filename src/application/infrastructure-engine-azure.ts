@@ -27,7 +27,7 @@ import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import {
-  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, emptyContainer, environmentDatabaseDrop, environmentDatabaseSetup, purgeVaultSecrets, runAzureSetupSql, taggedResources,
+  AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, deleteFailedAppEnvironment, emptyContainer, environmentDatabaseDrop, environmentDatabaseSetup, observeFailedAppEnvironment, purgeVaultSecrets, runAzureSetupSql, taggedResources,
   type AzureKeyVaultSecretStore,
 } from '../adapters/providers/azure/azure-ops.client.js';
 import { azureCiSetupReady, azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
@@ -52,6 +52,7 @@ export const AZURE_IMAGE_BUILD_OPERATION = 'azureImageBuild';
 export const AZURE_STORAGE_EMPTY_OPERATION = 'azureStorageEmpty';
 export const AZURE_DATABASE_DROP_OPERATION = 'azureDatabaseDrop';
 export const AZURE_TEARDOWN_CLEANUP_OPERATION = 'azureTeardownCleanup';
+export const AZURE_FAILED_ENVIRONMENT_OPERATION = 'azureFailedAppEnvironment';
 
 export type AzureProfile = EnvironmentProfile;
 export const azureProfileFor = environmentProfile;
@@ -321,7 +322,26 @@ function recordPlan(project: Project, context: AzureEngineContext, params: { env
 const withDependencies = (actions: PlanAction[], dependencies: string[]) => dependencies.length
   ? actions.map((action) => action.type === 'noop' ? action : { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...dependencies])] })
   : actions;
+/** Puts the removal of a failed app environment ahead of the shared steps, which then wait for it. */
+export const withRepairFirst = (repair: PlanAction | undefined, actions: PlanAction[], prior: string[] = []): PlanAction[] => repair
+  ? [{ ...repair, ...(prior.length ? { dependsOn: prior } : {}) }, ...withDependencies(actions, [repair.id])]
+  : actions;
 const changing = (actions: PlanAction[]) => actions.filter((action) => action.type !== 'noop').map((action) => action.id);
+
+/**
+ * The step that removes a shared app environment Azure failed to create, when one is in the way.
+ * Nothing is planned for a working environment, one Hypervibe did not tag, or an unreadable answer.
+ */
+export async function azureFailedEnvironmentAction(context: Pick<AzureEngineContext, 'tokens' | 'shared' | 'connection'>): Promise<PlanAction | undefined> {
+  const observed = await observeFailedAppEnvironment(context.tokens, context.shared.appsEnvironmentId, context.shared.label).catch(() => 'other' as const);
+  if (observed !== 'failed') return undefined;
+  const name = context.shared.appsEnvironmentId.split('/').at(-1)!;
+  return {
+    id: 'shared-repair:apps', type: 'destroy', verified: true, requiresConfirm: true, resource: { kind: 'service', name: 'failed shared app environment', provider: 'azure' },
+    reason: `Azure failed to create the shared app environment ${name} in an earlier attempt and left it behind unusable. Hypervibe will delete it so it can be created again. It never ran anything.`,
+    metadata: { operation: AZURE_FAILED_ENVIRONMENT_OPERATION, subscriptionId: context.connection.subscriptionId },
+  };
+}
 
 /**
  * Role assignments the plan would create that already exist in Azure for the
@@ -409,7 +429,9 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const sharedPlanned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
   if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
   if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
-  const sharedActions = sharedPlanned.actions;
+  // A failed earlier attempt can leave the app environment in Azure but not in the engine's state.
+  const repair = sharedPlanned.actions.some((action) => action.id === 'shared:apps' && action.type === 'create') ? await azureFailedEnvironmentAction(context) : undefined;
+  const sharedActions = withRepairFirst(repair, sharedPlanned.actions);
   const sharedChanging = changing(sharedActions);
   // Connections made before 2026-11-17 never turned on Azure networking; only the subscription Owner can.
   let networkingUnchecked = false;
@@ -535,6 +557,9 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
     if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
     if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
     sharedActions = withDependencies(sharedPlanned.actions.filter((action) => action.type !== 'noop'), [...changing(environmentActions), ...changing(buildActions)]);
+    // The engine cannot destroy an app environment it never recorded; a failed one is removed directly,
+    // before the log workspace it points at (which the engine did record under the same step).
+    sharedActions = withRepairFirst(await azureFailedEnvironmentAction(context), sharedActions, [...changing(environmentActions), ...changing(buildActions)]);
     shared = { shared: { planId: sharedPlanId, state: context.shared.state } };
   }
   const dropActions: PlanAction[] = environmentSpec.database && remaining.length ? [{
@@ -547,16 +572,16 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'azure' },
-    reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${sharedActions.length ? ' (nor the shared network, app environment, server and registry)' : ''}, and remove it from the spec.`,
+    reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${!remaining.length ? ' (nor the shared network, app environment, server and registry)' : ''}, and remove it from the spec.`,
     dependsOn: [...changing(environmentActions), ...changing(buildActions), ...changing(sharedActions), ...changing(dropActions)],
-    metadata: { operation: AZURE_TEARDOWN_CLEANUP_OPERATION, subscriptionId, sharedRemoved: sharedActions.length > 0 },
+    metadata: { operation: AZURE_TEARDOWN_CLEANUP_OPERATION, subscriptionId, sharedRemoved: !remaining.length },
   };
   if (!cleanup.dependsOn!.length) delete cleanup.dependsOn;
   const actions = [...emptyActions, ...environmentActions, ...buildActions, ...dropActions, ...sharedActions, cleanup];
   const warnings = [
     `Removes Azure environment ${environmentName} (${azureLocationFor(spec, environmentName, context.connection)}, resource group ${context.connection.resourceGroup}). This cannot be undone.`,
     ...(environmentSpec.database ? ['Azure keeps no final snapshot of a deleted database; export it first if you need the data.'] : []),
-    sharedActions.length ? 'No other testing environment uses the shared network, app environment, server and registry, so they are removed too.' : `The shared network, app environment, server and registry stay for ${remaining.join(', ')}.`,
+    !remaining.length ? 'No other testing environment uses the shared network, app environment, server and registry, so they are removed too.' : `The shared network, app environment, server and registry stay for ${remaining.join(', ')}.`,
     `Hypervibe's access (resource group, Key Vault, deploy identity) stays, for other environments of ${project.name}.`,
   ];
   return recordPlan(project, context, params, actions, warnings, { planId, teardown: true, build: { planId: buildPlanId, state: context.buildState }, ...shared });
@@ -565,6 +590,8 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
 export interface AzureApplyDependencies {
   /** Runs a psql script on the server from inside the project's private network; tests replace it. */
   setupSql?: (context: AzureEngineContext, host: string, script: string) => Promise<void>;
+  /** Milliseconds between checks while waiting on Azure; tests use 0. */
+  pollMs?: number;
   buildImage?: (context: AzureEngineContext, source: { directory: string; commitSha: string }) => Promise<{ image: string; logsUrl?: string } | { error: string; unknown?: boolean; logsUrl?: string }>;
 }
 
@@ -633,6 +660,15 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
     case AZURE_DATABASE_DROP_OPERATION: {
       await setupSql(context, String(metadata.host), environmentDatabaseDrop(context.environmentName));
       return { success: true, message: `Deleted ${context.environmentName}'s database and logins.` };
+    }
+    case AZURE_FAILED_ENVIRONMENT_OPERATION: {
+      // Checked again now: only an environment that is still failed, and still Hypervibe's, is deleted.
+      const observed = await observeFailedAppEnvironment(context.tokens, context.shared.appsEnvironmentId, context.shared.label);
+      if (observed === 'absent') return { success: true, message: 'The failed shared app environment is already gone.' };
+      if (typeof observed === 'object') return { success: false, status: 'blocked', message: observed.unknown };
+      if (observed !== 'failed') return { success: false, status: 'blocked', message: 'The shared app environment is no longer in a failed state, so Hypervibe did not delete it. Run hv_plan again.' };
+      const failed = await deleteFailedAppEnvironment(context.tokens, context.shared.appsEnvironmentId, { pollMs: deps.pollMs });
+      return failed ? { success: false, message: failed } : { success: true, message: 'Deleted the shared app environment Azure had failed to create.' };
     }
     case AZURE_TEARDOWN_CLEANUP_OPERATION: {
       const purged = await purgeVaultSecrets(context.tokens, context.vault.uri, azureVaultSecretName(context.environmentName, 'x').slice(0, -1));

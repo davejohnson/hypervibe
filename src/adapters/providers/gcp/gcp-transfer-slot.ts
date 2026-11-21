@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
-import type { MigrationAccessCapability } from '../../../domain/registry/provider.registry.js';
+import { readDestroyedTransferProbeVersions } from '../../storage/transfer-access-probe.js';
+import { isMigrationAccessCheck, type MigrationAccessCapability } from '../../../domain/registry/provider.registry.js';
 import { railwayTransferIsolationNote, railwayTransferSetupNote } from '../../../domain/plan/gcp-infrastructure-notes.js';
 import { EnvironmentRepository } from '../../db/repositories/environment.repository.js';
 import { readTransferSlotEvidence, TransferEvidenceError } from './gcp-transfer-slot-evidence.js';
@@ -54,6 +55,15 @@ async function prepareMigrationAccess(input: Parameters<MigrationAccessCapabilit
   const slot = transferSlot(scope);
   if ([input.runtimeEmail, input.deployEmail].includes(slot.accountEmail))
     return { success: false, error: 'The copy job must use a separate service account.' };
+  if (isMigrationAccessCheck(input.mode)) {
+    const { runGcpTransferAccessProbe } = await import('../../../application/gcp-transfer-access-probe.js');
+    return runGcpTransferAccessProbe({
+      project, target: scope, targetEnvironmentName: target.name, sourceEnvironmentName: source.name,
+      runtimeEmail: input.runtimeEmail, deployEmail: input.deployEmail, token: input.token,
+      ...(input.mode === 'verify-export-file-access' ? { fileOnly: true } : {}),
+      confirm: input.planId !== undefined, planId: input.planId,
+    });
+  }
   const restrictApp = input.mode === 'restrict-app-access';
   if (restrictApp) {
     try {
@@ -73,7 +83,8 @@ async function prepareMigrationAccess(input: Parameters<MigrationAccessCapabilit
   }
   try {
     const selected = { projectId: gcpProjectId, accountEmail: slot.accountEmail, secretId: slot.secretId };
-    const read = () => readTransferSlotEvidence(token, selected);
+    const read = () => readTransferSlotEvidence(token, selected,
+      readDestroyedTransferProbeVersions(project.id, gcpProjectId, slot.secretId));
     const evidence = await read();
     const matchesOwnership = (observed: typeof evidence) =>
       (!observed.account || observed.account.description === slot.description) &&

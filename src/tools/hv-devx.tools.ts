@@ -4,7 +4,7 @@ import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { ignoredOptionWarnings } from '../application/command-options.js';
-import { findSavedSetupReport } from '../adapters/storage/plan-report-files.js';
+import { findSavedSetupReport, findTransferAccessProbeReport } from '../adapters/storage/plan-report-files.js';
 
 /**
  * Redact secret-bearing fields when returning stored run plans to chat.
@@ -46,9 +46,9 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
     {
       action: z.enum(['list', 'get', 'audit', 'report']).optional().describe('Operation (default: list)'),
       runId: z.string().optional().describe('Exact run id for action="get" or saved plan id for action="report".'),
-      project: projectField.describe('Filter or constrain runs by project. Required with gcpProjectId for a Google Cloud setup report.'),
+      project: projectField.describe('Filter or constrain runs by project. Required with gcpProjectId for a Google Cloud setup or transfer access report.'),
       env: envField.describe('Filter or constrain ordinary runs by environment name.'),
-      gcpProjectId: z.string().min(1).optional().describe('Google Cloud project ID for a saved setup plan. Only used with action="report" and project.'),
+      gcpProjectId: z.string().min(1).optional().describe('Google Cloud project ID for a saved setup or transfer access plan. Only used with action="report" and project.'),
       limit: z.number().int().min(1).max(100).optional().describe('action=list/audit: max items to return (default: 20 runs, 50 audit events; maximum 100). action=get returns one run and ignores limit with a warning.'),
       resourceType: z.string().optional().describe('Audit filter: resource type (project, environment, run, ...)'),
       resourceId: z.string().optional().describe('Audit filter: resource id (used with resourceType)'),
@@ -56,7 +56,7 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
     },
     wrapCommandHandler(async ({ action = 'list', runId, project: projectRef, env, gcpProjectId, limit, resourceType, resourceId, auditAction }) => {
       if (gcpProjectId !== undefined && action !== 'report') {
-        throw new HvError('VALIDATION', 'gcpProjectId is only used for a Google Cloud setup report.');
+        throw new HvError('VALIDATION', 'gcpProjectId is only used for a Google Cloud setup or transfer access report.');
       }
       if (action === 'audit') {
         const invalid = [
@@ -123,17 +123,20 @@ export function registerHvDevxTools(commands: CommandRegistrar, ctx: CommandCont
           throw new HvError('VALIDATION', `runId is required for action="${action}".`);
         }
         const warnings = ignoredOptionWarnings('hv_runs', `action="${action}"`, { limit });
-        if (action === 'report' && runId.startsWith('setup-')) {
+        const transferAccessReport = runId.startsWith('probe-');
+        if (action === 'report' && (transferAccessReport || runId.startsWith('setup-'))) {
           if (!projectRef || !gcpProjectId || env !== undefined) {
-            return commandError('VALIDATION', 'A Google Cloud setup report requires project and gcpProjectId. Setup plans are scoped to the project, so omit env.');
+            return commandError('VALIDATION', 'To reopen this Google Cloud report, supply project and gcpProjectId and omit env.');
           }
           const project = ctx.resolveProjectOrThrow({ project: projectRef });
-          const report = findSavedSetupReport(project.id, gcpProjectId, runId, project.name);
-          if (!report) return commandError('NOT_FOUND', `Setup plan ${runId} was not found in this project.`);
+          const report = transferAccessReport
+            ? await findTransferAccessProbeReport(project.id, gcpProjectId, runId)
+            : findSavedSetupReport(project.id, gcpProjectId, runId, project.name);
+          if (!report) return commandError('NOT_FOUND', `Plan ${runId} was not found in this project.`);
           return commandSuccess({ planId: runId, ...report }, { warnings });
         }
         if (gcpProjectId !== undefined) {
-          return commandError('VALIDATION', 'gcpProjectId is only used for Google Cloud setup plan IDs.');
+          return commandError('VALIDATION', 'Use gcpProjectId with a Google Cloud setup or transfer access plan ID.');
         }
         const run = ctx.repos.runs.findById(runId);
         if (!run) {

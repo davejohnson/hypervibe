@@ -1,6 +1,9 @@
 import { redactSensitiveString } from '../../utils/redact-sensitive-string.js';
 import { requiresActionConfirmation, type PlanActionType } from './plan.types.js';
 
+export const transferAccessCheckScope = 'Google Cloud transfer access check';
+export const transferFileAccessCheckScope = 'Google Cloud export file access check';
+
 export interface PlanReportAction {
   id: string;
   type: PlanActionType;

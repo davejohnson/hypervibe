@@ -124,10 +124,32 @@ describe('standalone infrastructure plan report', () => {
     expect(html).not.toContain('class="map-canvas"');
   });
 
+  it('presents the reviewed access check without attributing future results to an infrastructure plan', () => {
+    const html = renderPlanReportHtml(report([action('app-read', 'App read check')], {
+      scope: 'Google Cloud transfer access check', approval: 'whole-plan',
+    }));
+    expect(html).toContain('<span class="brand-topic">Transfer access check</span>');
+    expect(html).toContain('Google Cloud transfer access check');
+    expect(html).toContain('<span class="node-title">App read check</span>');
+    expect(html).not.toMatch(/infrastructure plan|verified at planning time/i);
+  });
+
   it('explains how approval works when reviewing a saved project setup', () => {
     const setup = report([action('create-project', 'Google Cloud project')], { approval: 'whole-plan' });
     expect(renderPlanReportHtml(setup)).toContain('Approve the whole plan in the chat or terminal where you requested it.');
     expect(renderPlanReportHtml(report([]))).not.toContain('Approve the whole plan');
+  });
+
+  it('describes only the file and the app job in an export file access check', () => {
+    const html = renderPlanReportHtml(report([action('app', 'Check direct file access'),
+      action('cleanup', 'Remove test resources', { reason: 'The deleted file is recoverable for 7 days.' })], {
+      scope: 'Google Cloud export file access check', approval: 'whole-plan',
+    }));
+    expect(html).toContain('<span class="brand-topic">Export file access check</span>');
+    expect(html).toMatch(/one temporary Cloud Run job/i);
+    expect(html).toMatch(/app account/i);
+    expect(html).toContain('7 days');
+    expect(html).not.toMatch(/infrastructure plan|verified at planning time|two temporary Cloud Run jobs|test secret|copy account/i);
   });
 
   it('explains replacing app access grants without reporting a data replacement or suppressing a real warning', () => {

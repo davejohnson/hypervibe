@@ -10,6 +10,7 @@ import { getSecretStore } from '../../../adapters/secrets/secret-store.js';
 import '../../../adapters/providers/gcp/cloudrun.adapter.js';
 import { GoogleAuth } from 'google-auth-library';
 import * as googleSignIn from '../../../adapters/providers/gcp/google-browser-signin.js';
+import * as probe from '../../../application/gcp-transfer-access-probe.js';
 import * as transferEvidence from '../../../adapters/providers/gcp/gcp-transfer-slot-evidence.js';
 import * as isolationEvidence from '../../../adapters/providers/gcp/gcp-transfer-isolation-evidence.js';
 import { transferSlot } from '../../../adapters/providers/gcp/tofu/transfer-slot.js';
@@ -146,6 +147,46 @@ describe('runCloudPrepare', () => {
     const ordinary = await runCloudPrepare({ project, provider: 'cloudrun' });
     expect(ordinary.success).toBe(true);
     expect(browser).toHaveBeenCalledOnce();
+  });
+
+  it.each(['verify-copy-access', 'verify-export-file-access'] as const)('dispatches %s only for the original Railway and managed Google bindings and connection identities', async migrationAccess => {
+    const project = seedProject(RUNTIME_SERVICE_ACCOUNT_EMAIL);
+    const environments = new EnvironmentRepository();
+    const source = environments.create({ projectId: project.id, name: 'source', platformBindings: {
+      provider: 'railway', projectId: 'railway-project', environmentId: 'railway-source',
+    } });
+    const destination = environments.create({ projectId: project.id, name: 'destination', platformBindings: {
+      provider: 'cloudrun', projectId: project.name, environmentId: 'us-central1', engine: { kind: 'opentofu' },
+    } });
+    environments.create({ projectId: project.id, name: 'unmanaged', platformBindings: {
+      provider: 'cloudrun', projectId: project.name, environmentId: 'us-central1',
+    } });
+    const token = vi.fn();
+    const run = vi.spyOn(probe, 'runGcpTransferAccessProbe').mockResolvedValue({ success: false, error: 'Stopped before cloud access' });
+    const readSlot = vi.spyOn(transferEvidence, 'readTransferSlotEvidence');
+    const input = { project, provider: 'cloudrun', environmentName: destination.name, migrationSourceEnvironment: source.name,
+      migrationAccess, defaultAdminAccessTokenProvider: token };
+    const planId = 'probe-ace24cf3-eab9-42d0-9862-b8cf05713c28';
+    for (const invalid of [{ confirm: true }, { gcpSetupPlanId: planId }, { region: 'us-west1' }, { environmentName: 'unmanaged' },
+      { runtimeServiceAccountEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL }, { deployServiceAccountEmail: DEPLOY_SERVICE_ACCOUNT_EMAIL },
+      { adminAccessToken: 'separate-token' }, { adminCredentialSource: 'service-account-inline' }, { migrationSourceEnvironment: destination.name }]) {
+      expect((await runCloudPrepare({ ...input, ...invalid })).success).toBe(false);
+    }
+    expect(run).not.toHaveBeenCalled();
+    for (const confirm of [false, true]) {
+      await runCloudPrepare({ ...input, confirm, gcpSetupPlanId: confirm ? planId : undefined });
+      expect(run).toHaveBeenLastCalledWith({
+        project, target: { projectId: project.name, targetRegion: 'us-central1', sourceEnvironmentId: source.id,
+          sourceRailwayProjectId: 'railway-project', sourceRailwayEnvironmentId: 'railway-source', targetEnvironmentId: destination.id },
+        targetEnvironmentName: destination.name, sourceEnvironmentName: source.name,
+        ...(migrationAccess === 'verify-export-file-access' ? { fileOnly: true } : {}),
+        runtimeEmail: RUNTIME_SERVICE_ACCOUNT_EMAIL, deployEmail: DEPLOY_SERVICE_ACCOUNT_EMAIL, token,
+        confirm, planId: confirm ? planId : undefined,
+      });
+    }
+    expect(token).not.toHaveBeenCalled();
+    expect(readSlot).not.toHaveBeenCalled();
+    expect(setup).not.toHaveBeenCalled();
   });
 
   it('requires the approved empty slot in the same managed state before planning app restrictions', async () => {

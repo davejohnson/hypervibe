@@ -7,6 +7,7 @@ import { getDb } from '../db/sqlite.adapter.js';
 import { ProjectRepository } from '../db/repositories/project.repository.js';
 import { planReportPath, writePlanReport } from './write-plan-report.js';
 
+export { findTransferAccessProbeReport } from './transfer-access-probe.js';
 export { findSavedSetupReport } from './gcp-setup-report.js';
 
 let memoryReports: string | undefined;

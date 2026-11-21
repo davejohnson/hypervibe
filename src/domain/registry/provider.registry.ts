@@ -362,7 +362,12 @@ export interface ProviderCredentialUpdateCapability {
   >;
 }
 
-export type MigrationAccess = 'empty-transfer-slot' | 'restrict-app-access';
+export const migrationAccessModes = ['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access'] as const;
+export type MigrationAccess = (typeof migrationAccessModes)[number];
+
+export function isMigrationAccessCheck(mode: MigrationAccess): boolean {
+  return mode === 'verify-copy-access' || mode === 'verify-export-file-access';
+}
 
 export interface MigrationAccessCapability {
   sourceProvider: string;
@@ -393,7 +398,7 @@ export interface RegisteredProvider {
   hostedObservation?: HostedObservationCapability;
   /** Provider-owned deletion driver for explicitly retained non-lifecycle resources. */
   retainedCleanup?: ProviderRetainedCleanupCapability;
-  /** Preview or apply a reviewed, empty credential slot for this source provider. */
+  /** Prepare or verify the reviewed migration access for this source provider. */
   migrationAccess?: MigrationAccessCapability;
   /** Provider-owned projection from database bindings to workload runtime variables. */
   databaseRuntime?: ProviderDatabaseRuntimeProjection;
