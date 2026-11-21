@@ -3,7 +3,7 @@ import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindin
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
-import { secretServiceScopeProblems } from '../domain/services/secret-service-scope.js';
+import { secretServiceScopeProblems, secretServicesFor } from '../domain/services/secret-service-scope.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
@@ -126,9 +126,28 @@ export function azureTestingEnvironments(spec: ProjectSpec): string[] {
 }
 
 /** Desired state the Azure engine cannot build yet; listed problems block planning instead of being ignored. */
+/**
+ * Secrets limited to named services in this environment: variable name → those services. On Azure each named
+ * service runs as its own identity and no other workload's identity can read the secret.
+ */
+export function azureSecretServices(spec: ProjectSpec, environmentName: string): Record<string, string[]> {
+  const declared = (spec.secrets ?? {}) as Record<string, { environments: string[]; services?: string[] } | undefined>;
+  return Object.fromEntries(Object.keys(declared).filter((key) => declared[key]?.services && declared[key]!.environments.includes(environmentName)).sort()
+    .map((key) => [key, secretServicesFor(spec, environmentName, key)]));
+}
+
+/** Limited secrets Azure cannot isolate: they are refused, never accepted with a weaker guarantee. */
+function azureSecretScopeProblems(spec: ProjectSpec, environmentName: string): string[] {
+  return Object.keys(azureSecretServices(spec, environmentName)).flatMap((key) => {
+    if (isBuildTokenKey(key)) return [`Secret ${key} is a package token: on Azure only image builds read it and no service receives it, so it cannot be limited to named services. Remove "services" from the secret.`];
+    if (key === WAKER_SECRET_KEY) return [`Secret ${key} is the read-only login Hypervibe creates for on-demand workers' scale rules; it cannot be limited to named services. Remove "services" from the secret.`];
+    return [];
+  });
+}
+
 export function azureEngineProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName]!;
-  const problems: string[] = [...commonEngineProblems(environment), ...secretServiceScopeProblems(spec, environmentName)];
+  const problems: string[] = [...commonEngineProblems(environment), ...secretServiceScopeProblems(spec, environmentName), ...azureSecretScopeProblems(spec, environmentName)];
   if (azureProfileFor(environmentName) === 'production') {
     problems.push(`${environmentName} uses the production profile (its own server and registry, web always on), which the Azure engine does not build yet. Testing environments are supported.`);
   }
@@ -272,6 +291,7 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
     return { PORT: '8080', ...Object.fromEntries(Object.entries(environmentSpec.envVars).filter(([key]) => !isBuildTokenKey(key))), ...storage };
   };
   const command = (startCommand?: string) => startCommand ? { command: ['sh', '-c', startCommand] } : {};
+  const secretServices = azureSecretServices(spec, environmentName);
   return {
     kind: 'environment', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
@@ -298,6 +318,9 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
       schedule: service.cronSchedule!, ...command(service.startCommand),
     })),
     secretKeys: extra.secretKeys.filter((key) => !isBuildTokenKey(key)),
+    // Only an environment that limits a secret gets identities of its own; every other environment is generated as before.
+    ...(Object.keys(secretServices).length ? { secretServices,
+      storageServices: [...new Set(Object.values(environmentSpec.storage ?? {}).flatMap((storage) => storage.injectInto))].sort() } : {}),
     ...(extra.secretKeys.find((key) => isBuildTokenKey(key) && engineOutsideKeys(spec, environmentName).includes(key)) ? { packageTokenKey: extra.secretKeys.find((key) => isBuildTokenKey(key) && engineOutsideKeys(spec, environmentName).includes(key))! } : {}),
   };
 }
@@ -349,30 +372,39 @@ export async function azureFailedEnvironmentAction(context: Pick<AzureEngineCont
  * environment's runtime identity, with the same scope and role: an earlier
  * apply created them and lost the reply. Unknown reads block the plan.
  */
-async function leftoverRoleAssignments(context: AzureEngineContext, input: AzureEngineInput, actions: PlanAction[]): Promise<{ adopt: Record<string, string> } | { unknown: string }> {
+export async function leftoverRoleAssignments(context: AzureEngineContext, input: AzureEngineInput, actions: PlanAction[]): Promise<{ adopt: Record<string, string> } | { unknown: string }> {
   const creating = actions.flatMap((action) => engineSegmentOf(action)?.addresses ?? []).filter((address) => address.startsWith('azurerm_role_assignment.'));
   if (!creating.length) return { adopt: {} };
   const group = `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}`;
   const tokens = context.tokens;
-  const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
-  if (!identity) return { unknown: 'Hypervibe could not read the runtime identity from Azure; try again.' };
-  if (identity.status === 404) return { adopt: {} };
-  const principalId = (identity.body.properties as { principalId?: string } | undefined)?.principalId;
-  if (identity.status !== 200 || !principalId) return { unknown: `Hypervibe could not read the runtime identity from Azure (HTTP ${identity.status}).` };
-  const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
-  if (!listed || listed.status !== 200) return { unknown: `Hypervibe could not list the runtime identity's roles in Azure (HTTP ${listed?.status ?? 'none'}).` };
-  const existing = ((listed.body.value ?? []) as Array<{ id?: string; properties?: { scope?: string; roleDefinitionId?: string } }>);
   const configuration = buildAzureEnvironmentConfiguration(input);
-  const desired = ((configuration.files['base.tf.json'] as { resource?: { azurerm_role_assignment?: Record<string, { scope: string; role_definition_id: string }> } }).resource?.azurerm_role_assignment) ?? {};
+  const base = (configuration.files['base.tf.json'] as { resource?: { azurerm_role_assignment?: Record<string, { scope: string; role_definition_id: string; principal_id: string }>; azurerm_user_assigned_identity?: Record<string, { name: string }> } }).resource ?? {};
+  const desired = base.azurerm_role_assignment ?? {};
   const storageId = `${group}/providers/Microsoft.Storage/storageAccounts/${azureStorageAccountName({ subscriptionId: context.connection.subscriptionId, environmentId: context.environment.id, prefix: context.prefix })}`;
+  // An assignment is taken over only from the identity it is planned for: the shared identity's role on a secret
+  // must never be adopted as a service identity's, or the reverse.
+  const identityOf = (address: string) => /^\$\{azurerm_user_assigned_identity\.([a-z0-9_]+)\.principal_id\}$/.exec(desired[address.replace(/^azurerm_role_assignment\./, '')]?.principal_id ?? '')?.[1];
   const adopt: Record<string, string> = {};
-  for (const address of creating) {
-    const wanted = desired[address.replace(/^azurerm_role_assignment\./, '')];
-    if (!wanted) continue;
-    const scope = wanted.scope.replace('${azurerm_storage_account.files.id}', storageId).toLowerCase();
-    const role = wanted.role_definition_id.split('/').pop()!.toLowerCase();
-    const match = existing.find((entry) => entry.properties?.scope?.toLowerCase() === scope && entry.properties?.roleDefinitionId?.split('/').pop()?.toLowerCase() === role);
-    if (match?.id) adopt[address] = match.id;
+  for (const identityKey of [...new Set(creating.map(identityOf).filter((key): key is string => Boolean(key)))].sort((a, b) => Number(b === 'runtime') - Number(a === 'runtime') || a.localeCompare(b))) {
+    const name = base.azurerm_user_assigned_identity?.[identityKey]?.name;
+    if (!name) continue;
+    const label = identityKey === 'runtime' ? 'the runtime identity' : `identity ${name}`;
+    const identity = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${name}?api-version=2023-01-31`).catch(() => undefined);
+    if (!identity) return { unknown: `Hypervibe could not read ${label} from Azure; try again.` };
+    if (identity.status === 404) continue;
+    const principalId = (identity.body.properties as { principalId?: string } | undefined)?.principalId;
+    if (identity.status !== 200 || !principalId) return { unknown: `Hypervibe could not read ${label} from Azure (HTTP ${identity.status}).` };
+    const listed = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
+    if (!listed || listed.status !== 200) return { unknown: `Hypervibe could not list the roles of ${label} in Azure (HTTP ${listed?.status ?? 'none'}).` };
+    const existing = ((listed.body.value ?? []) as Array<{ id?: string; properties?: { scope?: string; roleDefinitionId?: string; principalId?: string } }>)
+      .filter((entry) => entry.properties?.principalId === undefined || entry.properties.principalId.toLowerCase() === principalId.toLowerCase());
+    for (const address of creating.filter((entry) => identityOf(entry) === identityKey)) {
+      const wanted = desired[address.replace(/^azurerm_role_assignment\./, '')]!;
+      const scope = wanted.scope.replace('${azurerm_storage_account.files.id}', storageId).toLowerCase();
+      const role = wanted.role_definition_id.split('/').pop()!.toLowerCase();
+      const match = existing.find((entry) => entry.properties?.scope?.toLowerCase() === scope && entry.properties?.roleDefinitionId?.split('/').pop()?.toLowerCase() === role);
+      if (match?.id) adopt[address] = match.id;
+    }
   }
   return { adopt };
 }
@@ -498,6 +530,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
     `Azure ${azureLocationFor(spec, environmentName, context.connection)}, testing profile: workloads scale to zero. All testing environments share one private network (about $26/month) and one database server (about $24/month with its private endpoint), which the internet cannot reach.`,
     ...(planned.actions.some((action) => action.id === 'environment:base' && action.type !== 'noop') ? [`${environmentName}'s apps move into the project's shared private app environment: they are recreated, are briefly unavailable, and get new addresses.`] : []),
     ...(networkingUnchecked ? ['Hypervibe could not check that networking (Microsoft.Network) is turned on for this subscription. If the apply reports that the subscription is not registered for it, run hv_connections provider="azure" action="connect" and apply again.'] : []),
+    ...(Object.keys(input.secretServices ?? {}).length ? [`Limited secrets (${Object.entries(input.secretServices!).map(([key, services]) => `${key}: ${services.join(', ') || 'no service'}`).join('; ')}): each named service runs as its own identity, and no other workload's identity can read them. A value that other services held before this apply stays known to them; rotate it afterwards.`] : []),
     ...(!image && workloads ? ['Hypervibe could not find this project\'s local repository, so the workloads are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
   return recordPlan(project, context, params, actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState }, shared: { planId: sharedPlanId, state: context.shared.state } });

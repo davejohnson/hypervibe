@@ -5,7 +5,6 @@ import { credentialRuntimeServices } from '../../domain/services/credential-runt
 import { secretServiceScopeProblems, secretServicesFor } from '../../domain/services/secret-service-scope.js';
 import { buildCloudRunConfiguration } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { buildEngineInput } from '../infrastructure-engine.js';
-import { azureEngineProblems } from '../infrastructure-engine-azure.js';
 
 // Contract (docs/development/connections.md): a secret that names services reaches
 // only those services. Where hosting cannot do that, the spec is refused; it is
@@ -74,7 +73,7 @@ describe('declaring the services a secret reaches', () => {
       message: 'Hypervibe-owned secret "SIGNING_KEY" names service "api", which environment "staging" does not declare' }]);
   });
 
-  it.each(['railway', 'azure'])('refuses named services on %s instead of giving the secret to every service', (provider) => {
+  it.each(['railway'])('refuses named services on %s instead of giving the secret to every service', (provider) => {
     expect(projectSpecSchema.safeParse(document({ SOURCE_KEY: delegated }, provider)).success).toBe(true);
     const found = issues({ SOURCE_KEY: { ...delegated, services: ['catchup'] } }, provider);
     expect(found).toEqual([{ path: 'secrets.SOURCE_KEY.services', message: expect.stringContaining(`hosting provider "${provider}" does not support yet`) }]);
@@ -160,11 +159,8 @@ describe('planning a spec that reached a provider without service scoping', () =
     return { ...spec, secrets: { ...spec.secrets, SOURCE_KEY: { ...spec.secrets.SOURCE_KEY!, services: ['catchup'] } } } as ProjectSpec;
   };
 
-  it.each([['azure', azureEngineProblems]] as const)('blocks the %s plan', (provider, problems) => {
-    const expected = expect.stringContaining('Secret SOURCE_KEY is limited to named services');
-    expect(problems(unvalidated(provider), 'staging')).toContainEqual(expected);
-    expect(engineEnvironmentProblems(unvalidated(provider), 'staging')).toContainEqual(expected);
-    expect(problems(parse({ SOURCE_KEY: delegated }, provider), 'staging').join(' ')).not.toContain('named services');
+  it('accepts the three clouds that enforce the limit', () => {
+    for (const provider of ['cloudrun', 'aws', 'azure']) expect(secretServiceScopeProblems(unvalidated(provider), 'staging')).toEqual([]);
   });
 
   it('stops Railway from resolving the secret to every service', () => {
