@@ -1,3 +1,4 @@
+import { readReviewHistory, recordReviewApproval, reviewDigest } from '../../../adapters/storage/review-authorization.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -82,6 +83,24 @@ describe('one saved project setup plan', () => {
     expect(Object.keys(composed.resources).filter((address) => address === 'google_project_service.iam_googleapis_com')).toHaveLength(1);
     const generated = composed.files['project-setup.tf.json'] as { resource: { google_project_service: Record<string, { project: string; depends_on: string[] }> } };
     expect(generated.resource.google_project_service.iam_googleapis_com).toMatchObject({ project: projectId, depends_on: ['google_project.hypervibe'] });
+  });
+  it('checks the browser receipt and disclosed connection scope before applying a bootstrap plan', async () => {
+    const managed = engine();
+    const connection = { scope: 'owner/repository', deploymentAccount: 'deploy@example-project.iam.gserviceaccount.com' };
+    const params = { ...parameters('bootstrap'), bootstrapConnection: connection };
+    const preview = await runGcpProjectSetup(params, { engine: managed });
+    const id = preview.planId!;
+    const directoryOfPlan = path.dirname(preview.htmlPath!);
+    const intent = fs.readdirSync(directoryOfPlan).find(file => /^setup-[a-f0-9]{64}\.json$/.test(file))!;
+    const native = JSON.parse(fs.readFileSync(path.join(directoryOfPlan, intent), 'utf8'));
+    const confirm = { ...params, confirm: true, requireBrowserApproval: true, gcpSetupPlanId: id };
+    expect(await runGcpProjectSetup(confirm, { engine: managed })).toMatchObject({ success: false });
+    const digest = reviewDigest('setup', params.projectId, params.gcpProjectId, id, native);
+    recordReviewApproval(directory, id, digest, digest, () => true);
+    expect(await runGcpProjectSetup({ ...confirm, bootstrapConnection: { ...connection, scope: 'owner/other' } }, { engine: managed })).toMatchObject({ success: false });
+    expect(managed.apply).not.toHaveBeenCalled();
+    expect(await runGcpProjectSetup(confirm, { engine: managed })).toMatchObject({ success: true, planId: id });
+    expect(readReviewHistory(directory).setups).toEqual([expect.objectContaining({ planId: id, status: 'applied', digest })]);
   });
   it('confirms the saved artifact without planning again and consumes its approval', async () => {
     const managed = engine();

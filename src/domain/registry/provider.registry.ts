@@ -382,6 +382,7 @@ export interface MigrationAccessCapability {
     deployEmail: string;
     token: () => Promise<string>;
     planId?: string;
+    requireBrowserApproval?: boolean;
   }): Promise<Record<string, unknown> & { success: boolean }>;
 }
 

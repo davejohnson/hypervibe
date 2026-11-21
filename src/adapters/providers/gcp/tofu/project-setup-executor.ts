@@ -1,13 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { ensureEngineBinary, enginePluginCacheDir } from '../../../engine/opentofu/install.js';
 import { OpenTofuEngine, type EnginePlanResult, type EngineStepFailure } from '../../../engine/opentofu/engine.js';
 import { configurationDigest, engineStatePaths, ensureEngineStateDirectories, fileDigest, type EngineStatePaths } from '../../../engine/opentofu/workspace.js';
 import { getSecretStore } from '../../../secrets/secret-store.js';
 import { preserveSetupReport, saveSetupReport, setupPlansDirectory } from '../../../storage/gcp-setup-report.js';
-import { hardenPrivateFile } from '../../../storage/paths.js';
+import { readReviewApproval, recordSetupReviewExecution, reviewDigest, setupDataDigest as digest } from '../../../storage/review-authorization.js';
+import type { PlanReport } from '../../../../domain/plan/plan-report.js';
+import { getDataDir, hardenPrivateFile } from '../../../storage/paths.js';
 import type { EngineAuthentication, EngineConfiguration, EngineStateIdentity, InfrastructureEngineBackend } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { engineSegmentOf } from '../../../../domain/ports/infrastructure-engine.port.js';
 import type { PlanAction } from '../../../../domain/plan/plan.types.js';
@@ -50,12 +52,18 @@ export interface GcpProjectSetupParams {
   recoverProjectState?: string;
   /** Exact saved setup plan approved for cloud changes. */
   gcpSetupPlanId?: string;
+  requireBrowserApproval?: boolean;
+  reviewAfterVerification?: boolean;
+  bootstrapConnection?: PlanReport['bootstrapConnection'];
+  ciReleaseAccess?: PlanReport['ciReleaseAccess'];
 }
 export interface GcpProjectSetupResult {
   success: boolean;
   mode: 'preview' | 'confirm';
   planId?: string;
   htmlPath?: string;
+  /** The owning workflow records its terminal state after verifying connections. */
+  finishReview?: (outcome: 'applied' | 'failed') => boolean;
   actions?: PlanAction[];
   error?: string;
   projectRecovery?: GcpProjectRecovery;
@@ -64,9 +72,12 @@ export interface GcpProjectSetupResult {
 interface SetupManifest { contributions: Record<string, EngineConfiguration> }
 interface SetupPreview {
   planId: string; baseline: string; intent: string; planned: EnginePlanResult;
+  reviewContributionId?: string;
   setupPurpose?: 'railway-transfer' | 'railway-transfer-isolation';
   manifest: SetupManifest; configuration: EngineConfiguration;
   createdAt?: string; projectName?: string;
+  bootstrapConnection?: PlanReport['bootstrapConnection'];
+  ciReleaseAccess?: PlanReport['ciReleaseAccess'];
   requiresPlanId?: true;
   observedUnlinkedProject?: ObservedUnlinkedProject;
   observedLinkedProject?: ObservedLinkedProject;
@@ -89,11 +100,6 @@ export function getGcpProjectSetupContributions(projectId: string, gcpProjectId:
 export function getGcpRuntimeIsolation(projectId: string, gcpProjectId: string, runtimeEmail: string, dataDir?: string) {
   return retainedIsolations(getGcpProjectSetupContributions(projectId, gcpProjectId, dataDir), gcpProjectId)
     .find(scope => scope.runtimeEmail === runtimeEmail);
-}
-function digest(value: unknown): string {
-  const canonical = (entry: unknown): unknown => Array.isArray(entry) ? entry.map(canonical)
-    : entry && typeof entry === 'object' ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => [k, canonical(v)])) : entry;
-  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 }
 function readJson<T>(file: string, fallback: T): T {
   if (!hardenPrivateFile(file)) return fallback;
@@ -219,7 +225,15 @@ export function composeGcpProjectConfiguration(contributions: Record<string, Eng
  */
 export async function executeGcpProjectSetup(backend: InfrastructureEngineBackend, params: GcpProjectSetupParams, overrides?: GcpProjectSetupDependencies): Promise<GcpProjectSetupResult> {
   const mode = params.confirm ? 'confirm' : 'preview';
-  const fail = (error: string): GcpProjectSetupResult => ({ success: false, mode, error });
+  let executing: { planId: string; digest: string } | undefined;
+  const dataDir = params.dataDir ?? getDataDir();
+  const fail = (error: string): GcpProjectSetupResult => {
+    if (executing) {
+      try { recordSetupReviewExecution(dataDir, params.projectId, params.gcpProjectId, executing.planId, executing.digest, 'failed'); }
+      catch { error += ' The saved review could not record the setup failure.'; }
+    }
+    return { success: false, mode, error, ...(executing && { planId: executing.planId }) };
+  };
   const recoveryRequested = params.recoverProjectState !== undefined;
   const staleRecovery = 'The local project-state recovery authorization does not match the current evidence. Preview the existing project again.';
   if (recoveryRequested && (params.confirm || !/^[a-f0-9]{64}$/.test(params.recoverProjectState!))) return fail(staleRecovery);
@@ -309,9 +323,23 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       return fail('Preview the same active project with the original billing account. Its current identity and billing status must match the saved recovery.');
     }
     let saved: SetupPreview;
+    let originalReviewDigest: string | undefined;
     if (params.confirm) {
       const preview = readJson<SetupPreview | undefined>(previewFile, undefined);
       if (!preview) return fail('Preview this exact Google Cloud setup before confirming it. No infrastructure was changed.');
+      originalReviewDigest = reviewDigest('setup', params.projectId, params.gcpProjectId, preview.planId, preview);
+      if (params.requireBrowserApproval) {
+        if (params.contribution.id === 'ci-release' && (!params.ciReleaseAccess?.length || !preview.ciReleaseAccess?.length
+          || digest(params.ciReleaseAccess) !== digest(preview.ciReleaseAccess))) {
+          return fail('Preview GitHub release access again to review the workflows, branches, environments and triggers before approving.');
+        }
+        if (preview.planId !== params.gcpSetupPlanId || !readReviewApproval(dataDir, preview.planId, originalReviewDigest)
+          || (bootstrap && (!preview.bootstrapConnection || !params.bootstrapConnection
+            || digest(preview.bootstrapConnection) !== digest(params.bootstrapConnection)))) {
+          return { ...fail('This exact setup and its connection scope still need approval. Open the saved review before continuing.'),
+            ...(preview.planId === params.gcpSetupPlanId && { planId: preview.planId }) };
+        }
+      }
       if (!preview.requiresPlanId && (binding || preview.observedUnlinkedProject || preview.observedLinkedProject
         || (params.contribution.id === 'bootstrap' && params.observedUnlinkedProject && isInPlaceBillingUpdate(preview.planned.actions)))) {
         return fail('Preview the current project and billing account again to obtain a plan-bound Google Cloud setup confirmation.');
@@ -333,7 +361,9 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       }
       saved = { ...preview, createdAt: preview.createdAt ?? fs.statSync(previewFile).mtime.toISOString() };
     } else {
-      saved = { planId: `setup-${randomUUID()}`, createdAt: new Date().toISOString(), projectName: params.projectName,
+      saved = { planId: `setup-${randomUUID()}`, reviewContributionId: params.contribution.id, createdAt: new Date().toISOString(), projectName: params.projectName,
+        ...(bootstrap && params.bootstrapConnection && { bootstrapConnection: params.bootstrapConnection }),
+        ...(params.contribution.id === 'ci-release' && params.ciReleaseAccess && { ciReleaseAccess: params.ciReleaseAccess }),
         intent, baseline: digest(existing), manifest, configuration, planned: undefined as unknown as EnginePlanResult };
     }
     if (isolation) saved.setupPurpose = 'railway-transfer-isolation';
@@ -448,6 +478,10 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       return { success: true, mode, planId: saved.planId, actions: planned.actions, ...(saved.requiresPlanId ? { requiresPlanId: true } : {}), ...report };
     }
     const report = saveSetupReport(params, saved, params.auth.redact);
+    // Older preview files gain display defaults when rendered. Keep the receipt bound to the original saved document.
+    const executionDigest = originalReviewDigest!;
+    recordSetupReviewExecution(dataDir, params.projectId, params.gcpProjectId, saved.planId, executionDigest, 'running');
+    executing = { planId: saved.planId, digest: executionDigest };
     const addresses = saved.planned.actions.filter((action) => action.type !== 'noop').flatMap((action) => engineSegmentOf(action)?.addresses ?? []);
     if (addresses.length > 0) {
       // Keep approved intent after a partial apply so retry cannot orphan completed resources.
@@ -487,9 +521,16 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
         if (!observed.ok || !observed.present || observed.value !== true) return fail(unverified);
       } catch { return fail(unverified); }
     }
+    const finishReview = (outcome: 'applied' | 'failed') => {
+      try { recordSetupReviewExecution(dataDir, params.projectId, params.gcpProjectId, saved.planId, executionDigest, outcome); return true; }
+      catch { return false; }
+    };
     fs.unlinkSync(previewFile);
     if (saved.requiresPlanId && hardenPrivateFile(marker)) fs.unlinkSync(marker);
-    return { success: true, mode, planId: saved.planId, actions: saved.planned.actions, ...report };
+    if (!params.reviewAfterVerification) recordSetupReviewExecution(dataDir, params.projectId, params.gcpProjectId, saved.planId, executionDigest, 'applied');
+    executing = undefined;
+    return { success: true, mode, planId: saved.planId, actions: saved.planned.actions, ...report,
+      ...(params.reviewAfterVerification && { finishReview }) };
   } catch (error) {
     // Engine errors are already sanitized. Do not echo arbitrary admin input/configuration.
     let message = error instanceof Error ? error.message : 'Project setup failed.';

@@ -36,7 +36,7 @@ const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<',
   .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 const quantity = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
 const digest = (text: string) => createHash('sha256').update(text).digest('base64');
-const csp = `default-src 'none'; script-src 'sha256-${digest(planReportBrowser)}'; style-src 'sha256-${digest(planReportStyle)}'; base-uri 'none'; form-action 'none'`;
+export const planReportPolicy = `default-src 'none'; script-src 'sha256-${digest(planReportBrowser)}'; style-src 'sha256-${digest(planReportStyle)}'; base-uri 'none'; form-action 'none'`;
 
 function fact(label: string, value?: string) {
   return value ? `<div><dt>${label}</dt><dd>${value}</dd></div>` : '';
@@ -106,7 +106,7 @@ function actionRow(action: PlanReportAction, index: number, group: MapGroup, ind
     ${fact('Depends on', dependencies.length ? `<ul>${dependencies.join('')}</ul>` : 'No recorded prerequisites')}</dl></div></details></li>`;
 }
 
-export function renderPlanReportHtml(report: PlanReport): string {
+export function renderPlanReportHtml(report: PlanReport, options: { localReview?: boolean } = {}): string {
   const fileOnly = report.scope === transferFileAccessCheckScope;
   const accessCheck = fileOnly || report.scope === transferAccessCheckScope;
   const title = fileOnly ? 'Export file access check' : accessCheck ? 'Transfer access check' : 'Infrastructure plan';
@@ -123,14 +123,15 @@ export function renderPlanReportHtml(report: PlanReport): string {
     actionRow(action, index, map.groupByAction.get(action)!, indexes, accessCheck)).join('');
   const { warnings, costs, next, detail } = groupPlanNotices(report);
   const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', warnings, 'warning')
+    + notice('GitHub release access', report.ciReleaseAccess ?? [], 'info')
     + notice('Database cost and protection', costs, 'info') + notice('What happens next', next, 'info', detail);
   const metadata = [
     fact('Scope', escape(humanize(report.scope))),
     ...cloudFacts(report).map(({ label, value, href }) => typeof value === 'string' ? fact(label, href
-      ? `<a href="${escape(href)}" rel="noreferrer" aria-label="${escape(label + ' ' + value)}">${escape(value)}</a>`
+      ? `<a href="${escape(href)}" ${options.localReview ? 'target="_blank" rel="noopener noreferrer"' : 'rel="noreferrer"'} aria-label="${escape(label + ' ' + value)}">${escape(value)}</a>`
       : escape(value)) : ''),
     fact('Plan ID', escape(report.planId)), fact('Created', report.createdAt && escape(report.createdAt)),
-    fact('Approval', report.approval === 'whole-plan' ? 'Approve the whole plan in the chat or terminal where you requested it.' : undefined),
+    fact('Approval', !options.localReview && report.approval === 'whole-plan' ? 'Approve the whole plan in the chat or terminal where you requested it.' : undefined),
   ].join('');
   const flaggedCounts = [
     [report.actions.filter(action => action.requiresConfirm).length, 'Confirmation required'],
@@ -138,13 +139,13 @@ export function renderPlanReportHtml(report: PlanReport): string {
     [report.actions.filter(action => action.dataBearing).length, 'Handle persistent data'],
   ].filter(([count]) => count).map(([count, label]) => `<span>${label} <b>${count}</b></span>`).join('');
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
+<html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${planReportPolicy}">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.project)} · ${title} · Hypervibe</title>
 <style>${planReportStyle}</style></head><body>
 <a class="skip" href="#review">Skip to plan actions</a>
-<header class="mast"><div class="mast-inner"><div class="brand">
+${options.localReview ? '' : `<header class="mast"><div class="mast-inner"><div class="brand">
 <svg class="brand-mark" aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.3"><path d="m3 18 5-12m1 12 5-12m1 12 5-12"/></svg>
-Hypervibe <span class="brand-topic">${title}</span></div><button id="print" class="button" data-interactive hidden>Print report</button></div></header>
+Hypervibe <span class="brand-topic">${title}</span></div><button id="print" class="button" data-interactive hidden>Print report</button></div></header>`}
 <main><div class="title-row"><h1>${escape(report.project)}</h1>${report.environment ? `<span class="environment">Environment · ${escape(report.environment)}</span>` : ''}</div>
 <dl class="meta">${metadata}</dl><div class="counts" aria-label="Action counts">${stats}</div>
 ${flaggedCounts ? `<div class="review-flags" aria-label="Actions to review">${flaggedCounts}</div>` : ''}

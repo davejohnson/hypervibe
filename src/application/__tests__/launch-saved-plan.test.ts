@@ -1,3 +1,12 @@
+import { withCommandReview } from '../command-review.js';
+import { registerCoreTools } from '../../tools/core.tools.js';
+import { registerHvMigrateTools } from '../../tools/hv-migrate.tools.js';
+import * as migration from '../migrate.js';
+import { LocalReviewCatalog } from '../../adapters/storage/local-review-catalog.js';
+import * as reviewService from '../local-review-service.js';
+import { formatCommandResult } from '../presentation.js';
+import { browserApprovedRunActions } from '../browser-approved-run.js';
+import { registerHvDevxTools } from '../../tools/hv-devx.tools.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -28,7 +37,7 @@ beforeEach(() => {
   SqliteAdapter.getInstance(path.join(directory, 'test.db')).migrate();
   vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Network forbidden in saved-plan regression'); }));
 });
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); SqliteAdapter.resetInstance(); rmSync(directory, { recursive: true, force: true }); });
 function fixture(secrets: Record<string, unknown> = {}) {
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: 'saved-launch', defaultPlatform: 'cloudrun' });
@@ -52,6 +61,64 @@ function fixture(secrets: Record<string, unknown> = {}) {
 }
 
 describe('launch exact saved-plan approval', () => {
+  it('returns a native result link for completed, differing and incomplete migration comparisons', async () => {
+    vi.stubEnv('HYPERVIBE_DATA_DIR', directory);
+    SqliteAdapter.resetInstance();
+    SqliteAdapter.getInstance(path.join(directory, 'hypervibe.db')).migrate();
+    const base = 'http://127.0.0.1:47832/v/test-profile';
+    vi.spyOn(reviewService, 'currentLocalReviewOrigin').mockResolvedValue(base);
+    const f = fixture();
+    registerHvMigrateTools(f.commands, f.ctx);
+    const compare = vi.spyOn(migration, 'migrateEnvironment');
+    for (const status of ['verified', 'differs', 'blocked'] as const) {
+      compare.mockResolvedValueOnce(status === 'blocked' ? { status, message: 'Private provider diagnostics' }
+        : { status, target: 'staging', storage: [], message: 'Compared data',
+          database: { tables: 2, rows: '10', match: status === 'verified', differences: ['private-table-name'] } });
+      const result = await f.commands.execute('hv_migrate', { project: f.project.name, from: 'source', to: 'staging', gcpProjectId: 'example-project', verifyOnly: true });
+      const data = (result.data ?? result.error?.details) as { resultRunId: string; reviewUrl: string };
+      expect(data.reviewUrl).toBe(reviewService.localReviewUrl(base, data.resultRunId));
+      const artifact = new LocalReviewCatalog(directory).get(data.resultRunId)!;
+      expect(artifact.kind).toBe('result');
+      expect(JSON.stringify(artifact)).not.toMatch(/private-table-name|Private provider diagnostics/);
+    }
+  });
+  it('links the saved plan, reuses only its browser approval and hides the export path in human output', async () => {
+    vi.stubEnv('HYPERVIBE_DATA_DIR', directory);
+    SqliteAdapter.resetInstance();
+    SqliteAdapter.getInstance(path.join(directory, 'hypervibe.db')).migrate();
+    const base = 'http://127.0.0.1:47832/v/test-profile';
+    vi.spyOn(reviewService, 'currentLocalReviewOrigin').mockResolvedValue(base);
+    const f = fixture();
+    registerHvDevxTools(f.commands, f.ctx);
+    registerCoreTools(f.commands, f.ctx);
+    const plan = f.saved('Provision the staging secret');
+    f.ctx.repos.runs.updateStatus(plan.planRunId, 'succeeded');
+    const command = { project: f.project.name, runId: plan.planRunId, action: 'report' };
+    const before = await f.commands.execute('hv_runs', command);
+    const url = reviewService.localReviewUrl(base, plan.planRunId);
+    expect(before).toMatchObject({ ok: true, data: { reviewStatus: 'Awaiting approval', reviewUrl: url } });
+    const rendered = formatCommandResult('hv_runs', before);
+    expect(rendered).toContain(url);
+    expect(rendered).not.toContain(directory);
+    const stoppedDeploy = await withCommandReview('hv_deploy', {}, { ok: false, error: { code: 'VALIDATION', message: 'Deploy prerequisite', details: { planId: plan.planRunId } } });
+    expect(stoppedDeploy).toMatchObject({ ok: false, error: { details: { reviewUrl: url } } });
+    const apply = { project: f.project.name, planId: plan.planRunId, useBrowserApproval: true };
+    expect(await f.commands.execute('hv_apply', apply)).toMatchObject({ ok: false, error: { details: { reviewUrl: url } } });
+    expect(f.apply).not.toHaveBeenCalled();
+    const saved = f.ctx.repos.runs.findById(plan.planRunId)!;
+    expect(browserApprovedRunActions(saved, f.project.id)).toBeUndefined();
+    const catalog = new LocalReviewCatalog(directory);
+    catalog.approve(saved.id, catalog.get(saved.id)!.approval!.digest);
+    expect(await f.commands.execute('hv_runs', command)).toMatchObject({ data: { reviewStatus: 'Approved' }, agentInstruction: { action: 'continue' } });
+    expect(browserApprovedRunActions(saved, f.project.id)).toEqual(plan.confirmActions);
+    expect(browserApprovedRunActions({ ...saved, plan: { ...saved.plan, specRevision: 2 } }, f.project.id)).toBeUndefined();
+    expect(f.apply).not.toHaveBeenCalled();
+    await f.commands.execute('hv_apply', apply);
+    expect(f.apply).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ planId: saved.id, confirmActions: plan.confirmActions }));
+    f.apply.mockClear();
+    await f.commands.execute('hv_launch', { project: f.project.name, env: 'staging', planId: saved.id });
+    expect(f.apply).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ planId: saved.id, confirmActions: plan.confirmActions }));
+  });
   it('routes an approved saved DNS artifact to its own engine without replanning hosting', async () => {
     const f = fixture();
     const environment = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'staging')!;

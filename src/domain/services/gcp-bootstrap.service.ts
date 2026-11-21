@@ -166,6 +166,7 @@ export async function runGcpBootstrap(
     billingAccountName?: string;
     recoverProjectState?: string;
     gcpSetupPlanId?: string;
+    requireBrowserApproval?: boolean;
     region?: string;
     confirm?: boolean;
   },
@@ -245,6 +246,7 @@ export async function runGcpBootstrap(
   let createdKeyName: string | undefined;
   let projectRecovery: GcpBootstrapResult['projectRecovery'];
   const sensitiveValues = new Set<string>();
+  let setupReview: Awaited<ReturnType<typeof runGcpProjectSetup>> | undefined;
 
   try {
     accessToken = await dependencies.getDefaultAdminAccessToken();
@@ -287,11 +289,14 @@ export async function runGcpBootstrap(
       infrastructure = await dependencies.setupProject({ projectId: params.project.id, projectName: params.project.name, gcpProjectId: projectId.value,
         auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: accessToken, GOOGLE_PROJECT: projectId.value }, redact: [accessToken] },
         ...(params.environmentProjectId ? { authenticationScope: scope } : {}),
+        bootstrapConnection: { scope, deploymentAccount: serviceAccountEmail }, reviewAfterVerification: true,
+        ...(params.requireBrowserApproval && { requireBrowserApproval: true }),
         ...(observedUnlinkedProject ? { observedUnlinkedProject } : {}),
         ...(observedLinkedProject ? { observedLinkedProject } : {}),
         ...(params.recoverProjectState ? { recoverProjectState: params.recoverProjectState } : {}),
         ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
         contribution: { id: 'bootstrap', configuration }, confirm: mode === 'confirm' });
+      setupReview = infrastructure;
       if (!infrastructure.success) {
         const recovery = infrastructure.projectRecovery;
         if (mode === 'preview' && recovery && observedUnlinkedProject && recovery.projectId === projectId.value && recovery.projectNumber === projectNumber) {
@@ -465,6 +470,7 @@ export async function runGcpBootstrap(
       scope,
       target,
       message: 'GCP is ready for Hypervibe Cloud Run and Cloud SQL deploys.',
+      ...(setupReview?.finishReview?.('applied') === false && { reviewStatusWarning: 'The saved review could not record the connection outcome.' }),
       planId: infrastructure.planId,
       htmlPath: infrastructure.htmlPath,
       partialProgress: progress,
@@ -525,6 +531,8 @@ export async function runGcpBootstrap(
       scope,
       target,
       error: safeError,
+      ...(setupReview?.planId && { planId: setupReview.planId, htmlPath: setupReview.htmlPath }),
+      ...(setupReview?.finishReview?.('failed') === false && { reviewStatusWarning: 'The saved review could not record the connection failure.' }),
       partialProgress: progress,
       ...(projectRecovery ? { projectRecovery } : {}),
       ...(recovery ? { recovery } : {}),

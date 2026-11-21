@@ -51,6 +51,8 @@ export async function grantCiReleaseAccess(params: {
   releases: GcpCiReleaseScope[];
   runtimeServiceAccountEmail: string;
   confirm?: boolean;
+  gcpSetupPlanId?: string;
+  requireBrowserApproval?: boolean;
 }) {
   const response = await readGcpProject(params.adminToken, params.gcpProjectId);
   if (!response.ok) throw new Error(`Could not read the GCP project (HTTP ${response.status}).`);
@@ -64,6 +66,11 @@ export async function grantCiReleaseAccess(params: {
     projectId: params.projectId, projectName: params.projectName, gcpProjectId: params.gcpProjectId,
     auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: params.adminToken }, redact: [params.adminToken] },
     contribution: { id: 'ci-release', configuration }, confirm: params.confirm,
+    ciReleaseAccess: [
+      `GitHub repository ${params.repository} (ID ${params.repositoryId}).`,
+      ...previewCiReleaseAccess(params.gcpProjectId, params.repository, params.runtimeServiceAccountEmail, params.releases).grants,
+    ],
+    ...(params.gcpSetupPlanId && { gcpSetupPlanId: params.gcpSetupPlanId, requireBrowserApproval: params.requireBrowserApproval }),
   });
   if (!result.success) throw new Error(result.error ?? 'CI infrastructure setup did not complete.');
   return { ...result, projectNumber, provider: ciWorkloadIdentityProvider(projectNumber), releaseIdentity: ciReleaseIdentity(params.gcpProjectId) };

@@ -1,3 +1,5 @@
+import { readReviewApproval, reviewDigest } from '../adapters/storage/review-authorization.js';
+import { getDataDir } from '../adapters/storage/paths.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { ProbeCreateRejected, transferProbeFixtures } from '../adapters/providers/gcp/gcp-transfer-probe-fixtures.js';
@@ -72,6 +74,11 @@ async function runSavedCheck(input: AccessProbeRequest) {
         saved.plan.deployEmail === input.deployEmail),
     'The saved plan does not match the requested access check, source, destination and Google project.',
   );
+  if (input.requireBrowserApproval) {
+    if (!saved || !planId || !readReviewApproval(getDataDir(), planId, reviewDigest('probe', project.id, target.projectId, planId, saved.plan))) {
+      return { success: false, planId, error: 'This exact access check still needs browser approval. Open the saved review before continuing.' };
+    }
+  }
   if (saved?.run.status === 'passed')
     return {
       success: true,

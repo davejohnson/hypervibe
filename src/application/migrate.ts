@@ -1,3 +1,4 @@
+import { browserApprovedRunActions } from './browser-approved-run.js';
 import { acquireMigrationTargetLease, type MigrationTargetLease } from '../adapters/db/migration-target-lease.js';
 import { cloudEngineFor } from './cloud-engines.js';
 import { engineSecretStore } from './engine-secrets.js';
@@ -241,6 +242,7 @@ interface MigrateParams {
   domain?: string;
   billingAccountName?: string;
   gcpSetupPlanId?: string;
+  browserAccess?: string;
   approveAccess?: string[];
   confirmActions?: string[];
   planId?: string;
@@ -327,6 +329,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
     ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
+    ...(params.browserAccess && { browserAccess: params.browserAccess }),
     ...(params.approveAccess ? { approveAccess: params.approveAccess } : {}),
     ...(!sourcePlanApproval && params.planId ? { planId: params.planId } : {}),
     ...(!sourcePlanApproval && params.confirmActions ? { confirmActions: params.confirmActions } : {}),
@@ -690,6 +693,7 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
         return { status: 'blocked', message: 'The saved source plan no longer matches this project, environment and spec. Review a new cutover plan.' };
       }
       reviewed = { planId, actions: loaded.document.actions };
+      if (confirmActions === undefined) confirmActions = browserApprovedRunActions(loaded.run, project.id);
     }
   }
 

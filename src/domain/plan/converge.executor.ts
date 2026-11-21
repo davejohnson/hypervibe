@@ -651,7 +651,7 @@ export interface ConvergeResult {
   receipts: ActionReceipt[];
 }
 
-const DEFAULT_MAX_PLAN_AGE_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_MAX_PLAN_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Stable fingerprint of observed state, ignoring volatile fields

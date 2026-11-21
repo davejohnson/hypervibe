@@ -183,7 +183,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       region: z.string().trim().min(1).optional().describe('GCP bootstrap/prepare target region for shared build resources; defaults to us-central1. Each region is reviewed and retained independently.'),
       billingAccountName: z.string().optional().describe('action="bootstrap": exact open billing account name chosen from discovery. Preview again with this account, then confirm the saved infrastructure plan separately.'),
       recoverProjectState: z.string().trim().min(1).optional().describe('For a Google Cloud bootstrap preview that returned projectRecovery, pass its exact recovery reference to repair the local project record and preview again. Omit confirm.'),
-      gcpSetupPlanId: z.string().min(1).optional().describe('Confirm a migration access plan or a Google Cloud bootstrap preview that returns requiresPlanId with the exact saved planId.'),
+      gcpSetupPlanId: z.string().min(1).optional().describe('Exact saved Google Cloud setup or access-check plan. Supply it without confirm to continue using its recorded browser approval.'),
       deployServiceAccountEmail: z.string().optional().describe('action="prepare": deploy service account email (defaults to the Cloud Run connection service account)'),
       gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser in this GCP project with any approved migration exclusions preserved; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
@@ -238,8 +238,13 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         adminCredentialsJsonRef,
         adminAccessToken,
         adminAccessTokenRef,
-        confirm,
+        confirm: explicitConfirmation,
       } = input;
+      const requireBrowserApproval = gcpSetupPlanId !== undefined && explicitConfirmation === undefined;
+      const confirm = requireBrowserApproval || explicitConfirmation;
+      if (requireBrowserApproval && !/^(?:setup|probe)-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(gcpSetupPlanId!)) {
+        return commandError('VALIDATION', 'Use the exact saved plan ID from the browser review.');
+      }
       const transferAccess = migrationAccess && provider ? providerRegistry.get(provider)?.migrationAccess : undefined;
       if (migrationAccess !== undefined) {
         if (action !== 'prepare' || !transferAccess) {
@@ -259,8 +264,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         return commandError('VALIDATION', 'Use migrationSourceEnvironment with a migrationAccess mode.');
       }
       if (gcpSetupPlanId !== undefined && (!confirm || provider !== 'cloudrun' || recoverProjectState !== undefined
-        || (action !== 'bootstrap' && migrationAccess === undefined))) {
-        return commandError('VALIDATION', 'Use gcpSetupPlanId with confirm=true for a Cloud Run bootstrap or migration access plan. Omit recoverProjectState.');
+        || (action !== 'bootstrap' && action !== 'prepare'))) {
+        return commandError('VALIDATION', 'Use gcpSetupPlanId for a Cloud Run bootstrap or preparation plan. Omit recoverProjectState. Omit confirm to use its saved browser approval.');
       }
       if (recoverProjectState !== undefined && (action !== 'bootstrap' || provider !== 'cloudrun'
         || confirm === true || !billingAccountName?.trim() || !gcpProjectId?.trim())) {
@@ -529,6 +534,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           billingAccountName,
           ...(recoverProjectState ? { recoverProjectState } : {}),
           ...(gcpSetupPlanId ? { gcpSetupPlanId } : {}),
+          ...(requireBrowserApproval && { requireBrowserApproval: true }),
           confirm,
         });
         if (!payload.success) {
@@ -619,7 +625,9 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           memorystoreAccess,
           queueAccess,
           workerAccess,
-          ...(migrationAccess ? { migrationAccess, migrationSourceEnvironment, gcpSetupPlanId } : {}),
+          ...(migrationAccess ? { migrationAccess, migrationSourceEnvironment } : {}),
+          ...(gcpSetupPlanId && { gcpSetupPlanId }),
+          ...(requireBrowserApproval && { requireBrowserApproval: true }),
           adminAuth,
           adminCredentialsJson: resolvedAdminCredentialsJson,
           adminAccessToken: resolvedAdminAccessToken,

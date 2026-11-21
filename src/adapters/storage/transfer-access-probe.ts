@@ -148,7 +148,7 @@ function database(projectId: string, gcpProjectId: string, create: boolean) {
     );
   return db;
 }
-function decode(raw: unknown, projectId: string, gcpProjectId: string) {
+export function decodeProbe(raw: unknown, projectId: string, gcpProjectId: string) {
   if (!raw) return;
   const row = raw as { id: string; slot: string; plan: string; run: string; digest: string };
   if (probeDigest([row.plan, row.run]) !== row.digest) throw new Error('The saved access check is damaged.');
@@ -169,7 +169,7 @@ export function loadProbe(projectId: string, gcpProjectId: string, planId: strin
   if (!probeIdPattern.test(planId)) return;
   const db = database(projectId, gcpProjectId, false);
   try {
-    return decode(db?.prepare('SELECT * FROM probes WHERE id=?').get(planId), projectId, gcpProjectId);
+    return decodeProbe(db?.prepare('SELECT * FROM probes WHERE id=?').get(planId), projectId, gcpProjectId);
   } finally {
     db?.close();
   }
@@ -178,7 +178,7 @@ export function probeHistory(projectId: string, gcpProjectId: string, slot: stri
   const db = database(projectId, gcpProjectId, false);
   try {
     return (db?.prepare('SELECT * FROM probes WHERE slot=? ORDER BY id').all(slot) ?? []).map((row) =>
-      decode(row, projectId, gcpProjectId)!,
+      decodeProbe(row, projectId, gcpProjectId)!,
     );
   } finally {
     db?.close();

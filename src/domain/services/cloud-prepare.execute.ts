@@ -135,6 +135,7 @@ export async function runCloudPrepare(params: {
   migrationAccess?: MigrationAccess;
   migrationSourceEnvironment?: string;
   gcpSetupPlanId?: string;
+  requireBrowserApproval?: boolean;
   defaultAdminAccessTokenProvider?: () => Promise<string>;
   confirm?: boolean;
 }): Promise<Record<string, unknown> & { success: boolean }> {
@@ -194,6 +195,7 @@ export async function runCloudPrepare(params: {
       deployEmail: resolved.deployServiceAccountEmail,
       token: params.defaultAdminAccessTokenProvider ?? getExistingAdminAccessToken,
       planId: params.gcpSetupPlanId,
+      ...(params.requireBrowserApproval && { requireBrowserApproval: true }),
     });
   }
 
@@ -318,6 +320,7 @@ export async function runCloudPrepare(params: {
     };
   }
 
+  let savedReview: Awaited<ReturnType<typeof runGcpProjectSetup>> | undefined;
   try {
     if (getGcpRuntimeIsolation(project.id, resolved.gcpProjectId, resolved.deployServiceAccountEmail)) {
       return { success: false, error: 'The restricted app runtime cannot receive deployment permissions. Select the deployment service account for this project.' };
@@ -335,12 +338,15 @@ export async function runCloudPrepare(params: {
     if (adoption) configuration = adoption.configuration;
     const setup = await runGcpProjectSetup({ projectId: project.id, projectName: project.name, gcpProjectId: resolved.gcpProjectId,
       auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: token, GOOGLE_PROJECT: resolved.gcpProjectId }, redact: [token] },
-      contribution: { id: contributionId, configuration }, confirm,
+      contribution: { id: contributionId, configuration }, confirm, reviewAfterVerification: true,
+      ...(params.gcpSetupPlanId && { gcpSetupPlanId: params.gcpSetupPlanId }),
+      ...(params.requireBrowserApproval && { requireBrowserApproval: true }),
       ...(adoption ? { allowImportAddresses: adoption.allowImportAddresses, existingResourceAddresses: adoption.existingResourceAddresses } : {}),
       ...(removalOnly ? { allowDestroyAddresses: [
         ...revokeRoles.map((role) => projectIamAddress(member, role)),
         ...(runtimeMember ? runtimeRevokeRoles.map((role) => projectIamAddress(runtimeMember, role)) : []),
       ] } : {}) });
+    savedReview = setup;
     if (!setup.success) return { ...setup, plan };
     if (!confirm) return { ...setup, plan, requiresConfirmation: true,
       message: 'Review these exact Google Cloud setup actions, then confirm the saved preview.' };
@@ -417,6 +423,7 @@ export async function runCloudPrepare(params: {
 
     return {
       success: true,
+      ...(savedReview.finishReview?.('applied') === false && { reviewStatusWarning: 'The saved review could not record the verified setup outcome.' }),
       message: removalOnly
         ? 'Cloud access cleanup completed.'
         : 'Cloud prepared for Hypervibe deploys.',
@@ -465,6 +472,7 @@ export async function runCloudPrepare(params: {
         ],
     };
   } catch (error) {
+    const reviewRecorded = savedReview?.finishReview?.('failed');
     const failureCategory = classifyPrepareError(error, adminAuth);
     auditRepo.create({
       action: 'cloud.prepare.failed',
@@ -478,6 +486,8 @@ export async function runCloudPrepare(params: {
     });
     return {
       success: false,
+      ...(savedReview?.planId && { planId: savedReview.planId, htmlPath: savedReview.htmlPath }),
+      ...(reviewRecorded === false && { reviewStatusWarning: 'The saved review could not record the setup failure.' }),
       error: describePrepareError(error, {
         adminAuth,
         gcpProjectId: resolved.gcpProjectId,

@@ -47,8 +47,12 @@ replace them with remembered permission tables or dashboard procedures.
    a possibly misspelled project selector.
 2. Express infrastructure intent through `hv_spec`, then obtain a plan with
    `hv_plan`. Present the chosen resources, practical changes, costs where known,
-   and consequential actions. Link the local browser report returned in
-   `htmlPath` when presenting a saved plan. To open an older plan, use
+   and consequential actions. Share the clickable `reviewUrl` returned with a saved
+   plan or test result. The review shows its approval or execution status.
+   After the user approves in the browser, use the returned continuation.
+   Reopening the review checks its status without running it.
+   `hypervibe reviews` prints a link to the local library. When the server is unavailable,
+   `htmlPath` identifies the saved export. To reopen an older plan, use
    `hv_runs action="report" runId=<planId>`. For a Google Cloud setup plan,
    also supply its Hypervibe `project` and native `gcpProjectId`. Setup
    previews still pending at upgrade can be opened. Earlier versions discarded
@@ -58,7 +62,8 @@ replace them with remembered permission tables or dashboard procedures.
    another question; billing, ownership, spending, adoption, and destructive
    changes retain their required decisions and confirmations.
 3. Apply the exact reviewed plan with `hv_apply`, supplying only its required
-   confirmations after authorization. A stale or changed plan needs a fresh
+   confirmations after authorization. For a recorded browser approval, pass
+   its exact `planId` with `useBrowserApproval=true`. A stale or changed plan needs a fresh
    review. When a prerequisite stage succeeds and the requested work includes
    the next stage, prepare its plan yourself and present any changes that need
    approval. Preparing the preview does not authorize applying it.
@@ -78,8 +83,10 @@ SQL database, storage buckets and custom domain in reviewed rounds, releases
 the committed local code and verifies it. Ask the user only at its stop points:
 `needs_billing_choice` (ask which billing account should pay; the choice does
 not approve infrastructure or permissions), `needs_access` (show its saved OpenTofu setup plan and exact permissions,
-then pass its `accessId` in `approveAccess` after approval), `needs_confirmation` (show the changes and estimated
-monthly cost, then pass its exact `planId` and `confirmActions`) and `needs_secrets` (keys only
+then follow the returned continuation. A Google Cloud browser approval uses its exact
+`gcpSetupPlanId` and `browserAccess`), `needs_confirmation` (show the changes and estimated
+monthly cost, then return the exact `planId` after browser approval or supply
+`confirmActions` for the changes the user approved directly) and `needs_secrets` (keys only
 an outside service issues, such as API keys: a local page is open with a link to
 each key's page, and one-click use of a value already in `.env.<env>` or the
 shared `.env` (never shown); share the link and call again once they are saved). Declare
@@ -131,7 +138,7 @@ credential container with `hv_connections` action `prepare`, provider
 `cloudrun`, `migrationAccess="empty-transfer-slot"`, the project, Railway
 `migrationSourceEnvironment` and destination `environment`. Show the saved
 plan for its service account, empty container and secret-level read grant.
-After approval, confirm with its exact `gcpSetupPlanId`. Keep the container
+After browser approval, resume the same call with its exact `gcpSetupPlanId` and omit `confirm`. Keep the container
 empty. After this setup, use the same source, target and project with
 `migrationAccess="restrict-app-access"` to review the two app permission
 changes. Confirm the exact saved plan after approval. Once applied, preview
