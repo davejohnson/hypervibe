@@ -110,6 +110,31 @@ live journey below records create, update and delete results from the same date.
   confirmation gate governs deletion; provider-side protection would only break an
   approved teardown.
 
+## Teardown
+
+`hv_plan scope="teardown"` removes a whole Google Cloud environment as one
+reviewed plan; every action needs its own confirmation:
+
+1. Hypervibe empties each storage bucket, every version of every file. It first
+   checks the bucket's labels say it belongs to this environment, and stops
+   without deleting anything if the environment changed since the plan was made.
+   Buckets are created without `force_destroy`, so deleting files is never a
+   side effect of another change.
+2. OpenTofu destroys what it created: services, workers, jobs, schedules, queues,
+   buckets, the database instance and the secrets Hypervibe generated.
+3. Hypervibe reads the services, the database instance, the buckets and its
+   secrets again. If any still exists, or cannot be read, the apply fails and the
+   environment stays in the spec; run the teardown plan again.
+4. Only then are the environment's bindings cleared and the environment removed
+   from the spec, so the next plan does not recreate it.
+
+The database is deleted with its backups, and so are the environment's secrets,
+including values imported from another host. An environment with custom domains is refused until the domains
+are removed from the spec and applied, because teardown does not change DNS. The
+project-level setup (the Google project, its identities, the shared image
+repository and the state bucket) stays; removing it is still open in
+[#103](https://github.com/davejohnson/hypervibe/issues/103).
+
 ## Release ownership with CI (Cloud Run)
 
 The engine ignores only `template[0].containers[0].image` plus the `client` and
@@ -234,7 +259,7 @@ engine provisions a temporary identity to copy a private database or files.
 4. `hv_deploy` builds from the git remote and releases it: a recorded plan run under
    the environment lock that changes only the running image (etag-guarded), then
    checks the health path.
-5. Teardown: remove services and secrets from the spec, plan, apply with confirmations.
+5. Teardown: `hv_plan scope="teardown"` → `hv_apply` with confirmations (see [Teardown](#teardown)).
 
 The pinned OpenTofu binary is downloaded and checksum-verified on first use into
 `~/.hypervibe/engine/bin`; providers are cached in `~/.hypervibe/engine/plugins`.
