@@ -191,15 +191,51 @@ holds the secret, because Cloud Run cannot start an instance whose identity
 lost a secret it references. Hypervibe records, from each refreshed plan and
 each completed apply, what every workload runs as and references. So:
 
-- **A new limited secret** (no service holds it yet): run the setup step, then
-  `hv_plan` and `hv_apply`.
-- **Narrowing a secret services already hold**, or changing its list: run the
-  setup step (it creates identities and narrows nothing yet), `hv_plan` and
-  `hv_apply` (the named service moves to its identity; the others drop the
-  reference), then the setup step again (it narrows the grants). Between the
-  apply and the second step the plan output says `NOT YET ENFORCED`, and
-  further plans for the environment are blocked until the second step is
-  confirmed and verified against the live project policy.
+Which flow applies depends on whether the environment has ever created the
+secret, not on whether you consider it new:
+
+- **The environment has never created the secret** (it is not yet in Secret
+  Manager for this environment), or the environment has no workloads yet: the
+  first setup step already closes it to the shared identity. Run the setup
+  step, check that its result lists the secret under `cannotRead` for the
+  shared runtime identity and nothing under `notYetEnforced`, then `hv_plan`
+  and `hv_apply`. The value is stored only after the secret is closed.
+- **The secret already exists in the environment** (services hold it, or held
+  it), or its list of services changes: three steps.
+  1. Setup step. It creates identities and narrows nothing; its result says
+     `NOT YET ENFORCED`.
+  2. `hv_plan` and `hv_apply`. The named service moves to its identity; the
+     others drop the reference. The plan warnings, the `hv_apply` result and
+     `hv_status` all say `NOT YET ENFORCED` or name the next step, and further
+     plans for the environment are blocked.
+  3. Setup step again. It narrows the grants and verifies them.
+  Until step 3 is confirmed and verified, every service that runs as the shared
+  identity can still read the secret. **Do not store or rotate in the real
+  value before then.** If the secret already holds a real value, treat it as
+  known to the other services and rotate it after step 3.
+
+When in doubt, read the setup result: a secret is enforced only when it is
+absent from `notYetEnforced`.
+
+After a confirmed setup Hypervibe reads, with the administrator sign-in:
+
+- the project IAM policy: each identity has exactly one Secret Accessor
+  binding with exactly the reviewed condition, and no workload identity holds
+  Owner, Editor, Secret Manager Admin, Service Account User, Token Creator,
+  Service Account Admin, Workload Identity User, Security Admin, Project IAM
+  Admin, Cloud Run Admin or Cloud Run Developer on the project;
+- the IAM policy of each limited secret that exists: no excluded identity (and
+  not everyone) holds any role directly on it;
+- each service identity: present, enabled, and no other workload identity (and
+  not everyone) holds any role on it, so none can act as it or mint its tokens.
+
+Anything that cannot be read counts as not enforced. Not checked: custom
+roles, bindings inherited from a folder or the organisation, and changes made
+in Google Cloud after the check. The check runs when setup is confirmed, not on
+every plan.
+
+A missing local workload record never reopens a secret: an exclusion the saved
+setup already has is kept.
 
 `hv_plan` is blocked whenever the verified setup is not exactly what the spec
 and the recorded workloads call for: a missing identity, a secret the shared
@@ -237,7 +273,10 @@ this is in the environment's own plan; there is no separate setup step.
 
 Limiting a secret on a live environment adds the roles, updates policies,
 schedules and services in place and registers new task definition revisions.
-No bucket, database or stored parameter is replaced. A package token
+No bucket, database or stored parameter is replaced. In such an environment
+each role's inline policy and managed-policy attachments are declared
+exclusive, so a policy attached outside Hypervibe is removed by the next apply
+instead of widening the role; nothing reads live IAM between applies. A package token
 (`NPM_TOKEN`, `NODE_AUTH_TOKEN`) cannot be limited. AWS has no release command.
 
 Not isolated: storage buckets (every role keeps every bucket of the
@@ -249,13 +288,22 @@ Each named service runs as its own user-assigned managed identity, the only
 identity attached to that Container App or job. It holds Key Vault Secrets User
 on each secret it receives, one assignment per secret. The shared runtime
 identity keeps no role on a limited secret or on any scope that contains it.
-All of this is in the environment's own plan.
+All of this is in the environment's own plan. Each plan with a limited secret
+also lists the shared identity's role assignments in Azure and is blocked if a
+built-in role that reads vault secrets, changes access or uses other
+identities (Key Vault Secrets User/Officer/Administrator, Owner, Contributor,
+User Access Administrator, RBAC Administrator, Managed Identity
+Operator/Contributor) sits at the secret, its vault, the resource group or the
+subscription. Custom roles, roles held through a group and management-group
+scopes are not checked.
 
 Limiting a secret on a live environment creates the identity and its roles,
 removes the shared identity's role on that secret and updates the apps. For a
 minute or two during that apply a named service that restarts may fail to load
 the secret. A package token and the on-demand worker's scale-rule login cannot
-be limited. Azure has no release command.
+be limited. Azure has no release command. With a limited secret the shared
+identity's role wait is tied to its role set, so removing a limit waits for the
+new role before the other apps are updated.
 
 Not isolated: the database login is shared. Services that keep the shared
 identity keep storage-account-wide access; a named service has storage access

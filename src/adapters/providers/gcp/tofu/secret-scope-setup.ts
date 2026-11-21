@@ -128,7 +128,7 @@ export function readSecretScopeDescriptor(configuration: EngineConfiguration): G
     identities: input.identities, runtimeExcludedSecretIds: input.runtimeExcludedSecretIds };
 }
 
-interface IamPolicy { version?: number; bindings?: Array<{ role?: string; members?: string[]; condition?: Record<string, unknown> }> }
+export interface IamPolicy { version?: number; bindings?: Array<{ role?: string; members?: string[]; condition?: Record<string, unknown> }> }
 
 /**
  * Whether the live project policy enforces the reviewed setup: each identity has
@@ -147,11 +147,65 @@ export function secretScopePolicyProblems(policy: IamPolicy, input: SecretScopeS
   };
   check(input.runtimeServiceAccountEmail, input.runtimeExcludedSecretIds);
   for (const identity of input.identities) check(identity.email, identity.excludedSecretIds);
-  // A broad role that reads every secret would bypass the conditions for a workload identity.
-  const workloadMembers = new Set([input.runtimeServiceAccountEmail, ...input.identities.map((identity) => identity.email)].map((email) => `serviceAccount:${email}`));
+  // A project role that reads every secret, or lets its holder act as or deploy as another identity,
+  // would bypass the conditions. Conditional bindings of these roles count too.
+  const workloadMembers = runtimeMembers(input);
   for (const binding of policy.bindings ?? []) {
-    if (!['roles/owner', 'roles/secretmanager.admin'].includes(binding.role ?? '')) continue;
-    for (const member of binding.members ?? []) if (workloadMembers.has(member)) problems.push(`${member} holds ${binding.role}, which reads every secret.`);
+    if (!BYPASS_PROJECT_ROLES.includes(binding.role ?? '')) continue;
+    for (const member of binding.members ?? []) if (workloadMembers.has(member)) problems.push(`${member} holds ${binding.role} on the project, which reaches every secret or every identity.`);
+  }
+  return problems.sort();
+}
+
+/**
+ * Project roles no workload identity may hold beside a limited secret: they read secrets directly, or let
+ * the holder act as, mint tokens for, or deploy code as another identity. The on-demand worker waker's
+ * roles/run.developer is granted on its one worker pool, never on the project, so it needs no exception.
+ * Not covered: custom roles, and bindings inherited from a folder or organisation.
+ */
+export const BYPASS_PROJECT_ROLES: readonly string[] = [
+  'roles/owner', 'roles/editor', 'roles/secretmanager.admin',
+  'roles/iam.serviceAccountUser', 'roles/iam.serviceAccountTokenCreator', 'roles/iam.serviceAccountAdmin', 'roles/iam.workloadIdentityUser',
+  'roles/iam.securityAdmin', 'roles/resourcemanager.projectIamAdmin',
+  'roles/run.admin', 'roles/run.developer',
+];
+
+function runtimeMembers(input: Pick<SecretScopeSetupInput, 'runtimeServiceAccountEmail' | 'identities'>): Set<string> {
+  return new Set([input.runtimeServiceAccountEmail, ...input.identities.map((identity) => identity.email)].map((email) => `serviceAccount:${email}`));
+}
+const PUBLIC_MEMBERS = ['allUsers', 'allAuthenticatedUsers'];
+
+/** Every limited secret an identity is kept out of, with the identities kept out of it. */
+export function secretScopeExclusions(input: Pick<SecretScopeSetupInput, 'runtimeServiceAccountEmail' | 'identities' | 'runtimeExcludedSecretIds'>): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const id of input.runtimeExcludedSecretIds) (result[id] ??= []).push(input.runtimeServiceAccountEmail);
+  for (const identity of input.identities) for (const id of identity.excludedSecretIds) (result[id] ??= []).push(identity.email);
+  return result;
+}
+
+/**
+ * Grants attached directly to a limited secret or to a service identity that would bypass the project conditions:
+ *  - any role on the secret itself for an identity that must not read it (or for everyone);
+ *  - any role on a service identity for another workload identity (or for everyone): it could act as it or mint its tokens.
+ * `secretPolicies` holds the policy of each excluded secret that exists; `accountPolicies` the policy of each service identity.
+ */
+export function secretScopeDirectGrantProblems(input: SecretScopeSetupInput, secretPolicies: Record<string, IamPolicy>, accountPolicies: Record<string, IamPolicy>): string[] {
+  const problems: string[] = [];
+  for (const [secretId, emails] of Object.entries(secretScopeExclusions(input))) {
+    const forbidden = new Set([...emails.map((email) => `serviceAccount:${email}`), ...PUBLIC_MEMBERS]);
+    for (const binding of secretPolicies[secretId]?.bindings ?? []) {
+      for (const member of binding.members ?? []) if (forbidden.has(member)) problems.push(`${member} holds ${binding.role} directly on ${secretId}.`);
+    }
+  }
+  const workloads = runtimeMembers(input);
+  for (const identity of input.identities) {
+    const policy = accountPolicies[identity.email];
+    if (!policy) { problems.push(`The access policy of ${identity.email} was not read.`); continue; }
+    for (const binding of policy.bindings ?? []) {
+      for (const member of binding.members ?? []) {
+        if (member !== `serviceAccount:${identity.email}` && (workloads.has(member) || PUBLIC_MEMBERS.includes(member))) problems.push(`${member} holds ${binding.role} on ${identity.email} and could act as it.`);
+      }
+    }
   }
   return problems.sort();
 }

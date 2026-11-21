@@ -393,7 +393,10 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
         azurerm_user_assigned_identity: identities,
         azurerm_role_assignment: assignments,
         // New role assignments take a minute or two to apply; the first revision pulls and reads secrets right away.
-        time_sleep: { roles: { create_duration: '90s', depends_on: sharedAssignments.map((key) => `azurerm_role_assignment.${key}`) }, ...sleeps },
+        // With a limited secret the shared wait is tied to the shared identity's role set, so it waits again when a
+        // limit is added or removed (removing one gives the shared identity a new role its apps then rely on).
+        time_sleep: { roles: { create_duration: '90s', depends_on: sharedAssignments.map((key) => `azurerm_role_assignment.${key}`),
+          ...(scopes.size ? { triggers: { roles: [...sharedAssignments].sort().join(',') } } : {}) }, ...sleeps },
       },
     },
   };

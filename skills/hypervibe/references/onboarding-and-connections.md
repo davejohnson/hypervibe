@@ -123,9 +123,12 @@ reCAPTCHA or an auth vendor) need no Hypervibe connection. Use this template:
    Railway refuses it. On Google Cloud `hv_plan` stops and names one extra
    step that needs a Google Cloud administrator sign-in
    (`hv_connections ... action="prepare" secretScopeAccess="lifecycle"`,
-   preview then confirm); when services already hold the secret the same step
-   is needed once more after `hv_apply`, and the plan says `NOT YET ENFORCED`
-   until then. Say plainly that deployment and CI access, account
+   preview then confirm). Read that step's result: a secret listed under
+   `notYetEnforced` is still readable by the other services. That is always
+   the case when the secret already exists in the environment; then run
+   `hv_plan` and `hv_apply`, and run the same step once more. Do not store
+   the real value until a setup result no longer lists the secret as not
+   enforced; plan, apply and status output say `NOT YET ENFORCED` until then. Say plainly that deployment and CI access, account
    administrators and whoever writes the code can still read the value, and
    that a key other services already held should be rotated.
 2. For each callback the service sends, declare an environment `webhooks` entry:

@@ -33,11 +33,13 @@ export function gcpSecretScopeEnvironments(ctx: Repos, project: Project, spec: P
       && (name === selected || (environment.hosting.gcpProjectId ?? defaultProjectId) === gcpProjectId))
     .map(([name]) => {
       const environment = ctx.repos.environments.findByProjectAndName(project.id, name);
-      const bindings = (environment?.platformBindings ?? {}) as { services?: Record<string, unknown>; engine?: { releaseJob?: string } };
+      const bindings = (environment?.platformBindings ?? {}) as { services?: Record<string, unknown>; engine?: { releaseJob?: string; secrets?: string[] } };
       return {
         name,
         boundWorkloads: [...Object.keys(bindings.services ?? {}), ...(bindings.engine?.releaseJob ? [RELEASE_WORKLOAD] : [])].sort(),
         applied: environment ? readAppliedWorkloads(project.id, environment.id) : {},
+        // An environment with no record at all has created nothing; one with workloads but no list is unknown.
+        ...(!environment ? { trackedSecretIds: [] } : Array.isArray(bindings.engine?.secrets) ? { trackedSecretIds: bindings.engine.secrets } : {}),
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -49,11 +51,12 @@ export function expectedSecretScopeInput(ctx: Repos, project: Project, spec: Pro
   environmentProjectId?: string; selectedEnvironment?: string;
 }): SecretScopeSetupInput {
   const saved = getGcpProjectSetupContribution(project.id, target.gcpProjectId, GCP_SECRET_SCOPE_CONTRIBUTION);
-  const retained = saved ? readSecretScopeInput(saved)?.identities : undefined;
-  if (saved && !retained) throw new Error('The saved service identity setup does not match what Hypervibe builds. Review the project setup before continuing.');
+  const previous = saved ? readSecretScopeInput(saved) : undefined;
+  if (saved && !previous) throw new Error('The saved service identity setup does not match what Hypervibe builds. Review the project setup before continuing.');
   const descriptor = gcpSecretScopeDescriptor({
     spec, gcpProjectId: target.gcpProjectId, runtimeServiceAccountEmail: target.runtimeServiceAccountEmail,
-    environments: gcpSecretScopeEnvironments(ctx, project, spec, target.gcpProjectId, target.selectedEnvironment), retained,
+    environments: gcpSecretScopeEnvironments(ctx, project, spec, target.gcpProjectId, target.selectedEnvironment),
+    retained: previous?.identities, previous,
   });
   const runtimeRoles = getCloudPreparation(project, 'cloudrun', target.environmentProjectId)?.runtimeRequiredRoles ?? [];
   return {
@@ -203,7 +206,7 @@ export async function prepareGcpSecretScope(ctx: Repos, params: {
     recordVerifiedSecretScope(project.id, input);
     return { ...setup, success: true, summary,
       message: summary.notYetEnforced.length
-        ? `Service identities are ready. Not yet enforced: ${summary.notYetEnforced.join(', ')}. Run hv_plan and hv_apply for ${environmentName}, then run this preparation again to remove the shared identity's access.`
+        ? `Service identities are ready. NOT YET ENFORCED: ${summary.notYetEnforced.join(', ')}. Services that already hold ${summary.notYetEnforced.length === 1 ? 'this secret' : 'these secrets'} can still read ${summary.notYetEnforced.length === 1 ? 'it' : 'them'}. Do not store a new value yet. Run hv_plan and hv_apply for ${environmentName}, then run this preparation again to remove the shared identity's access.`
         : 'Service identities are ready and every limited secret is closed to the identities of other services.',
       nextSteps: ['hv_plan, then hv_apply', ...(summary.notYetEnforced.length ? [secretScopePrepareCall(project, environmentName)] : [])] };
   } catch (error) {
@@ -217,4 +220,12 @@ async function readProjectNumber(token: string, gcpProjectId: string): Promise<s
   const body = await response.json() as { name?: string; projectId?: string; state?: string };
   return /^projects\/[1-9][0-9]*$/.test(body.name ?? '') && body.projectId === gcpProjectId && body.state === 'ACTIVE'
     ? body.name!.slice('projects/'.length) : undefined;
+}
+
+/** What an operator must know about limited secrets right now, for status and for the result of an apply. */
+export function gcpSecretScopeNotes(ctx: Repos, project: Project, spec: ProjectSpec, environmentName: string,
+  context: Parameters<typeof gcpSecretScopeGate>[4]): string[] {
+  const gate = gcpSecretScopeGate(ctx, project, spec, environmentName, context);
+  if (!gate.active) return [];
+  return gate.blocked ? [`Secrets limited to named services: ${gate.blocked}`] : gate.warnings;
 }

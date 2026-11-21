@@ -72,8 +72,13 @@ export interface GcpSecretScopeEnvironment {
   name: string;
   /** Workloads bound in this environment (services, workers, jobs and the release command). */
   boundWorkloads: string[];
-  /** Local evidence per workload; a bound workload without it may hold any secret of its environment. */
+  /** Local evidence per workload; a bound workload without it may hold any secret the environment has created. */
   applied: Record<string, GcpAppliedWorkload>;
+  /**
+   * Secret containers the environment's engine has created or attempted (recorded before each create).
+   * A secret outside this list has never existed here, so no workload can hold it. Undefined: not known.
+   */
+  trackedSecretIds?: string[];
 }
 
 export interface GcpSecretScopeIdentity {
@@ -106,6 +111,8 @@ export function gcpSecretScopeDescriptor(params: {
   spec: ScopeSpec; gcpProjectId: string; runtimeServiceAccountEmail: string;
   environments: GcpSecretScopeEnvironment[];
   retained?: Array<Pick<GcpSecretScopeIdentity, 'environment' | 'service'>>;
+  /** The setup already saved. A missing workload record never widens an exclusion it holds. */
+  previous?: Pick<GcpSecretScopeDescriptor, 'identities' | 'runtimeExcludedSecretIds'>;
 }): GcpSecretScopeDescriptor {
   const { spec, gcpProjectId, runtimeServiceAccountEmail } = params;
   const pairs = new Map<string, { environment: string; service: string }>();
@@ -116,11 +123,18 @@ export function gcpSecretScopeDescriptor(params: {
   const limited = params.environments.flatMap((environment) => Object.entries(gcpScopedSecrets(spec, environment.name))
     .map(([key, services]) => ({ environment, secretId: engineSecretId(environment.name, key), services })));
   /** No workload that runs (or may run) as this identity still references the secret. */
+  const alreadyExcluded = (identity: string, shared: boolean, secretId: string) => (shared ? params.previous?.runtimeExcludedSecretIds
+    : params.previous?.identities.find((entry) => entry.email === identity)?.excludedSecretIds)?.includes(secretId) === true;
   const released = (identity: string, shared: boolean, secret: typeof limited[number]) => secret.environment.boundWorkloads.every((workload) => {
     const known = secret.environment.applied[workload];
-    // Unknown workloads predate this record: assume the shared identity and every secret of their environment.
-    if (!known) return !shared;
-    return known.identity !== identity || !known.secretIds.includes(secret.secretId);
+    if (known) return known.identity !== identity || !known.secretIds.includes(secret.secretId);
+    // No record for this workload. It may run as the shared identity and hold every secret the environment
+    // has created, so the shared identity keeps access to those. Two cases are still certain:
+    //  - a secret the environment never created cannot be held by anything;
+    //  - an exclusion the saved setup already has was made when nothing held the secret, and no plan
+    //    could hand it out since. Lost records must never reopen it.
+    if (!shared) return true;
+    return secret.environment.trackedSecretIds?.includes(secret.secretId) === false || alreadyExcluded(identity, shared, secret.secretId);
   });
   const identities = [...pairs.values()].map(({ environment, service }) => {
     const email = gcpServiceIdentityEmail(gcpProjectId, environment, service);

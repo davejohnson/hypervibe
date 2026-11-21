@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { engineStatePaths, ensureEngineStateDirectories } from '../../engine/opentofu/workspace.js';
 import { hardenPrivateFile } from '../../storage/paths.js';
 import type { GcpAppliedWorkload } from '../../../domain/services/gcp-secret-scope.js';
-import { secretScopePolicyProblems, type SecretScopeSetupInput } from './tofu/secret-scope-setup.js';
+import { secretScopeDirectGrantProblems, secretScopeExclusions, secretScopePolicyProblems, type IamPolicy, type SecretScopeSetupInput } from './tofu/secret-scope-setup.js';
 import { GcpBootstrapClient } from './gcp-bootstrap.client.js';
 
 /**
@@ -63,18 +63,32 @@ export function recordVerifiedSecretScope(projectId: string, input: SecretScopeS
   write(projectFile(projectId, input.gcpProjectId, dataDir, true), { input, verifiedAt: new Date().toISOString() });
 }
 
-/** Read-only check of the live project policy and identities after setup was applied. */
-export async function observeSecretScope(token: string, input: SecretScopeSetupInput): Promise<string[]> {
-  const response = await fetch(`https://cloudresourcemanager.googleapis.com/v1/projects/${input.gcpProjectId}:getIamPolicy`, {
-    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }),
-  });
+/**
+ * Read-only check after setup was applied: the project policy, the policy attached to each limited secret,
+ * and each service identity (present, enabled, and not usable by another workload identity).
+ * Anything that cannot be read is a problem: unknown is never "enforced".
+ */
+export async function observeSecretScope(token: string, input: SecretScopeSetupInput, fetchImpl: typeof fetch = fetch): Promise<string[]> {
+  const post = { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } };
+  const response = await fetchImpl(`https://cloudresourcemanager.googleapis.com/v1/projects/${input.gcpProjectId}:getIamPolicy`,
+    { ...post, body: JSON.stringify({ options: { requestedPolicyVersion: 3 } }) });
   if (!response.ok) return [`Google project IAM lookup failed (HTTP ${response.status}).`];
-  const problems = secretScopePolicyProblems(await response.json() as Parameters<typeof secretScopePolicyProblems>[0], input);
-  const client = new GcpBootstrapClient({ accessToken: token, fetch, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) });
+  const problems = secretScopePolicyProblems(await response.json() as IamPolicy, input);
+  const secretPolicies: Record<string, IamPolicy> = {};
+  for (const secretId of Object.keys(secretScopeExclusions(input))) {
+    const read = await fetchImpl(`https://secretmanager.googleapis.com/v1/projects/${encodeURIComponent(input.gcpProjectId)}/secrets/${encodeURIComponent(secretId)}:getIamPolicy?options.requestedPolicyVersion=3`,
+      { headers: { Authorization: `Bearer ${token}` } });
+    // A secret that does not exist yet has no grants of its own.
+    if (read.status === 404) continue;
+    if (!read.ok) { problems.push(`The access policy of secret ${secretId} could not be read (HTTP ${read.status}).`); continue; }
+    secretPolicies[secretId] = await read.json() as IamPolicy;
+  }
+  const client = new GcpBootstrapClient({ accessToken: token, fetch: fetchImpl, sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)) });
+  const accountPolicies: Record<string, IamPolicy> = {};
   for (const identity of input.identities) {
     const account = await client.getServiceAccount(input.gcpProjectId, identity.accountId);
-    if (!account || account.email !== identity.email || account.disabled) problems.push(`${identity.email} is missing or disabled.`);
+    if (!account || account.email !== identity.email || account.disabled) { problems.push(`${identity.email} is missing or disabled.`); continue; }
+    accountPolicies[identity.email] = await client.getServiceAccountIamPolicy(input.gcpProjectId, account.uniqueId);
   }
-  return problems;
+  return [...problems, ...secretScopeDirectGrantProblems(input, secretPolicies, accountPolicies)];
 }

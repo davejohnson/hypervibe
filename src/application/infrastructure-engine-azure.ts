@@ -13,7 +13,7 @@ export { AZURE_IMAGE_REPOSITORY } from '../adapters/providers/azure/azure-releas
 import { AzureEngineCredentialsSchema, type AzureEngineCredentials } from '../adapters/providers/azure/azure-engine.adapter.js';
 import { azureEngineAuthentication, azureEngineBackend } from '../adapters/providers/azure/tofu/azure-engine.backend.js';
 import {
-  WAKER_SECRET_KEY, azureAppsEnvironmentName, azureProjectVaultName, azureSharedNames, azureStorageAccountName, azureVaultSecretName, buildAzureEnvironmentConfiguration,
+  WAKER_SECRET_KEY, azureAppsEnvironmentName, azureKey, azureProjectVaultName, azureSharedNames, azureStorageAccountName, azureVaultSecretName, buildAzureEnvironmentConfiguration,
   buildAzureSharedConfiguration, buildAzureBuildConfiguration, type AzureEngineInput, type AzureSharedInput,
 } from '../adapters/providers/azure/tofu/azure-engine.config.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -367,6 +367,56 @@ export async function azureFailedEnvironmentAction(context: Pick<AzureEngineCont
   };
 }
 
+/** Built-in roles that read Key Vault secret values, or let their holder change access or use other identities. */
+const AZURE_SECRET_REACH_ROLES: Record<string, string> = {
+  '4633458b-17de-408a-b874-0445c86b69e6': 'Key Vault Secrets User',
+  'b86a8fe4-44ce-4948-aee5-eccb2c155cd7': 'Key Vault Secrets Officer',
+  '00482a5a-887f-4fb3-b363-3b7fe8e74483': 'Key Vault Administrator',
+  '8e3af657-a8ff-443c-a75c-2fe8c4bcb635': 'Owner',
+  'b24988ac-6180-42a0-ab88-20f7382dd24c': 'Contributor',
+  '18d7d88d-d35a-4e4f-ba24-9442f1d18610': 'User Access Administrator',
+  'f58310d9-a9f6-439a-9e8d-f62e7b41a168': 'Role Based Access Control Administrator',
+  'f1a07417-d97a-45cb-824c-7a7467783830': 'Managed Identity Operator',
+  'e40ec5ca-96e0-45a2-b4ff-59039f2c2b59': 'Managed Identity Contributor',
+};
+
+/**
+ * Roles the shared runtime identity holds in Azure that reach a limited secret: one of the built-in roles above at
+ * the secret, its vault, the resource group or the subscription. The shared identity's own per-secret role is not a
+ * problem while this plan removes it (`removing` lists the engine addresses the plan destroys).
+ * Checked: built-in roles assigned directly to the shared identity. Not checked: custom roles, roles held through a
+ * group, and management-group scopes.
+ */
+export function azureSharedIdentityReach(input: Pick<AzureEngineInput, 'environmentName' | 'vault' | 'secretServices'>,
+  assignments: Array<{ scope?: string; roleDefinitionId?: string }>, removing: string[]): string[] {
+  const problems: string[] = [];
+  for (const key of Object.keys(input.secretServices ?? {}).sort()) {
+    const secretScope = `${input.vault.id}/secrets/${azureVaultSecretName(input.environmentName, key)}`.toLowerCase();
+    for (const assignment of assignments) {
+      const scope = (assignment.scope ?? '').toLowerCase().replace(/\/+$/, '');
+      const role = AZURE_SECRET_REACH_ROLES[(assignment.roleDefinitionId ?? '').split('/').pop()!.toLowerCase()];
+      if (!role || !(scope === secretScope || secretScope.startsWith(`${scope}/`))) continue;
+      if (scope === secretScope && role === 'Key Vault Secrets User' && removing.includes(`azurerm_role_assignment.secret_${azureKey(key)}`)) continue;
+      problems.push(`The shared runtime identity holds ${role} at ${assignment.scope}, which reaches ${key}. Remove that role assignment in Azure, then plan again; ${key} cannot be limited to named services while it exists.`);
+    }
+  }
+  return [...new Set(problems)];
+}
+
+/** Reads the shared identity's role assignments. A missing identity holds nothing; a failed read is unknown and blocks. */
+async function sharedIdentityAssignments(context: AzureEngineContext): Promise<{ assignments: Array<{ scope?: string; roleDefinitionId?: string }> } | { unknown: string }> {
+  const group = `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}`;
+  const identity = await azureRest(context.tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-runtime?api-version=2023-01-31`).catch(() => undefined);
+  if (!identity) return { unknown: 'Hypervibe could not read the shared runtime identity from Azure, so it cannot confirm that limited secrets are out of its reach; try again.' };
+  if (identity.status === 404) return { assignments: [] };
+  const principalId = (identity.body.properties as { principalId?: string } | undefined)?.principalId;
+  if (identity.status !== 200 || !principalId) return { unknown: `Hypervibe could not read the shared runtime identity from Azure (HTTP ${identity.status}).` };
+  // Without atScope(), the listing includes assignments inherited from the subscription and those on resources below the group.
+  const listed = await azureRest(context.tokens, AZURE_SCOPES.arm, 'GET', `${ARM}${group}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${principalId}'`)}`).catch(() => undefined);
+  if (!listed || listed.status !== 200) return { unknown: `Hypervibe could not list the shared runtime identity's roles in Azure (HTTP ${listed?.status ?? 'none'}).` };
+  return { assignments: ((listed.body.value ?? []) as Array<{ properties?: { scope?: string; roleDefinitionId?: string } }>).map((entry) => entry.properties ?? {}) };
+}
+
 /**
  * Role assignments the plan would create that already exist in Azure for the
  * environment's runtime identity, with the same scope and role: an earlier
@@ -524,13 +574,21 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
     if (planned.blockers.length) return { blocked: planned.blockers };
   }
+  // A limited secret is a boundary only if the shared identity holds nothing that reaches it.
+  if (Object.keys(input.secretServices ?? {}).length) {
+    const held = await sharedIdentityAssignments(context);
+    if ('unknown' in held) return { blocked: [held.unknown] };
+    const reach = azureSharedIdentityReach(input, held.assignments,
+      planned.actions.filter((action) => action.type === 'destroy' || action.type === 'replace' || action.type === 'update').flatMap((action) => engineSegmentOf(action)?.addresses ?? []));
+    if (reach.length) return { blocked: reach };
+  }
   const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildInfrastructureActions), ...changing(buildActions), ...changing(loginActions)];
   const actions = [...sharedActions, ...secretActions, ...buildInfrastructureActions, ...buildActions, ...loginActions, ...withDependencies(planned.actions, prerequisites)];
   const warnings = [
     `Azure ${azureLocationFor(spec, environmentName, context.connection)}, testing profile: workloads scale to zero. All testing environments share one private network (about $26/month) and one database server (about $24/month with its private endpoint), which the internet cannot reach.`,
     ...(planned.actions.some((action) => action.id === 'environment:base' && action.type !== 'noop') ? [`${environmentName}'s apps move into the project's shared private app environment: they are recreated, are briefly unavailable, and get new addresses.`] : []),
     ...(networkingUnchecked ? ['Hypervibe could not check that networking (Microsoft.Network) is turned on for this subscription. If the apply reports that the subscription is not registered for it, run hv_connections provider="azure" action="connect" and apply again.'] : []),
-    ...(Object.keys(input.secretServices ?? {}).length ? [`Limited secrets (${Object.entries(input.secretServices!).map(([key, services]) => `${key}: ${services.join(', ') || 'no service'}`).join('; ')}): each named service runs as its own identity, and no other workload's identity can read them. A value that other services held before this apply stays known to them; rotate it afterwards.`] : []),
+    ...(Object.keys(input.secretServices ?? {}).length ? [`Limited secrets (${Object.entries(input.secretServices!).map(([key, services]) => `${key}: ${services.join(', ') || 'no service'}`).join('; ')}): each named service runs as its own identity, and the shared runtime identity is given no role on them. Hypervibe checked the shared identity's built-in role assignments in Azure and found none that reaches them; custom roles and roles held through a group are not checked. A value that other services held before this apply stays known to them; rotate it afterwards.`] : []),
     ...(!image && workloads ? ['Hypervibe could not find this project\'s local repository, so the workloads are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
   return recordPlan(project, context, params, actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState }, shared: { planId: sharedPlanId, state: context.shared.state } });

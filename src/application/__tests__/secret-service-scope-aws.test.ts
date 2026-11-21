@@ -341,7 +341,16 @@ describe('limiting a secret every service already holds, on a live AWS environme
     const now = addresses(after.environment);
     expect(Object.keys(was).filter((address) => !(address in now))).toEqual([]);
     expect(Object.keys(now).filter((address) => !(address in was)).sort()).toEqual([
-      'aws_iam_role.control', 'aws_iam_role.service_catchup', 'aws_iam_role_policy.control', 'aws_iam_role_policy.service_catchup']);
+      'aws_iam_role.control', 'aws_iam_role.service_catchup',
+      // Each role's inline policy and managed attachments become exclusive, so nothing added outside Hypervibe can widen them.
+      'aws_iam_role_policies_exclusive.control', 'aws_iam_role_policies_exclusive.runtime', 'aws_iam_role_policies_exclusive.service_catchup',
+      'aws_iam_role_policy.control', 'aws_iam_role_policy.service_catchup',
+      'aws_iam_role_policy_attachments_exclusive.control', 'aws_iam_role_policy_attachments_exclusive.runtime', 'aws_iam_role_policy_attachments_exclusive.service_catchup']);
+    const base = (after.environment.files['base.tf.json'] as { resource: Record<string, Record<string, { policy_arns?: string[]; policy_names?: string[] }>> }).resource;
+    for (const key of ['control', 'runtime', 'service_catchup']) {
+      expect(base.aws_iam_role_policy_attachments_exclusive![key]!.policy_arns).toEqual([]);
+      expect(base.aws_iam_role_policies_exclusive![key]!.policy_names).toEqual([`\${aws_iam_role_policy.${key}.name}`]);
+    }
     const changed = Object.keys(was).filter((address) => JSON.stringify(was[address]) !== JSON.stringify(now[address])).sort();
     expect(changed).toEqual([
       'aws_cloudwatch_event_target.mailer_waker',

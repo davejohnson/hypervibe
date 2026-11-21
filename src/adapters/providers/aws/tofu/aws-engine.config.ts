@@ -249,10 +249,24 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     resources['aws_iam_role.control'] = runtime;
     resources['aws_iam_role_policy.control'] = runtime;
   }
+  // With a limited secret, each role's permissions are exactly what this configuration declares: a managed policy
+  // attached to it, or a second inline policy, from outside Hypervibe would be removed by the next apply instead of
+  // quietly widening who can read the secret. Environments without a limited secret keep their configuration unchanged.
+  const exclusive: Record<string, Record<string, unknown>> = {};
+  if (identity.scoped) {
+    exclusive.aws_iam_role_policy_attachments_exclusive = {};
+    exclusive.aws_iam_role_policies_exclusive = {};
+    for (const key of Object.keys(roles)) {
+      exclusive.aws_iam_role_policy_attachments_exclusive[key] = { role_name: `\${aws_iam_role.${key}.name}`, policy_arns: [] };
+      exclusive.aws_iam_role_policies_exclusive[key] = { role_name: `\${aws_iam_role.${key}.name}`, policy_names: [`\${aws_iam_role_policy.${key}.name}`] };
+      resources[`aws_iam_role_policy_attachments_exclusive.${key}`] = runtime;
+      resources[`aws_iam_role_policies_exclusive.${key}`] = runtime;
+    }
+  }
   files['base.tf.json'] = {
     // The default VPC: tasks run in its public subnets (no NAT gateway) and reach the database on its private address.
     data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
-    resource: { aws_iam_role: roles, aws_iam_role_policy: policies },
+    resource: { aws_iam_role: roles, aws_iam_role_policy: policies, ...exclusive },
   };
 
   // Storage: private buckets, objects encrypted, no public access.

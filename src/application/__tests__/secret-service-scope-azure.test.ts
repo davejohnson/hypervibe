@@ -8,7 +8,7 @@ import { credentialRuntimeServices } from '../../domain/services/credential-runt
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { projectSpecSchema, type ProjectSpec } from '../../domain/spec/spec.schema.js';
 import {
-  azureEngineLayout, azureEngineProblems, azureEnvironmentSecretKeys, azureSecretServices, buildAzureEngineInput, buildAzureSharedInput, leftoverRoleAssignments,
+  azureEngineLayout, azureEngineProblems, azureEnvironmentSecretKeys, azureSharedIdentityReach, azureSecretServices, buildAzureEngineInput, buildAzureSharedInput, leftoverRoleAssignments,
   type AzureEngineContext,
 } from '../infrastructure-engine-azure.js';
 import { releaseAzureEngineServices } from '../infrastructure-engine-azure-release.js';
@@ -325,8 +325,13 @@ describe('narrowing a secret every service already holds', () => {
       expect([identity, registry, secret, template, depends_on].every(Boolean)).toBe(true);
     }
     const { depends_on: _before, ...sleepBefore } = was['time_sleep.roles'] as Record<string, unknown>;
-    const { depends_on: _after, ...sleepAfter } = now['time_sleep.roles'] as Record<string, unknown>;
+    const { depends_on: _after, triggers, ...sleepAfter } = now['time_sleep.roles'] as Record<string, unknown>;
     expect(sleepAfter).toEqual(sleepBefore);
+    // With a limit, the shared wait follows the shared identity's role set: it waits again when a limit is added
+    // or removed, so unnamed apps never start on a role that has not applied yet.
+    expect(sleepBefore).not.toHaveProperty('triggers');
+    expect(triggers).toEqual({ roles: expect.not.stringContaining('secret_source_key') });
+    expect((triggers as { roles: string }).roles).toContain('secret_plain');
     const dataBearing = Object.entries(after.resources).filter(([, mapping]) => mapping.dataBearing).map(([address]) => address).sort();
     expect(dataBearing).toEqual(['azurerm_storage_account.files', 'azurerm_storage_container.documents', 'azurerm_storage_container.exports']);
     for (const address of dataBearing) expect(now[address]).toEqual(was[address]);
@@ -335,6 +340,27 @@ describe('narrowing a secret every service already holds', () => {
     expect(Object.keys(now).filter((address) => /key_vault|postgresql/.test(address))).toEqual([]);
     const shared = (secrets: Record<string, unknown>) => buildAzureSharedInput(parse(secrets, { ci: true }), { connection: connection as never, shared: layout.shared as never, project: project as never }, ['test']);
     expect(shared(narrowed)).toEqual(shared(everywhere));
+  });
+
+  it('blocks the plan while the shared identity holds a role in Azure that reaches the secret', () => {
+    const input = engineInput(parse(narrowed));
+    const role = (id: string) => `/subscriptions/x/providers/Microsoft.Authorization/roleDefinitions/${id}`;
+    const secretsUser = '4633458b-17de-408a-b874-0445c86b69e6';
+    const secret = `${layout.vault.id}/secrets/test--source-key`;
+    const reach = (scope: string, id = secretsUser, removing: string[] = []) => azureSharedIdentityReach(input, [{ scope, roleDefinitionId: role(id) }], removing);
+    // Its own per-secret role is fine only while this plan removes it.
+    expect(reach(secret, secretsUser, ['azurerm_role_assignment.secret_source_key'])).toEqual([]);
+    expect(reach(secret)).toEqual([expect.stringContaining('Key Vault Secrets User')]);
+    // Vault, resource group and subscription all cover the secret.
+    for (const scope of [layout.vault.id, group, `/subscriptions/${connection.subscriptionId}`]) expect(reach(scope.toUpperCase())).toHaveLength(1);
+    expect(reach(group, '00482a5a-887f-4fb3-b363-3b7fe8e74483')).toEqual([expect.stringContaining('Key Vault Administrator')]);
+    expect(reach(group, 'f1a07417-d97a-45cb-824c-7a7467783830')).toEqual([expect.stringContaining('Managed Identity Operator')]);
+    // Roles that do not reach it: another secret, another vault, image pull on the group.
+    expect(reach(`${layout.vault.id}/secrets/test--plain`)).toEqual([]);
+    expect(reach(`${group}/providers/Microsoft.KeyVault/vaults/other`)).toEqual([]);
+    expect(reach(group, '7f951dda-4ed3-4680-a7ca-43fe172d538d')).toEqual([]);
+    // Nothing is checked, and nothing blocks, for a spec that limits no secret.
+    expect(azureSharedIdentityReach(engineInput(parse(everywhere)), [{ scope: group, roleDefinitionId: role(secretsUser) }], [])).toEqual([]);
   });
 
   it('never takes over the shared identity\'s role on the secret as the service identity\'s', async () => {

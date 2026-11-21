@@ -8,13 +8,17 @@ import { engineEnvironmentProblems } from '../../domain/services/infrastructure-
 import { gcpSecretScopeDescriptor, gcpServiceIdentityEmail, gcpUnlockedSecrets, type GcpAppliedWorkload } from '../../domain/services/gcp-secret-scope.js';
 import { composeGcpProjectConfiguration, runGcpProjectSetup } from '../../domain/services/gcp-project-setup.service.js';
 import { buildGcpPreparationConfiguration, defaultGcpPreparationInput, projectIamAddress } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
-import { buildSecretScopeConfiguration, readSecretScopeInput, secretExclusionCondition, secretScopePolicyProblems, type SecretScopeSetupInput } from '../../adapters/providers/gcp/tofu/secret-scope-setup.js';
-import { readVerifiedSecretScope, recordAppliedWorkloads, recordVerifiedSecretScope } from '../../adapters/providers/gcp/secret-scope-state.js';
+import { buildSecretScopeConfiguration, readSecretScopeInput, secretExclusionCondition, secretScopeDirectGrantProblems, secretScopePolicyProblems, type SecretScopeSetupInput } from '../../adapters/providers/gcp/tofu/secret-scope-setup.js';
+import { observeSecretScope, readVerifiedSecretScope, recordAppliedWorkloads, recordVerifiedSecretScope } from '../../adapters/providers/gcp/secret-scope-state.js';
 import type { EngineConfiguration } from '../../domain/ports/infrastructure-engine.port.js';
 import type { EnginePlanResult } from '../../adapters/engine/opentofu/engine.js';
 import { engineStatePaths, ensureEngineStateDirectories } from '../../adapters/engine/opentofu/workspace.js';
-import { buildEngineInput, plannedScopeWorkloads } from '../infrastructure-engine.js';
-import { gcpSecretScopeGate, prepareGcpSecretScope, RELEASE_WORKLOAD } from '../gcp-secret-scope.js';
+import { buildEngineInput, plannedScopeWorkloads, scopeRecordsAfterApply, scopeRecordsAtPlan } from '../infrastructure-engine.js';
+import { verifySecretScopeRestriction } from '../../domain/services/cloud-prepare.execute.js';
+import { transferIsolationContribution } from '../../adapters/providers/gcp/tofu/transfer-isolation.js';
+import { transferSlot } from '../../adapters/providers/gcp/tofu/transfer-slot.js';
+import type { PlanAction } from '../../domain/plan/plan.types.js';
+import { gcpSecretScopeGate, gcpSecretScopeNotes, prepareGcpSecretScope, RELEASE_WORKLOAD } from '../gcp-secret-scope.js';
 import { delegated, generated, projectId, runtime, scopeConfiguration, scopeSpec } from './secret-scope-gcp.helpers.js';
 
 // Contract (docs/opentofu-engine.md, "Limiting a secret to named services"): on Google Cloud a
@@ -36,16 +40,16 @@ const project = { id: 'local-project', name: 'clone', policies: { cloudPreparati
 } } } } as unknown as Project;
 const bound = ['web', 'worker', 'catchup', 'reports'];
 const environment = { id: 'env-123', projectId: project.id, name: 'staging',
-  platformBindings: { services: Object.fromEntries(bound.map(name => [name, { serviceId: name }])), engine: { releaseJob: 'release-command' } } };
+  platformBindings: { services: Object.fromEntries(bound.map(name => [name, { serviceId: name }])), engine: { releaseJob: 'release-command' } as { releaseJob: string; secrets?: string[] } } };
 const ctx = { repos: { environments: { findByProjectAndName: (_: string, name: string) => name === 'staging' ? environment : null } } } as unknown as Parameters<typeof gcpSecretScopeGate>[0];
 const gate = (spec: ProjectSpec, origins?: Record<string, unknown>) => gcpSecretScopeGate(ctx, project, spec, 'staging',
   { gcpProjectId: projectId, runtimeServiceAccountEmail: runtime, runtimeSecretGrantOrigins: origins });
 
 /** Writes the project setup manifest the way a confirmed setup does. */
-function saveContribution(configuration: EngineConfiguration): void {
+function saveContribution(configuration: EngineConfiguration, extra: Record<string, EngineConfiguration> = {}): void {
   const paths = engineStatePaths({ provider: 'gcp', projectId: project.id, environmentId: projectId, partition: 'project-shared' });
   ensureEngineStateDirectories(paths);
-  fs.writeFileSync(path.join(paths.root, 'setup-manifest.json'), JSON.stringify({ contributions: { 'prepare-secret-scope': configuration } }), { mode: 0o600 });
+  fs.writeFileSync(path.join(paths.root, 'setup-manifest.json'), JSON.stringify({ contributions: { 'prepare-secret-scope': configuration, ...extra } }), { mode: 0o600 });
 }
 
 let directory: string;
@@ -53,7 +57,7 @@ beforeEach(() => {
   directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hv-secret-scope-'));
   vi.stubEnv('HYPERVIBE_DATA_DIR', directory);
 });
-afterEach(() => { vi.unstubAllEnvs(); fs.rmSync(directory, { recursive: true, force: true }); });
+afterEach(() => { vi.unstubAllEnvs(); delete environment.platformBindings.engine.secrets; fs.rmSync(directory, { recursive: true, force: true }); });
 
 type Files = Record<string, { resource?: Record<string, Record<string, any>> }>;
 const files = (configuration: EngineConfiguration) => configuration.files as Files;
@@ -82,10 +86,11 @@ function identities(configuration: EngineConfiguration) {
 }
 
 /** The reviewed setup, as the planner and the setup command compute it from the spec and recorded workloads. */
-function setupInput(spec: ProjectSpec, applied: Record<string, GcpAppliedWorkload> = {}, retained?: SecretScopeSetupInput['identities']): SecretScopeSetupInput {
+function setupInput(spec: ProjectSpec, applied: Record<string, GcpAppliedWorkload> = {}, more: { trackedSecretIds?: string[]; previous?: SecretScopeSetupInput } = {}): SecretScopeSetupInput {
   return {
     ...gcpSecretScopeDescriptor({ spec, gcpProjectId: projectId, runtimeServiceAccountEmail: runtime,
-      environments: [{ name: 'staging', boundWorkloads: [...bound, RELEASE_WORKLOAD], applied }], retained }),
+      environments: [{ name: 'staging', boundWorkloads: [...bound, RELEASE_WORKLOAD], applied, ...(more.trackedSecretIds ? { trackedSecretIds: more.trackedSecretIds } : {}) }],
+      retained: more.previous?.identities, previous: more.previous }),
     projectNumber: '123456789', deployServiceAccountEmail: deploy,
     runtimeProjectRoles: ['roles/cloudsql.client', 'roles/pubsub.publisher', 'roles/pubsub.subscriber'],
   };
@@ -206,6 +211,34 @@ describe('who can read a limited secret through Secret Manager', () => {
     expect(setupInput(limited(), appliedFor(unscoped())).runtimeExcludedSecretIds).toEqual([]);
   });
 
+  it('closes a secret the environment never created at the first setup, before any value can exist', () => {
+    // Workloads have no record, but the engine never created this secret here, so nothing can hold it.
+    const fresh = setupInput(limited(), {}, { trackedSecretIds: ['hv-staging-database-url', SIGNING] });
+    expect(fresh.runtimeExcludedSecretIds).toEqual([SOURCE]);
+    expect(gcpUnlockedSecrets(limited(), 'staging', fresh)).toEqual([]);
+    // Once the engine created (or tried to create) it, an unrecorded workload may hold it.
+    expect(setupInput(limited(), {}, { trackedSecretIds: [SOURCE] }).runtimeExcludedSecretIds).toEqual([]);
+    // Through the planner's own reading of the environment record.
+    environment.platformBindings.engine.secrets = ['hv-staging-database-url'];
+    recordVerifiedSecretScope(project.id, fresh);
+    saveContribution(buildSecretScopeConfiguration(fresh));
+    expect(gate(limited())).toMatchObject({ identities: { catchup }, warnings: [expect.stringContaining('enforced in Google Cloud')] });
+  });
+
+  it('never reopens a secret the saved setup already closed because workload records are missing', () => {
+    const closed = setupInput(limited(), appliedFor(limited(), { catchup }));
+    expect(closed.runtimeExcludedSecretIds).toEqual([SOURCE]);
+    // The records are gone (deleted file, another machine): every workload is unknown again.
+    expect(setupInput(limited(), {}).runtimeExcludedSecretIds).toEqual([]);
+    expect(setupInput(limited(), {}, { previous: closed }).runtimeExcludedSecretIds).toEqual([SOURCE]);
+    // A record that says a shared workload holds it is evidence, not absence: it still wins.
+    expect(setupInput(limited(), appliedFor(unscoped()), { previous: closed }).runtimeExcludedSecretIds).toEqual([]);
+    // The planner: closed setup verified and saved, no workload records on disk.
+    recordVerifiedSecretScope(project.id, closed);
+    saveContribution(buildSecretScopeConfiguration(closed));
+    expect(gate(limited())).toMatchObject({ identities: { catchup }, warnings: [expect.stringContaining('enforced in Google Cloud')] });
+  });
+
   it('closes it to every identity but the named service once no other workload holds it', () => {
     const spec = scopeSpec({ SOURCE_KEY: { ...delegated, services: ['catchup'] }, SIGNING_KEY: { ...generated, services: ['reports'] } });
     const input = setupInput(spec, appliedFor(spec, { catchup, reports }));
@@ -264,7 +297,133 @@ describe('who can read a limited secret through Secret Manager', () => {
     expect(secretScopePolicyProblems({ ...reviewed, bindings: [...reviewed.bindings, unconditional] }, input)).toEqual([expect.stringContaining(runtime)]);
     expect(secretScopePolicyProblems({ version: 3, bindings: [unconditional, reviewed.bindings[1]!] }, input)).toEqual([expect.stringContaining(runtime)]);
     expect(secretScopePolicyProblems({ ...reviewed, bindings: [...reviewed.bindings, { role: 'roles/secretmanager.admin', members: [`serviceAccount:${runtime}`] }] }, input))
-      .toEqual([expect.stringContaining('reads every secret')]);
+      .toEqual([expect.stringContaining('reaches every secret or every identity')]);
+  });
+});
+
+describe('verifying the live project after setup', () => {
+  const input = () => {
+    const spec = scopeSpec({ SOURCE_KEY: { ...delegated, services: ['catchup'] }, SIGNING_KEY: { ...generated, services: ['reports'] } });
+    return setupInput(spec, appliedFor(spec, { catchup, reports }));
+  };
+  const accessor = 'roles/secretmanager.secretAccessor';
+  const projectPolicy = (value: SecretScopeSetupInput) => ({ version: 3, bindings: [
+    { role: accessor, members: [`serviceAccount:${runtime}`], condition: secretExclusionCondition('123456789', value.runtimeExcludedSecretIds) },
+    ...value.identities.map(identity => ({ role: accessor, members: [`serviceAccount:${identity.email}`], condition: secretExclusionCondition('123456789', identity.excludedSecretIds) })),
+  ] });
+  const clean = (value: SecretScopeSetupInput) => Object.fromEntries(value.identities.map(identity => [identity.email, { bindings: [{ role: 'roles/iam.serviceAccountUser', members: [`serviceAccount:${deploy}`] }] }]));
+
+  it('rejects a grant attached to the secret itself for an identity that must not read it', () => {
+    const value = input();
+    expect(secretScopeDirectGrantProblems(value, {}, clean(value))).toEqual([]);
+    // The named service, and people, may hold direct grants.
+    expect(secretScopeDirectGrantProblems(value, { [SOURCE]: { bindings: [{ role: accessor, members: [`serviceAccount:${catchup}`, 'user:owner@example.com'] }] } }, clean(value))).toEqual([]);
+    expect(secretScopeDirectGrantProblems(value, { [SOURCE]: { bindings: [{ role: accessor, members: [`serviceAccount:${runtime}`] }] } }, clean(value)))
+      .toEqual([expect.stringContaining(`directly on ${SOURCE}`)]);
+    expect(secretScopeDirectGrantProblems(value, { [SOURCE]: { bindings: [{ role: 'roles/secretmanager.admin', members: [`serviceAccount:${reports}`] }] } }, clean(value))).toHaveLength(1);
+    expect(secretScopeDirectGrantProblems(value, { [SOURCE]: { bindings: [{ role: accessor, members: ['allAuthenticatedUsers'] }] } }, clean(value))).toHaveLength(1);
+  });
+
+  it('rejects another workload identity that can act as a service identity', () => {
+    const value = input();
+    const withGrant = (member: string, role = 'roles/iam.serviceAccountTokenCreator') => ({ ...clean(value), [catchup]: { bindings: [{ role, members: [member] }] } });
+    expect(secretScopeDirectGrantProblems(value, {}, withGrant(`serviceAccount:${runtime}`))).toEqual([expect.stringContaining('could act as it')]);
+    expect(secretScopeDirectGrantProblems(value, {}, withGrant(`serviceAccount:${reports}`, 'roles/iam.serviceAccountUser'))).toHaveLength(1);
+    expect(secretScopeDirectGrantProblems(value, {}, withGrant('allUsers'))).toHaveLength(1);
+    expect(secretScopeDirectGrantProblems(value, {}, withGrant(`serviceAccount:${catchup}`))).toEqual([]);
+    // A policy that was not read is unknown, never clean.
+    const { [catchup]: _missing, ...unread } = clean(value);
+    expect(secretScopeDirectGrantProblems(value, {}, unread)).toEqual([expect.stringContaining('was not read')]);
+  });
+
+  it.each(['roles/editor', 'roles/iam.serviceAccountUser', 'roles/iam.serviceAccountTokenCreator', 'roles/run.admin', 'roles/run.developer', 'roles/owner'])(
+    'rejects %s on the project for a workload identity', (role) => {
+      const value = input();
+      const policy = projectPolicy(value);
+      expect(secretScopePolicyProblems(policy, value)).toEqual([]);
+      expect(secretScopePolicyProblems({ ...policy, bindings: [...policy.bindings, { role, members: [`serviceAccount:${runtime}`] }] }, value)).toEqual([expect.stringContaining(role)]);
+      expect(secretScopePolicyProblems({ ...policy, bindings: [...policy.bindings, { role, members: [`serviceAccount:${catchup}`] }] }, value)).toHaveLength(1);
+      // The deployment identity is not a workload.
+      expect(secretScopePolicyProblems({ ...policy, bindings: [...policy.bindings, { role, members: [`serviceAccount:${deploy}`] }] }, value)).toEqual([]);
+    });
+
+  /** Google's answers, keyed by what the real client asks for. */
+  function google(value: SecretScopeSetupInput, overrides: { account?: (email: string) => unknown; secretStatus?: number; secretPolicy?: unknown; accountPolicy?: unknown } = {}) {
+    const calls: string[] = [];
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    const fetchImpl = (async (url: string | URL) => {
+      const target = String(url);
+      calls.push(target);
+      if (target.includes('cloudresourcemanager.googleapis.com')) return json(projectPolicy(value));
+      if (target.includes('secretmanager.googleapis.com')) return json(overrides.secretPolicy ?? { etag: 'e' }, overrides.secretStatus ?? 200);
+      if (target.endsWith(':getIamPolicy')) return json(overrides.accountPolicy ?? { etag: 'e', bindings: [] });
+      const email = decodeURIComponent(target.split('/serviceAccounts/')[1]!);
+      return json(overrides.account ? overrides.account(email) : { name: `projects/${projectId}/serviceAccounts/${email}`, projectId, uniqueId: '1234567890', email });
+    }) as typeof fetch;
+    return { fetchImpl, calls };
+  }
+
+  it('reads the project policy, every limited secret and every service identity, and accepts the reviewed state', async () => {
+    const value = input();
+    const { fetchImpl, calls } = google(value);
+    expect(await observeSecretScope('token', value, fetchImpl)).toEqual([]);
+    expect(calls.filter(url => url.includes('secretmanager.googleapis.com')).map(url => /secrets\/([^:]+):/.exec(url)![1]).sort()).toEqual([SIGNING, SOURCE]);
+    expect(calls.filter(url => url.endsWith(':getIamPolicy') && url.includes('/serviceAccounts/'))).toHaveLength(2);
+  });
+
+  it('does not call the setup enforced when an identity is missing or disabled, or a policy cannot be read', async () => {
+    const value = input();
+    const account = (email: string) => ({ name: `projects/${projectId}/serviceAccounts/${email}`, projectId, uniqueId: '1234567890', email, disabled: email === catchup });
+    expect(await observeSecretScope('token', value, google(value, { account }).fetchImpl)).toEqual(expect.arrayContaining([`${catchup} is missing or disabled.`]));
+    expect(await observeSecretScope('token', value, google(value, { secretStatus: 403 }).fetchImpl)).toEqual(expect.arrayContaining([expect.stringContaining(`secret ${SOURCE} could not be read`)]));
+    // A secret that does not exist yet has no grants of its own.
+    expect(await observeSecretScope('token', value, google(value, { secretStatus: 404 }).fetchImpl)).toEqual([]);
+    expect(await observeSecretScope('token', value, google(value, { secretPolicy: { etag: 'e', bindings: [{ role: accessor, members: [`serviceAccount:${runtime}`] }] } }).fetchImpl))
+      .toEqual(expect.arrayContaining([expect.stringContaining(`directly on ${SOURCE}`)]));
+    expect(await observeSecretScope('token', value, google(value, { accountPolicy: { etag: 'e', bindings: [{ role: 'roles/iam.serviceAccountTokenCreator', members: [`serviceAccount:${runtime}`] }] } }).fetchImpl))
+      .toEqual(expect.arrayContaining([expect.stringContaining('could act as it')]));
+  });
+
+  it('lets base setup accept the narrowed grant only when it is exactly the saved one', () => {
+    const value = setupInput(limited(), appliedFor(limited(), { catchup }));
+    const saved = buildSecretScopeConfiguration(value);
+    const member = `serviceAccount:${runtime}`;
+    const narrowedPolicy = { version: 3, bindings: [{ role: accessor, members: [member], condition: secretExclusionCondition('123456789', [SOURCE]) }] };
+    expect(verifySecretScopeRestriction(narrowedPolicy, saved, member)).toBe(true);
+    // No service identity setup, or one that narrows nothing: base setup expects its plain grant.
+    expect(verifySecretScopeRestriction(narrowedPolicy, undefined, member)).toBe(false);
+    expect(verifySecretScopeRestriction({ bindings: [{ role: accessor, members: [member] }] }, buildSecretScopeConfiguration(setupInput(limited())), member)).toBe(false);
+    // The live grant is plain again, or a second plain grant sits beside the narrowed one.
+    expect(() => verifySecretScopeRestriction({ version: 3, bindings: [{ role: accessor, members: [member] }] }, saved, member)).toThrow('does not match the saved project setup');
+    expect(() => verifySecretScopeRestriction({ ...narrowedPolicy, bindings: [...narrowedPolicy.bindings, { role: accessor, members: [member] }] }, saved, member)).toThrow('does not match the saved project setup');
+    expect(() => verifySecretScopeRestriction(narrowedPolicy, { files: {}, resources: {} }, member)).toThrow('does not match what Hypervibe builds');
+  });
+});
+
+describe('recording what each workload holds', () => {
+  const workloads = appliedFor(limited(), { catchup });
+  const action = (id: string, type: PlanAction['type'], addresses: string[]): PlanAction => ({ id, type, verified: true,
+    resource: { kind: 'service', name: id.replace(/^service:/, ''), provider: 'gcp' }, reason: 'test',
+    metadata: { engineSegment: { id: 'opentofu:plan', engine: 'opentofu', planDigest: 'd', configurationDigest: 'c', engineVersion: '1', providerVersions: {}, addresses } } }) as PlanAction;
+
+  it('records at plan time only the workloads the refreshed plan leaves unchanged', () => {
+    const recorded = scopeRecordsAtPlan(workloads, [action('service:web', 'update', ['google_cloud_run_v2_service.web']), action('service:worker', 'noop', []),
+      action('release-job:migrations', 'noop', []), action('service:catchup', 'create', ['google_cloud_run_v2_job.catchup'])]);
+    expect(Object.keys(recorded).sort()).toEqual([RELEASE_WORKLOAD, 'worker']);
+    expect(recorded.worker).toEqual(workloads.worker);
+  });
+
+  it('records after an apply only the workloads whose every address succeeded', () => {
+    const members = [action('service:web', 'update', ['google_cloud_run_v2_service.web', 'google_cloud_run_v2_service_iam_member.web_public']),
+      action('service:catchup', 'update', ['google_cloud_run_v2_job.catchup', 'google_cloud_scheduler_job.catchup_schedule']),
+      action('service:old', 'destroy', ['google_cloud_run_v2_service.old']), action('service:gone', 'destroy', ['google_cloud_run_v2_service.gone'])];
+    const changes = scopeRecordsAfterApply(workloads, members, {
+      'google_cloud_run_v2_service.web': 'succeeded', 'google_cloud_run_v2_service_iam_member.web_public': 'succeeded',
+      'google_cloud_run_v2_job.catchup': 'succeeded', 'google_cloud_scheduler_job.catchup_schedule': 'failed',
+      'google_cloud_run_v2_service.old': 'succeeded', 'google_cloud_run_v2_service.gone': 'not_started' });
+    // catchup's job changed but its scheduler did not: it is not known to run as reviewed.
+    expect(changes).toEqual({ web: workloads.web, old: undefined });
+    expect(Object.keys(changes).sort()).toEqual(['old', 'web']);
   });
 });
 
@@ -319,6 +478,31 @@ describe('planning an environment with a limited secret', () => {
     expect(gate(limited(), { [SOURCE]: { name: 'projects/1/secrets/x', createTime: 'now' } }).blocked).toContain('per-secret grants for the shared runtime identity');
   });
 
+  it('stops in a project that carries the migration copy restriction on the same grant', () => {
+    const scope = { target: { projectId, targetRegion: 'us-west1', sourceEnvironmentId: 'source-env', sourceRailwayProjectId: 'rp', sourceRailwayEnvironmentId: 're', targetEnvironmentId: 'env-123' },
+      targetEnvironmentName: 'staging', projectNumber: '123456789', runtimeEmail: runtime, runtimeUniqueId: '111', bucket: `${projectId}-hv-build-source`,
+      bucketTimeCreated: '2026-01-01T00:00:00.000Z', copyUniqueId: '222', secretCreateTime: '2026-01-01T00:00:00.000Z' };
+    const isolation = transferIsolationContribution(scope);
+    const input = setupInput(limited());
+    recordVerifiedSecretScope(project.id, input);
+    saveContribution(buildSecretScopeConfiguration(input));
+    expect(gate(limited()).blocked).toBeUndefined();
+    saveContribution(buildSecretScopeConfiguration(input), { [isolation.id]: isolation.configuration, [transferSlot(scope.target).id]: transferSlot(scope.target).configuration });
+    expect(gate(limited()).blocked).toContain('migration copy restriction');
+  });
+
+  it('says in status and in the apply result when a limited secret is still readable by other services', () => {
+    const notes = () => gcpSecretScopeNotes(ctx, project, limited(), 'staging', { gcpProjectId: projectId, runtimeServiceAccountEmail: runtime });
+    expect(gcpSecretScopeNotes(ctx, project, unscoped(), 'staging', { gcpProjectId: projectId, runtimeServiceAccountEmail: runtime })).toEqual([]);
+    verify(setupInput(limited()));
+    expect(notes()).toEqual([expect.stringContaining('NOT YET ENFORCED: SOURCE_KEY (catchup)')]);
+    // After the apply: the next action is the second setup step, and it is named.
+    recordAppliedWorkloads(project.id, environment.id, appliedFor(limited(), { catchup }));
+    expect(notes()).toEqual([expect.stringMatching(/shared runtime identity can still read it.*secretScopeAccess="lifecycle"/)]);
+    verify(setupInput(limited(), appliedFor(limited(), { catchup })));
+    expect(notes()).toEqual([expect.stringContaining('enforced in Google Cloud: SOURCE_KEY (catchup)')]);
+  });
+
   it('keeps planning blocked after scoping is removed until the shared identity can read the secret again', () => {
     recordAppliedWorkloads(project.id, environment.id, appliedFor(limited(), { catchup }));
     verify(setupInput(limited(), appliedFor(limited(), { catchup })));
@@ -358,7 +542,7 @@ describe('setting up service identities', () => {
     expect(gate(limited()).blocked).toContain('no verified setup exists yet');
 
     await prepare(limited(), false);
-    expect(await prepare(limited(), true)).toMatchObject({ success: true, message: expect.stringContaining('Not yet enforced: staging: SOURCE_KEY') });
+    expect(await prepare(limited(), true)).toMatchObject({ success: true, message: expect.stringMatching(/NOT YET ENFORCED: staging: SOURCE_KEY.*Do not store a new value yet/) });
     expect(gate(limited())).toMatchObject({ identities: { catchup }, warnings: [expect.stringContaining('NOT YET ENFORCED')] });
   });
 

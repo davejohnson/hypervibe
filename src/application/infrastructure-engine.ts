@@ -8,7 +8,7 @@ import { statSync } from 'node:fs';
 import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
 import { domainServiceFor, environmentDomains, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { secretTargetsService } from '../domain/services/secret-service-scope.js';
-import { gcpSecretScopeGate, RELEASE_WORKLOAD } from './gcp-secret-scope.js';
+import { gcpSecretScopeGate, gcpSecretScopeNotes, RELEASE_WORKLOAD } from './gcp-secret-scope.js';
 import { recordAppliedWorkloads } from '../adapters/providers/gcp/secret-scope-state.js';
 import type { GcpAppliedWorkload } from '../domain/services/gcp-secret-scope.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
@@ -1133,10 +1133,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   // What each workload runs as and references under this plan. A workload the refreshed plan leaves
   // unchanged is already in that state; the rest are recorded when their change is applied.
   const scopeWorkloads = secretScope.active ? plannedScopeWorkloads(input) : undefined;
-  if (scopeWorkloads) {
-    recordAppliedWorkloads(project.id, context.environment.id, Object.fromEntries(Object.entries(scopeWorkloads)
-      .filter(([name]) => planned.actions.some(action => action.id === scopeWorkloadActionId(name) && action.type === 'noop'))));
-  }
+  if (scopeWorkloads) recordAppliedWorkloads(project.id, context.environment.id, scopeRecordsAtPlan(scopeWorkloads, planned.actions));
   const grantActions = planned.actions.filter(action => action.id.startsWith('secret-runtime-access:') && action.type !== 'noop');
   if (grantActions.length !== grantChanges.length || !grantActions.every(action =>
     grantChanges.some(grant => action.id === `secret-runtime-access:${grant.secretId}`))) {
@@ -1289,6 +1286,29 @@ export function plannedScopeWorkloads(input: Pick<GcpCloudRunEngineInput, 'servi
   };
 }
 
+/** At plan time only a workload the refreshed plan leaves unchanged is known to be in the planned state. */
+export function scopeRecordsAtPlan(workloads: Record<string, GcpAppliedWorkload>, actions: PlanAction[]): Record<string, GcpAppliedWorkload> {
+  return Object.fromEntries(Object.entries(workloads)
+    .filter(([name]) => actions.some(action => action.id === scopeWorkloadActionId(name) && action.type === 'noop')));
+}
+
+/** After an apply only a workload whose every address succeeded is known to run as reviewed; a deleted one loses its record. */
+export function scopeRecordsAfterApply(workloads: Record<string, GcpAppliedWorkload>, members: PlanAction[], outcomes: Record<string, string>): Record<string, GcpAppliedWorkload | undefined> {
+  const succeeded = (member: PlanAction) => {
+    const addresses = engineSegmentOf(member)?.addresses ?? [];
+    return addresses.length > 0 && addresses.every(address => outcomes[address] === 'succeeded');
+  };
+  const changes: Record<string, GcpAppliedWorkload | undefined> = {};
+  for (const [name, workload] of Object.entries(workloads)) {
+    const member = members.find(entry => entry.id === scopeWorkloadActionId(name) && entry.type !== 'destroy');
+    if (member && succeeded(member)) changes[name] = workload;
+  }
+  for (const member of members.filter(entry => entry.type === 'destroy' && entry.id.startsWith('service:'))) {
+    if (succeeded(member)) changes[member.resource.name] = undefined;
+  }
+  return changes;
+}
+
 // ---------------------------------------------------------------- Apply
 
 /** Recheck the originating Google claim before an independently authenticated DNS apply. */
@@ -1352,7 +1372,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   specRevision: number;
   planId: string;
   confirmActions: string[];
-}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
+}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult; warnings?: string[] } | { kind: 'blocked'; reason: string }> {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
@@ -1386,7 +1406,7 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   specRevision: number;
   planId: string;
   confirmActions: string[];
-}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
+}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult; warnings?: string[] } | { kind: 'blocked'; reason: string }> {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
@@ -1580,22 +1600,16 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         segment: { ...segment, addresses }, approvedAddresses: addresses,
       });
       await recordServiceBindings(ctx, context, environmentName, members, outcome.outcomes, token, reviewed.database?.instanceName, reviewed.runtimeGrants);
-      if (reviewed.scopeWorkloads) {
-        // Only a workload whose every address succeeded is known to run as reviewed.
-        const changes: Record<string, GcpAppliedWorkload | undefined> = {};
-        for (const [name, workload] of Object.entries(reviewed.scopeWorkloads)) {
-          const member = members.find(entry => entry.id === scopeWorkloadActionId(name));
-          if (member && (engineSegmentOf(member)?.addresses ?? []).every(address => outcome.outcomes[address] === 'succeeded')) changes[name] = workload;
-        }
-        for (const member of members.filter(entry => entry.type === 'destroy' && entry.id.startsWith('service:'))) {
-          if ((engineSegmentOf(member)?.addresses ?? []).every(address => outcome.outcomes[address] === 'succeeded')) changes[member.resource.name] = undefined;
-        }
-        recordAppliedWorkloads(params.project.id, context.environment.id, changes);
-      }
+      if (reviewed.scopeWorkloads) recordAppliedWorkloads(params.project.id, context.environment.id, scopeRecordsAfterApply(reviewed.scopeWorkloads, members, outcome.outcomes));
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
-  return { kind: 'executed', envName: environmentName, result };
+  // Say plainly, in the apply result itself, when a limited secret is still readable by other services.
+  const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+  const warnings = gcpSecretScopeNotes(ctx, params.project, params.spec, environmentName, { gcpProjectId: context.gcpProjectId,
+    runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+    runtimeSecretGrantOrigins: (current.platformBindings as { engine?: EngineBinding }).engine?.runtimeSecretGrantOrigins });
+  return { kind: 'executed', envName: environmentName, result, ...(warnings.length ? { warnings } : {}) };
 }
 
 function sameGrantOrigin(binding: EngineBinding, grant: ReviewedRuntimeSecretGrant): boolean {
@@ -1983,7 +1997,9 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
   const token = await context.adapter.engineAccessToken();
   const bound = (context.environment.platformBindings as { services?: Record<string, { workerPoolName?: string }> }).services ?? {};
   const workers: EngineWorkerStatus[] = [];
-  const warnings: string[] = [];
+  const warnings: string[] = gcpSecretScopeNotes(ctx, project, spec, environmentName, { gcpProjectId: context.gcpProjectId,
+    runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+    runtimeSecretGrantOrigins: (context.environment.platformBindings as { engine?: EngineBinding }).engine?.runtimeSecretGrantOrigins });
   for (const [name, service] of Object.entries(environmentSpec.services)) {
     if (service.workloadKind !== 'worker') continue;
     const resource = bound[name]?.workerPoolName;
