@@ -1,4 +1,5 @@
 import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
+import { secretServiceScopeProblems } from './secret-service-scope.js';
 
 /** Hosting providers the managed OpenTofu engine builds. Everything else is Railway, which the engine never touches. */
 export const ENGINE_HOSTING_PROVIDERS: readonly string[] = ['cloudrun', 'aws', 'azure'];
@@ -88,8 +89,10 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   const environment = spec.environments[environmentName];
   if (!environment) return [`Spec has no environment "${environmentName}".`];
   // AWS and Azure add their own provider capabilities in their engine planners.
-  if ((environment.hosting.provider === 'aws' || environment.hosting.provider === 'azure') && isEngineManaged(environment)) return commonEngineProblems(environment);
-  const problems: string[] = [];
+  // A secret limited to named services must never fall back to every service.
+  const scopeProblems = secretServiceScopeProblems(spec, environmentName);
+  if ((environment.hosting.provider === 'aws' || environment.hosting.provider === 'azure') && isEngineManaged(environment)) return [...commonEngineProblems(environment), ...scopeProblems];
+  const problems: string[] = [...scopeProblems];
   if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   problems.push(...commonEngineProblems(environment));
   if (environment.domainRegistration?.register) {

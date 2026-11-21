@@ -7,6 +7,7 @@ import { EnvironmentRepository } from '../adapters/db/repositories/environment.r
 import { statSync } from 'node:fs';
 import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
 import { domainServiceFor, environmentDomains, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
+import { secretTargetsService } from '../domain/services/secret-service-scope.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
@@ -315,8 +316,9 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   // A package token is for image builds only; running services never receive it.
   const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.importedSecrets ?? []).filter((key) => !isBuildTokenKey(key)), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
     ...(context.cacheWired ? [ENGINE_CACHE_URL_KEY] : [])];
-  const secretEnv = Object.fromEntries(secretKeys
-    .filter((key) => context.secretVersions?.[key])
+  // A secret that names services goes only to them; the release command borrows one service's set below.
+  const secretEnvFor = (service: string) => Object.fromEntries(secretKeys
+    .filter((key) => context.secretVersions?.[key] && secretTargetsService(spec, environmentName, key, service))
     .map((key) => [key, { secretId: engineSecretId(environmentName, key), version: context.secretVersions?.[key] ?? 'latest' }]));
   // S3-compatible keys go only to the services that use that bucket.
   const s3SecretEnvFor = (service: string) => Object.fromEntries(Object.entries(environmentSpec.storage ?? {})
@@ -335,7 +337,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
         // Queue names follow the shared Pub/Sub contract so apps see the same variables on every path.
         env: { ...buildQueueEnvVars({ environmentSpec, environment: { name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, backend: environmentSpec.queues ? 'pubsub' : undefined, gcpProjectId: context.gcpProjectId }), ...environmentSpec.envVars },
-        secretEnv: { ...secretEnv, ...s3SecretEnvFor(name) },
+        secretEnv: { ...secretEnvFor(name), ...s3SecretEnvFor(name) },
         public: service.public ?? workload === 'web',
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
         ...(service.cpu ? { cpu: service.cpu } : {}),
@@ -346,7 +348,8 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         ...(workload === 'job' ? { schedule: service.cronSchedule, timeZone: service.timeZone ?? 'UTC', jobCommand: service.startCommand } : {}),
       };
     });
-  // The release command runs with the web service's configuration (secrets, database, storage).
+  // The release command runs with the web service's configuration (secrets, database, storage),
+  // so it never holds a secret that is limited to other services.
   const command = releaseCommandFor(environmentSpec);
   const primary = services.find((service) => service.workload === 'web') ?? services.find((service) => service.workload !== 'job');
   return {

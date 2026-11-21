@@ -3,6 +3,7 @@ import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindin
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
+import { secretServiceScopeProblems } from '../domain/services/secret-service-scope.js';
 import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
@@ -127,7 +128,7 @@ export function azureTestingEnvironments(spec: ProjectSpec): string[] {
 /** Desired state the Azure engine cannot build yet; listed problems block planning instead of being ignored. */
 export function azureEngineProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName]!;
-  const problems: string[] = commonEngineProblems(environment);
+  const problems: string[] = [...commonEngineProblems(environment), ...secretServiceScopeProblems(spec, environmentName)];
   if (azureProfileFor(environmentName) === 'production') {
     problems.push(`${environmentName} uses the production profile (its own server and registry, web always on), which the Azure engine does not build yet. Testing environments are supported.`);
   }

@@ -115,6 +115,13 @@ reCAPTCHA or an auth vendor) need no Hypervibe connection. Use this template:
    with the environments that need it, and `githubActions` only when a workflow
    reads it. The user creates the key in that service's dashboard and supplies
    it as a `secretRef` when planning.
+   When only some services should hold a sensitive key, add
+   `"services": ["<service>", ...]` to that secret (delegated or
+   Hypervibe-generated). Only those services receive it in each listed
+   environment; omit it to give the key to every service. Google Cloud only:
+   AWS, Azure and Railway refuse a spec that uses it. It keeps the key out of
+   the other services' environment, but all services of an environment share one
+   cloud identity, so do not describe it as blocking their access to the secret.
 2. For each callback the service sends, declare an environment `webhooks` entry:
    `{ "vendor": "<service>", "service": "<public web service>", "path": "/webhooks/<service>/<event>" }`,
    plus `signingSecretEnvVar` when the service signs requests (for example

@@ -135,6 +135,16 @@ Declarative `principal` attribution does not grant provider roles or establish a
 authenticated ACL. Repository review and actual provider authorization remain
 separate boundaries.
 
+A secret declaration may name the `services` that receive it; without the list
+every service of each targeted environment does. Honor the list exactly or
+refuse the spec: a hosting path that cannot limit a secret must reject it in
+validation and planning, never accept it and inject the secret everywhere. The
+release command holds only what the service it borrows from holds. Limiting the
+injected references is not an access boundary while workloads share one runtime
+identity; say so wherever the setting is documented. Cloud Run implements it
+([engine notes](../opentofu-engine.md#limiting-a-secret-to-named-services));
+AWS, Azure and Railway refuse it.
+
 One exception to DG-083 is deliberate: the owner may copy a secret Hypervibe
 generated for their own app, for example to give another app access to it.
 `hv_secrets action="reveal"` opens a page on this computer (127.0.0.1) and the

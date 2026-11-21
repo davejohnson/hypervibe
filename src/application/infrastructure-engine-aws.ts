@@ -3,6 +3,7 @@ import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindin
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
+import { secretServiceScopeProblems } from '../domain/services/secret-service-scope.js';
 import { describeFixedWorkerCountChanges, specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -197,7 +198,7 @@ export async function resolveAwsEngineContext(ctx: CommandContext, project: Proj
 /** Desired state the AWS engine cannot manage yet; listed problems block planning instead of being ignored. */
 export function awsEngineProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName]!;
-  const problems: string[] = commonEngineProblems(environment);
+  const problems: string[] = [...commonEngineProblems(environment), ...secretServiceScopeProblems(spec, environmentName)];
   if (environment.database && awsProfileFor(environmentName) === 'production') {
     problems.push(`${environmentName} uses the production profile (RDS db.t4g.micro), which the AWS engine does not build yet. Testing environments (Aurora that pauses when idle) are supported.`);
   }
