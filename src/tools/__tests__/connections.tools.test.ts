@@ -657,6 +657,106 @@ describe('hv_connections', () => {
     await t.close();
   });
 
+  it.each(['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access'])('previews %s through MCP and confirms only its reviewed plan through the CLI', async migrationAccess => {
+    const project = new ProjectRepository().create({ name: 'transfer-app', defaultPlatform: 'cloudrun' });
+    new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
+      destination: { hosting: { provider: 'cloudrun', gcpProjectId: 'transfer-project', region: 'us-central1' }, services: {} },
+      source: { hosting: { provider: 'railway' }, services: {} },
+    } });
+    const input = { provider: 'cloudrun', action: 'prepare', project: project.name, environment: 'destination',
+      migrationAccess, migrationSourceEnvironment: 'source' };
+    const isProbe = migrationAccess === 'verify-copy-access' || migrationAccess === 'verify-export-file-access';
+    const planId = isProbe ? 'probe-16a21ebf-67bb-4363-9774-d625a84c5b13' : 'setup-reviewed-slot';
+    const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview', planId, softDeleteSeconds: 604800, htmlPath: '/reports/' + planId + '.html' });
+    const client = await makeClient();
+    try {
+      const preview = await client.call('hv_connections', input);
+      expect(preview.ok).toBe(true);
+      expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ environmentProjectId: 'transfer-project',
+        environmentName: input.environment, migrationAccess: input.migrationAccess,
+        migrationSourceEnvironment: input.migrationSourceEnvironment, confirm: undefined }));
+      expect(preview.confirmation.completeInput).toBe(true);
+      expect(preview.confirmation.retryInput).toEqual({ ...input, confirm: true, gcpSetupPlanId: planId });
+      if (isProbe) {
+        expect(preview.confirmation.message).toMatch(/charges/i);
+        expect(preview.confirmation.message).toContain('7 days');
+        expect(preview.data.htmlPath).toBe('/reports/' + planId + '.html');
+      }
+      if (migrationAccess === 'verify-export-file-access') {
+        expect(preview.confirmation.message).toMatch(/one temporary Cloud Run job/i);
+        expect(preview.confirmation.message).toMatch(/app account/i);
+        expect(preview.confirmation.message).toMatch(/disposable export file/i);
+        expect(preview.confirmation.message).toMatch(/cleanup|delete|remove/i);
+        expect(preview.confirmation.message + preview.hint).not.toMatch(/two .*jobs|secret|copy account|signed link/i);
+      } else if (migrationAccess === 'verify-copy-access') {
+        expect(preview.confirmation.message).toMatch(/two temporary Cloud Run jobs/i);
+        expect(preview.confirmation.message).toMatch(/secret version.*object/i);
+        expect(preview.hint).toMatch(/app.*copy/i);
+      } else if (migrationAccess === 'restrict-app-access') {
+        expect(preview.confirmation.message).toMatch(/app.*secret.*dump/i);
+        expect(preview.hint).toContain('two project');
+      } else {
+        expect(preview.confirmation.message).toContain('future data copy from source to destination in transfer-app');
+        expect(preview.hint).toContain('the copy job');
+      }
+      expect(preview.hint).toContain('--gcp-setup-plan-id ' + planId);
+      prepare.mockResolvedValueOnce({ success: true, mode: 'confirm' });
+      const output: string[] = [];
+      const cli = await runCli(['connections', '--provider', 'cloudrun', '--action', 'prepare', '--project', project.name,
+        '--environment', input.environment, '--migration-access', input.migrationAccess, '--migration-source-environment', input.migrationSourceEnvironment,
+        '--confirm', '--gcp-setup-plan-id', planId, '--json'], {
+        initialize: false, io: { stdinIsTTY: false, confirm: async () => false, readStdin: async () => '',
+          writeErr: line => output.push(line), writeOut: line => output.push(line) },
+      });
+      expect(cli, output.join(' ')).toBe(0);
+      expect(prepare).toHaveBeenLastCalledWith(expect.objectContaining({ environmentName: input.environment,
+        migrationAccess: input.migrationAccess, migrationSourceEnvironment: input.migrationSourceEnvironment,
+        gcpSetupPlanId: planId, confirm: true }));
+
+      prepare.mockResolvedValue({ success: true, mode: 'preview' });
+      const missingPlan = await client.call('hv_connections', input);
+      expect(missingPlan.error?.code).toBe('PROVIDER_ERROR');
+      expect(missingPlan.confirmation).toBeUndefined();
+      if (isProbe) {
+        prepare.mockResolvedValue({ success: true, mode: 'preview', planId });
+        expect((await client.call('hv_connections', input)).error?.code).toBe('PROVIDER_ERROR');
+      }
+    } finally { await client.close(); }
+  });
+
+  it.each(['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access'])('rejects ambiguous targets, other actions, credentials and extra grants for %s', async migrationAccess => {
+    const project = new ProjectRepository().create({ name: 'transfer-app', defaultPlatform: 'cloudrun' });
+    new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
+      destination: { hosting: { provider: 'cloudrun', gcpProjectId: 'transfer-project' }, services: {} },
+      source: { hosting: { provider: 'railway' }, services: {} },
+      unrelated: { hosting: { provider: 'cloudrun' }, services: {} },
+    } });
+    const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview', planId: 'some-plan' });
+    const client = await makeClient();
+    const input = { provider: 'cloudrun', action: 'prepare', project: project.name, environment: 'destination',
+      migrationAccess, migrationSourceEnvironment: 'source' };
+    const confirmed = { confirm: true, gcpSetupPlanId: 'some-plan' };
+    try {
+      for (const override of [
+        { action: 'bootstrap' }, { action: 'describe' }, { action: 'add' }, { action: 'connect' }, { provider: 'railway' },
+        { provider: 'aws' }, { provider: 'azure' },
+        { project: undefined }, { environment: undefined }, { environment: 'source' }, { environment: 'other' },
+        { migrationSourceEnvironment: undefined }, { migrationSourceEnvironment: 'missing' }, { migrationSourceEnvironment: 'unrelated' },
+        { migrationSourceEnvironment: 'destination' }, { migrationAccess: undefined },
+        { gcpProjectId: 'wrong-project' }, { gcpSetupPlanId: 'some-plan' }, { confirm: true }, { ...confirmed, gcpSetupPlanId: '   ' },
+        { gcsAccess: 'lifecycle' }, { memorystoreAccess: 'inspect' }, { queueAccess: 'remove' }, { workerAccess: 'lifecycle' },
+        { runtimeServiceAccountEmail: 'other@transfer-project.iam.gserviceaccount.com' },
+        { deployServiceAccountEmail: 'override@transfer-project.iam.gserviceaccount.com' }, { scope: 'elsewhere/repo' },
+        { credentialsRef: 'env:UNREAD' }, { adminAuth: 'default' }, { ...confirmed, adminAccessTokenRef: 'env:UNREAD' },
+        { ...confirmed, adminCredentialsJson: 'unused' }, { purpose: 'different action' }, { awsAccountId: '123456789012' },
+      ]) {
+        const result = await client.call('hv_connections', { ...input, ...override });
+        expect(result.error?.code, JSON.stringify(override)).toBe('VALIDATION');
+      }
+      expect(prepare).not.toHaveBeenCalled();
+    } finally { await client.close(); }
+  });
+
   it('rejects ambiguous or unused credential inputs before resolving secrets', async () => {
     const t = await makeClient();
     const cases = [

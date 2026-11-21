@@ -106,7 +106,7 @@ export const planReportBrowser = `
     else window.addEventListener('resize', drawWires);
     drawWires();
   }
-  document.getElementById('print').addEventListener('click', () => window.print());
+  document.getElementById('print')?.addEventListener('click', () => window.print());
   let closed = [];
   window.addEventListener('beforeprint', () => {
     closed = rows.map(row => row.querySelector('details')).filter(detail => !detail.open);

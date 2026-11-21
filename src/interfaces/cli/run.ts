@@ -24,6 +24,10 @@ export async function runCli(
   options: CliRunOptions = {}
 ): Promise<number> {
   const io = options.io ?? createProcessCliIo();
+  if (argv[0] === 'reviews') {
+    const { runReviews } = await import('./reviews.js');
+    return runReviews(argv.slice(1), io);
+  }
   const registry = options.registry ?? createCommandRegistry(createCommandContext());
 
   let invocation;
@@ -56,8 +60,11 @@ export async function runCli(
   }
 
   let result = await registry.execute(invocation.command.id, invocation.input);
+  const review = result.data as { reviewUrl?: string; reviewStatus?: string } | undefined;
+  const browserDecision = review?.reviewUrl && ['Awaiting approval', 'Approved'].includes(review.reviewStatus ?? '');
   const canPrompt = (
-    !invocation.json
+    !browserDecision
+    && !invocation.json
     && !invocation.nonInteractive
     && io.stdinIsTTY
     && (result.error?.code === 'CONFIRM_REQUIRED' || (result.ok && result.confirmation?.completeInput))

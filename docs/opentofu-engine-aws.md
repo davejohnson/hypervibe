@@ -150,11 +150,17 @@ not current quotes.
   certificate authorities to the repository's or the generated Dockerfile. Generated images pull their base from
   ECR Public, which avoids Docker Hub's pull limits on shared build hosts. Tags
   are immutable commit SHAs, and an already-built commit reuses its image.
-- **One image for every workload.** The first release only builds it, because
-  workloads are created from an existing image; the next infrastructure plan
-  creates them. Later releases update the web service's image and register a
-  new task revision for workers and jobs. Task definitions use `track_latest`, so released revisions are not
-  drift, and scheduled jobs reference the family, so they run the latest.
+- **Workload startup.** Web services with a declared `startCommand` use a
+  separately tagged image with the Docker entrypoint cleared. ECS runs each
+  service's command with `sh -c`. The ordinary image keeps the repository's
+  startup behavior for other workloads, including worker and scheduled task
+  commands that pass arguments to the image entrypoint. CodeBuild can publish
+  both images in one job and reuses each existing immutable tag. The first
+  infrastructure apply builds the images before creating workloads. Later
+  releases update the web service and register task revisions for workers and
+  jobs. Scheduled jobs reference the family and run its latest revision.
+  The web override path has offline Docker and AWS request coverage. Live
+  qualification remains open. [#717](https://github.com/davejohnson/hypervibe/issues/717)
 
 ## Teardown
 

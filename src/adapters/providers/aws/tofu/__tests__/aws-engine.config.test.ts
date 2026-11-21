@@ -45,7 +45,10 @@ describe('AWS engine configuration', () => {
     const role = (config.files['base.tf.json'] as { resource: { aws_iam_role: { runtime: Record<string, string> }; aws_iam_role_policy: { runtime: { policy: string } } } }).resource;
     expect(role.aws_iam_role.runtime.path).toBe('/hypervibe/app/');
     expect(role.aws_iam_role.runtime.permissions_boundary).toBe('arn:aws:iam::111122223333:policy/hypervibe/hypervibe-app-boundary');
-    expect(role.aws_iam_role_policy.runtime.policy).toContain('parameter/hypervibe/env1/API_KEY');
+    const statements: Array<{ Action: string[] | string; Resource: unknown }> = JSON.parse(role.aws_iam_role_policy.runtime.policy).Statement;
+    const parameterPermissions = statements.filter(statement => [statement.Action].flat().some(action => action === '*' || action.startsWith('ssm:')));
+    expect(parameterPermissions).toEqual([{ Sid: 'Secrets', Effect: 'Allow', Action: ['ssm:GetParameter', 'ssm:GetParameters'],
+      Resource: ['arn:aws:ssm:us-west-2:111122223333:parameter/hypervibe/env1/API_KEY'] }]);
     expect(config.resources['aws_s3_bucket.documents']).toMatchObject({ dataBearing: true });
   });
 });
@@ -75,7 +78,7 @@ describe('AWS web services', () => {
       infrastructure_role_arn: 'arn:aws:iam::111122223333:role/hypervibe/hypervibe-web-infrastructure',
       execution_role_arn: '${aws_iam_role.runtime.arn}', task_role_arn: '${aws_iam_role.runtime.arn}',
       scaling_target: [{ min_task_count: 1, max_task_count: 3 }],
-      lifecycle: [{ ignore_changes: ['primary_container[0].image'] }],
+      lifecycle: [{ ignore_changes: ['primary_container[0].image', 'primary_container[0].command'] }],
     });
     const container = service.primary_container[0];
     expect(container.container_port).toBe(8080);

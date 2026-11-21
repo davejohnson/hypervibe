@@ -1,14 +1,25 @@
 import { createHash } from 'node:crypto';
-import type { PlanReport, PlanReportAction } from '../domain/plan/plan-report.js';
+import { transferAccessCheckScope, transferFileAccessCheckScope, type PlanReport, type PlanReportAction } from '../domain/plan/plan-report.js';
 import type { PlanActionType } from '../domain/plan/plan.types.js';
-import { actionTitle, buildReportMap, humanize, lanes, namedResourceKinds, providerName, type MapGroup } from './plan-report-map.js';
+import { actionTitle, buildReportMap, humanize, isNamedResource, isSecretReadPermission, lanes, providerName, type MapGroup } from './plan-report-map.js';
 import { planReportBrowser } from './plan-report-browser.js';
+import { cloudFacts } from './plan-report-links.js';
 import { groupPlanNotices } from './plan-report-notices.js';
 import { planReportStyle } from './plan-report-style.js';
 
-const types: Record<PlanActionType, string> = {
+type ReviewActionType = PlanActionType | 'grant' | 'revoke';
+const types: Record<ReviewActionType, string> = {
   create: 'Create', update: 'Update', replace: 'Replace', destroy: 'Destroy', noop: 'No change',
+  grant: 'Grant access', revoke: 'Revoke access',
 };
+
+function reviewType(action: PlanReportAction): ReviewActionType {
+  if (isSecretReadPermission(action)) {
+    if (action.type === 'create') return 'grant';
+    if (action.type === 'destroy') return 'revoke';
+  }
+  return action.type;
+}
 
 // Hypercloud's resource-map buttons use small line icons and a text description
 // for every resource. SVGs here are fixed markup and require no external assets.
@@ -25,24 +36,27 @@ const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<',
   .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
 const quantity = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`;
 const digest = (text: string) => createHash('sha256').update(text).digest('base64');
-const csp = `default-src 'none'; script-src 'sha256-${digest(planReportBrowser)}'; style-src 'sha256-${digest(planReportStyle)}'; base-uri 'none'; form-action 'none'`;
+export const planReportPolicy = `default-src 'none'; script-src 'sha256-${digest(planReportBrowser)}'; style-src 'sha256-${digest(planReportStyle)}'; base-uri 'none'; form-action 'none'`;
 
 function fact(label: string, value?: string) {
   return value ? `<div><dt>${label}</dt><dd>${value}</dd></div>` : '';
 }
-function notice(label: string, messages: string[], className: string) {
+function notice(label: string, messages: string[], className: string, detail?: { index: number; label: string }) {
   const heading = className === 'info' ? label : `${label} (${messages.length})`;
-  return messages.length ? `<div class="notice ${className}"><h3>${heading}</h3><ul>${messages.map(message => `<li>${escape(message)}</li>`).join('')}</ul></div>` : '';
+  const link = detail ? ` <a href="#action-${detail.index}">${escape(detail.label)}</a>` : '';
+  return messages.length ? `<div class="notice ${className}"><h3>${heading}</h3><ul>${messages.map(message => `<li>${escape(message)}</li>`).join('')}</ul>${link}</div>` : '';
 }
-function node(group: MapGroup) {
+function node(group: MapGroup, accessCheck: boolean) {
   const provider = providerName(group.provider);
   const first = group.actions[0];
-  const named = namedResourceKinds.has(first.kind);
-  const title = named ? first.name : group.title;
+  const named = isNamedResource(first);
+  const title = named || (accessCheck && group.actions.length === 1) ? first.name : group.title;
   const subtitle = [provider, named ? humanize(first.kind) : '', quantity(group.actions.length, 'action')].filter(Boolean).join(' · ');
   const changes = Object.entries(types).flatMap(([type, label]) => {
-    const count = group.actions.filter(action => action.type === type).length;
-    return count ? [`<span class="status" data-type="${type}">${count} ${label.toLowerCase()}</span>`] : [];
+    const count = group.actions.filter(action => reviewType(action) === type).length;
+    if (!count) return [];
+    const summary = type === 'grant' ? quantity(count, 'new permission') : type === 'revoke' ? quantity(count, 'permission removal') : `${count} ${label.toLowerCase()}`;
+    return [`<span class="status" data-type="${type}">${summary}</span>`];
   }).join(' · ');
   return `<a class="map-node" href="#group-${group.index}" data-group="${group.index}">
     <span class="map-node-icon"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7">${icons[group.icon]}</svg></span>
@@ -51,11 +65,11 @@ function node(group: MapGroup) {
     <span class="map-arrow" aria-hidden="true">›</span></a>`;
 }
 
-function mapSection(map: ReturnType<typeof buildReportMap>) {
+function mapSection(map: ReturnType<typeof buildReportMap>, accessCheck: boolean) {
   if (!map.groups.length) return '';
   const zones = lanes.map(lane => {
     const groups = map.groups.filter(group => group.lane === lane);
-    return groups.length ? `<div class="map-zone"><h3>${lane}</h3>${groups.map(node).join('')}</div>` : '';
+    return groups.length ? `<div class="map-zone"><h3>${lane}</h3>${groups.map(group => node(group, accessCheck)).join('')}</div>` : '';
   }).join('');
   return `<section id="resource-map" aria-labelledby="map-title"><div class="section-head"><h2 id="map-title">Resource map</h2>
     <a href="#review">View all actions ↓</a></div>
@@ -68,7 +82,8 @@ function mapSection(map: ReturnType<typeof buildReportMap>) {
 
 const codeList = (values: string[]) => values.length ? `<ul>${values.map(value => `<li><code>${escape(value)}</code></li>`).join('')}</ul>` : '';
 
-function actionRow(action: PlanReportAction, index: number, group: MapGroup, indexes: Map<string, number | null>) {
+function actionRow(action: PlanReportAction, index: number, group: MapGroup, indexes: Map<string, number | null>, accessCheck: boolean) {
+  const type = reviewType(action);
   const title = actionTitle(action);
   const name = title !== action.name ? fact('Resource name', escape(action.name)) : '';
   const flags = [
@@ -80,57 +95,66 @@ function actionRow(action: PlanReportAction, index: number, group: MapGroup, ind
     return `<li>${typeof target === 'number' ? `<a href="#action-${target}">${code}</a>` : code}</li>`;
   });
   const anchor = group.actions[0] === action ? `<span id="group-${group.index}"></span>` : '';
-  return `<li id="action-${index}" class="action-row" data-type="${escape(action.type)}" data-group="${group.index}">${anchor}
-    <details><summary><span class="status">${types[action.type]}</span>
+  return `<li id="action-${index}" class="action-row" data-type="${escape(type)}" data-group="${group.index}">${anchor}
+    <details><summary><span class="status">${types[type]}</span>
     <span class="action-main"><span class="action-name">${escape(title)}</span><span class="action-kind">${escape(group.title)} · ${escape(providerName(action.provider))}</span></span></summary>
     <div class="detail"><div class="bits">${flags.map(label => `<span>${label}</span>`).join('')}</div>
     ${action.reason ? `<p>${escape(action.reason)}</p>` : ''}<dl>
     ${fact('Action ID', `<code>${escape(action.id)}</code>`)}${name}
-    ${fact('Plan evidence', action.verified ? 'Verified at planning time' : 'Unverified at planning time')}
+    ${accessCheck ? '' : fact('Plan evidence', action.verified ? 'Verified at planning time' : 'Unverified at planning time')}
     ${fact('Changed fields', codeList(action.fields))}${fact('Resource addresses', codeList(action.addresses))}
     ${fact('Depends on', dependencies.length ? `<ul>${dependencies.join('')}</ul>` : 'No recorded prerequisites')}</dl></div></details></li>`;
 }
 
-export function renderPlanReportHtml(report: PlanReport): string {
+export function renderPlanReportHtml(report: PlanReport, options: { localReview?: boolean } = {}): string {
+  const fileOnly = report.scope === transferFileAccessCheckScope;
+  const accessCheck = fileOnly || report.scope === transferAccessCheckScope;
+  const title = fileOnly ? 'Export file access check' : accessCheck ? 'Transfer access check' : 'Infrastructure plan';
   const map = buildReportMap(report.actions);
   const indexes = new Map<string, number | null>();
   report.actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
-  const stats = Object.entries(types).map(([type, label]) => {
-    const count = report.actions.filter(action => action.type === type).length;
+  const visibleTypes = Object.entries(types).filter(([type]) =>
+    (type !== 'grant' && type !== 'revoke') || report.actions.some(action => reviewType(action) === type));
+  const stats = visibleTypes.map(([type, label]) => {
+    const count = report.actions.filter(action => reviewType(action) === type).length;
     return `<div class="stat${count ? ' has-actions' : ''}" data-type="${type}"><strong>${count}</strong><span>${label}</span></div>`;
   }).join('');
   const rows = report.actions.map((action, index) =>
-    actionRow(action, index, map.groupByAction.get(action)!, indexes)).join('');
-  const { warnings, costs, next } = groupPlanNotices(report);
+    actionRow(action, index, map.groupByAction.get(action)!, indexes, accessCheck)).join('');
+  const { warnings, costs, next, detail } = groupPlanNotices(report);
   const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', warnings, 'warning')
-    + notice('Database cost and protection', costs, 'info') + notice('What happens next', next, 'info');
+    + notice('GitHub release access', report.ciReleaseAccess ?? [], 'info')
+    + notice('Database cost and protection', costs, 'info') + notice('What happens next', next, 'info', detail);
   const metadata = [
-    ['Scope', humanize(report.scope)], ['Target', report.target], ['Billing account', report.billingAccount],
-    ['Plan ID', report.planId], ['Created', report.createdAt],
-    ['Approval', report.approval === 'whole-plan' ? 'Applying this setup requires approval of the whole plan.' : undefined],
-  ].map(([label, value]) => fact(label!, value && escape(value))).join('');
+    fact('Scope', escape(humanize(report.scope))),
+    ...cloudFacts(report).map(({ label, value, href }) => typeof value === 'string' ? fact(label, href
+      ? `<a href="${escape(href)}" ${options.localReview ? 'target="_blank" rel="noopener noreferrer"' : 'rel="noreferrer"'} aria-label="${escape(label + ' ' + value)}">${escape(value)}</a>`
+      : escape(value)) : ''),
+    fact('Plan ID', escape(report.planId)), fact('Created', report.createdAt && escape(report.createdAt)),
+    fact('Approval', !options.localReview && report.approval === 'whole-plan' ? 'Approve the whole plan in the chat or terminal where you requested it.' : undefined),
+  ].join('');
   const flaggedCounts = [
     [report.actions.filter(action => action.requiresConfirm).length, 'Confirmation required'],
     [report.actions.filter(action => action.billable).length, 'May incur charges'],
     [report.actions.filter(action => action.dataBearing).length, 'Handle persistent data'],
   ].filter(([count]) => count).map(([count, label]) => `<span>${label} <b>${count}</b></span>`).join('');
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.project)} · Infrastructure plan · Hypervibe</title>
+<html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${planReportPolicy}">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.project)} · ${title} · Hypervibe</title>
 <style>${planReportStyle}</style></head><body>
 <a class="skip" href="#review">Skip to plan actions</a>
-<header class="mast"><div class="mast-inner"><div class="brand">
+${options.localReview ? '' : `<header class="mast"><div class="mast-inner"><div class="brand">
 <svg class="brand-mark" aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.3"><path d="m3 18 5-12m1 12 5-12m1 12 5-12"/></svg>
-Hypervibe <span class="brand-topic">Infrastructure plan</span></div><button id="print" class="button" data-interactive hidden>Print report</button></div></header>
+Hypervibe <span class="brand-topic">${title}</span></div><button id="print" class="button" data-interactive hidden>Print report</button></div></header>`}
 <main><div class="title-row"><h1>${escape(report.project)}</h1>${report.environment ? `<span class="environment">Environment · ${escape(report.environment)}</span>` : ''}</div>
 <dl class="meta">${metadata}</dl><div class="counts" aria-label="Action counts">${stats}</div>
 ${flaggedCounts ? `<div class="review-flags" aria-label="Actions to review">${flaggedCounts}</div>` : ''}
 ${notices ? `<section class="notices" aria-label="Plan notices">${notices}</section>` : ''}
-${mapSection(map)}
+${mapSection(map, accessCheck)}
 <section aria-labelledby="review"><div class="section-head"><h2 tabindex="-1" id="review">Plan actions</h2><span class="muted">${quantity(report.actions.length, 'action')}</span></div>
 ${rows ? `<div class="review-scope" id="selected-group" hidden><a id="back-map" class="button" href="#resource-map">← Back to map</a><strong id="group-name"></strong></div>
 <div class="tools" data-interactive hidden><label>Search actions<input type="search" id="search" placeholder="Name, field or action ID"></label>
-<label>Action type<select id="action-type"><option value="">All types</option>${Object.entries(types).map(([type, label]) => `<option value="${type}">${label}</option>`).join('')}</select></label>
+<label>Action type<select id="action-type"><option value="">All types</option>${visibleTypes.map(([type, label]) => `<option value="${type}">${label}</option>`).join('')}</select></label>
 <button class="button" id="reset" type="button">Clear filters</button></div>
 <p class="result-count" role="status" aria-live="polite" id="result-count"></p>
 <p id="empty-filter" class="empty-filter" hidden>No actions match these filters.</p><ol class="action-list">${rows}</ol>` : '<p>No actions are recorded in this plan.</p>'}

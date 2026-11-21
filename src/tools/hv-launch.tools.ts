@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { localRepositoryFor } from '../application/local-repository.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import type { CommandContext } from '../application/context.js';
-import { LAUNCH_ACCESS_IDS, launchEnvironment } from '../application/launch.js';
+import { GCP_REVIEWED_ACCESS, LAUNCH_ACCESS_IDS, launchEnvironment } from '../application/launch.js';
 import { commandError, commandSuccess, wrapCommandHandler } from '../application/results.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { projectField, envField } from './schemas.js';
@@ -14,7 +14,8 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
     {
       project: projectField,
       env: envField,
-      gcpSetupPlanId: z.string().min(1).optional().describe('Exact saved Google project setup plan ID supplied with approval after recovery.'),
+      browserAccess: z.enum(GCP_REVIEWED_ACCESS).optional().describe('Use the browser approval for this exact accessId and gcpSetupPlanId from needs_access.'),
+      gcpSetupPlanId: z.string().min(1).optional().describe('Exact saved Google Cloud setup plan ID. Use browserAccess to continue a browser-approved setup for its specific accessId.'),
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
         .describe('Exact openBillingAccounts[].name the user chose after a needs_billing_choice result.'),
       azureSubscriptionId: z.string().uuid().optional()
@@ -27,9 +28,10 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, gcpSetupPlanId, azureSubscriptionId, awsAccountId, planId, confirmActions, approveAccess }) => {
-      if (gcpSetupPlanId && (!approveAccess?.includes('gcp-setup') || !billingAccountName)) {
-        return commandError('VALIDATION', 'Use gcpSetupPlanId with the selected billing account and approval for gcp-setup.');
+    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, gcpSetupPlanId, browserAccess, azureSubscriptionId, awsAccountId, planId, confirmActions, approveAccess }) => {
+      if (browserAccess && (!gcpSetupPlanId || approveAccess?.length)) return commandError('VALIDATION', 'Pass the exact gcpSetupPlanId with browserAccess, omitting approveAccess.');
+      if (gcpSetupPlanId && (!browserAccess || browserAccess === 'gcp-setup') && !billingAccountName) {
+        return commandError('VALIDATION', 'Use gcpSetupPlanId with the billing account selected for this saved setup.');
       }
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = new SpecStore().get(project);
@@ -39,6 +41,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
         project, spec: specResult.spec, specRevision: specResult.revision, environmentName,
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
         ...(gcpSetupPlanId ? { gcpSetupPlanId } : {}),
+        ...(browserAccess && { browserAccess }),
         ...(billingAccountName ? { billingAccountName } : {}), ...(azureSubscriptionId ? { azureSubscriptionId } : {}), ...(awsAccountId ? { awsAccountId } : {}),
         ...(planId ? { planId } : {}), ...(confirmActions ? { confirmActions } : {}),
         ...(approveAccess ? { approveAccess } : {}),

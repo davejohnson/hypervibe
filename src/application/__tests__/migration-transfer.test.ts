@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { databaseManifestScript, databaseRestoreScript, databaseTransferScript, manifestsMatch, parseTransferResult, storageCheckScript, storageTransferScript } from '../migration-transfer-gcp.js';
+import { railwayExportPrefix } from '../../domain/services/railway-export-prefix.js';
 import { transferPostgresDatabase } from '../../domain/services/postgres-transfer.service.js';
 import { POSTGRES_DATABASE_IDENTITY_SQL, PostgresDatabaseIdentityError } from '../../domain/services/postgres-database-identity.js';
 
@@ -217,8 +218,8 @@ describe('signed object URLs', () => {
     const { generateKeyPairSync, createVerify } = await import('crypto');
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
     const url = new URL(signedObjectUrl({ clientEmail: 'deploy@p.iam.gserviceaccount.com', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
-      bucket: 'b', object: 'migrations/db 1.dump', method: 'PUT', expiresSeconds: 3600, now: new Date('2026-11-07T00:00:00Z') }));
-    expect(url.pathname).toBe('/b/migrations/db%201.dump');
+      bucket: 'b', object: railwayExportPrefix('production-gcp') + 'db 1.dump', method: 'PUT', expiresSeconds: 3600, now: new Date('2026-11-07T00:00:00Z') }));
+    expect(url.pathname).toBe('/b/migrations/production-gcp/db%201.dump');
     expect(url.searchParams.get('X-Goog-Expires')).toBe('3600');
     expect(url.searchParams.get('X-Goog-Credential')).toBe('deploy@p.iam.gserviceaccount.com/20261107/auto/storage/goog4_request');
     expect(url.searchParams.get('X-Goog-Signature')).toMatch(/^[0-9a-f]{512}$/);

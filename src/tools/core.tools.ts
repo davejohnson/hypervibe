@@ -414,7 +414,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
     'Read or update the desired-state ProjectSpec used by hv_plan. Omit spec to read. In a fresh git repository, that read returns a successful uninitialized contract with native runtime, lockfile/package-manager, build-script, and start-script evidence; one unambiguous concrete Node or Python selection plus reviewed install/build commands is persisted on initial write. Missing/conflicting commands, custom languages, and ambiguous projects require an explicit decision or repository Dockerfile. Later native drift is suggested for review, never applied silently. When spec is supplied, it merges by default; use replace=true for full replacement and null to delete a field. In a git worktree Hypervibe syncs .hypervibe/spec.json. Secret declarations contain ownership and targets, never values.',
     {
       project: projectField,
-      spec: z.record(z.string(), z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
+      spec: z.record(z.string(), z.unknown()).optional().describe('Full ProjectSpec or partial patch. Omit to read the current spec. Main fields are project, runtime, github, secrets, and environments; a secret may list services to reach only those services (Google Cloud only; refused elsewhere); environment resources include hosting, services, databases, caches, storage, queues, domains, email, deploy, migrations, and iOS.'),
       replace: z.boolean().optional().describe('Replace the entire spec instead of merging'),
       confirmNativeDeploy: z.boolean().optional().describe('Required when introducing deploy.trigger="native"; acknowledges provider-native deploys are provider-specific and may require external repository-app access.'),
     },
@@ -668,13 +668,13 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_plan',
-    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId, the local HTML review path (htmlPath), and a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. Optional services restricts a full plan to selected services.',
+    'Observe live infrastructure, diff it against the desired spec, and persist an executable plan. Returns planId, a browser review link (reviewUrl) and local export (htmlPath), and a compact review of non-noop actions; hv_apply requires that planId. scope="backups" reviews explicitly requested backup setup in isolated stages without deploying; ordinary full plans never require backup setup or health. scope="credentials" reviews value-preserving adoption or one replacement for a declared credential role across its exact aliases and consumers; use credential and intent. scope="database-credential-aliases" repairs declared database password references while preserving the canonical password and connection targets, without SQL changes or deployment. scope="secrets" updates only explicitly supplied delegated runtime secretRefs in one existing managed-CI environment, leaving deployment and unrelated infrastructure to separate plans. scope="retained-cleanup" isolates confirm-gated destruction of exact abandoned hosting, database, cache, and provider-declared resource identities retained through hv_import; it excludes ordinary deployment, integrations, domain, email, and repository work. Missing connections block unsafe work. Hypervibe-owned application secrets are generated automatically inside the encrypted plan boundary. Externally owned values use explicit source references or secretRefs and are never returned. Explicit environment.dns selects an existing Cloudflare, Google Cloud DNS, Route 53 or Azure DNS zone independently of hosting; its changes use a saved DNS engine stage before dependent work continues. Optional services restricts a full plan to selected services.',
     {
       project: projectField,
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. Google Cloud, AWS and Azure environments always plan infrastructure with OpenTofu; infrastructure is an explicit alias. The plan includes Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it does not release code (use hv_deploy). teardown plans removing an entire AWS or Azure environment (every resource, its files and settings; the database keeps a final snapshot); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. Google Cloud, AWS and Azure environments always plan infrastructure with OpenTofu; infrastructure is an explicit alias. The plan includes Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it does not release code (use hv_deploy). teardown plans removing an entire Google Cloud, AWS or Azure environment (every resource, its files and settings; on AWS the database keeps a final snapshot, and on Google Cloud the project setup stays); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -708,7 +708,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       if (cloudRunEnvironment && retainedExecution && scope === 'infrastructure') {
         return commandError('VALIDATION', 'An acknowledged database task needs observation or cleanup before new infrastructure. Run hv_plan without scope to recover its exact execution.', { next: ['hv_plan'] });
       }
-      if (cloudRunEnvironment && scope !== undefined && scope !== 'full' && scope !== 'infrastructure' && scope !== 'credentials') {
+      if (cloudRunEnvironment && scope !== undefined && scope !== 'full' && scope !== 'infrastructure' && scope !== 'teardown' && scope !== 'credentials') {
         return commandError('VALIDATION', `scope="${scope}" is not supported for Cloud Run environments. Run hv_plan without scope to review OpenTofu infrastructure.`, { next: ['hv_plan'] });
       }
       // AWS and Azure plan through the engine by default too; their other scopes keep their own planners.
@@ -725,7 +725,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         // AWS keeps final-snapshot cleanup reachable after its environment has left the spec.
         const teardown = (cloudEngineFor(specResult.spec, environmentName) ?? (specResult.spec.environments[environmentName] ? undefined : awsEngine))?.planTeardown;
         if (scope === 'teardown' && !teardown) {
-          return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed AWS and Azure environments only.', { next: ['hv_spec'] });
+          return commandError('VALIDATION', 'Teardown is available for OpenTofu-managed Google Cloud, AWS and Azure environments only.', { next: ['hv_spec'] });
         }
         if (scope !== 'teardown') validateInstalledProviders(specResult.spec, environmentName);
         const plannerParams = { project, spec: specResult.spec, specRevision: specResult.revision, environmentName };
@@ -1065,7 +1065,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
               ...row?.runtime, ...(row?.reason ? { reason: row.reason } : {}) };
           });
           const workers = workloads.filter(row => row.kind === 'worker').map(row => ({ ...row,
-            mode: envSpec.services[row.service]!.onDemand ? 'on-demand' : 'always-on' }));
+            mode: envSpec.services[row.service]!.workerPaused ? 'pause-requested' : envSpec.services[row.service]!.onDemand ? 'on-demand' : 'always-on',
+            ...(row.desired !== undefined ? { instances: row.desired } : {}) }));
           return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers, workloads, ...retained, ...(database ? { database } : {}) }, {
             warnings: workloads.filter(row => row.activity === 'unknown').map(row => `Current activity for ${row.service} is unknown.`),
             hint: 'Run hv_health for deployment health or hv_plan scope="infrastructure" for drift.',
@@ -1514,13 +1515,15 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
 
   commands.register(
     'hv_apply',
-    'Apply a plan produced by hv_plan. Rejects stale plans (spec changed, infrastructure changed, plan expired, or already applied). Any consequential confirmation-gated action runs only when its exact action id is passed in confirmActions.',
+    'Apply a saved current plan. Pass useBrowserApproval=true to require its exact saved browser approval, or provide the confirmed action IDs. Existing scope, expiry and staleness checks still apply.',
     {
       project: projectField,
       planId: z.string().describe('Plan id returned by hv_plan'),
+      useBrowserApproval: z.boolean().optional().describe('Use the approval recorded in the browser for this exact plan. Omit confirmActions when using this option.'),
       confirmActions: z.array(z.string()).optional().describe('Exact action ids for consequential confirmation-gated changes such as purchases, deletion, or an application-secret rotation.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, planId, confirmActions }) => {
+    wrapCommandHandler(async ({ project: projectRef, planId, confirmActions, useBrowserApproval }) => {
+      if (useBrowserApproval && confirmActions) return commandError('VALIDATION', 'Use the browser approval or supply explicitly confirmed action IDs.');
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
       const specResult = specStore.get(project);
       if (!specResult) {
@@ -1532,6 +1535,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         specRevision: specResult.revision,
         planId,
         confirmActions: confirmActions ?? [],
+        ...(useBrowserApproval && { useBrowserApproval: true }),
       });
 
       if (outcome.kind === 'invalid_spec') {
@@ -1559,6 +1563,10 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         });
       }
       if (outcome.kind === 'blocked') {
+        if (outcome.reviewPlanId) return commandError('VALIDATION', 'This exact saved plan has no current browser approval.', {
+          details: { planId: outcome.reviewPlanId }, hint: 'Open its review to see its current status. An expired or changed plan needs a new review.',
+          next: ['hv_runs'],
+        });
         const recovery = planBlockRecovery(outcome.applyBlocked, { project: project.name, gitRemoteUrl: project.gitRemoteUrl,
           connectionAfter: 'Then re-run hv_plan and hv_apply.', connectionNext: ['hv_connections', 'hv_plan', 'hv_apply'] });
         return commandError(recovery.code, recovery.message, recovery);

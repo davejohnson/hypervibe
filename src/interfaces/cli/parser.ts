@@ -274,6 +274,7 @@ export function rootHelp(registry: CommandRegistry): string {
     '',
     'Commands:',
     '  install <client>             Install skill + MCP for codex, claude, or opencode with npx.',
+    '  reviews                      Open saved plans, approvals and test results in your browser.',
   ];
   for (const command of registry.list().sort((a, b) => a.cliPath.join(' ').localeCompare(b.cliPath.join(' ')))) {
     const summary = command.description.split('\n')[0];

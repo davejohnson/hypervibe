@@ -1,3 +1,4 @@
+import { awsImageBuildspec } from '../aws-buildspec.js';
 import { awsDatabaseQuerySecretName } from '../aws-database-query-secret.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { addTasks } from './aws-engine.tasks.js';
@@ -12,6 +13,7 @@ import { addAwsCiConfiguration } from './aws-engine-ci.config.js';
  */
 export interface AwsEngineInput {
   ci?: EngineCiIntent;
+  webCommands?: boolean;
   accountId: string;
   region: string;
   /** Short stable prefix for physical names, e.g. `hv-billforge-aws`. */
@@ -48,6 +50,7 @@ export interface AwsTaskInput {
 }
 
 export interface AwsWorkerInput extends AwsTaskInput {
+  paused?: boolean;
   /** Run only while this read-only count of pending work is above zero (uses the Aurora Data API). */
   pendingWorkQuery?: string;
   /** Earliest time future work is due; the waker sets a one-time wake for it so a paused database can stay paused. */
@@ -355,13 +358,7 @@ function addBuilds(input: AwsEngineInput, files: Record<string, unknown>, resour
       environment: [{ compute_type: 'BUILD_GENERAL1_SMALL', image: 'aws/codebuild/amazonlinux-x86_64-standard:5.0', type: 'LINUX_CONTAINER', privileged_mode: true,
         environment_variable: [{ name: 'REGISTRY', value: '${aws_ecr_repository.images.repository_url}' }] }],
       // Hypervibe uploads source.zip with its generated Dockerfile and starts builds with an IMAGE_TAG override.
-      source: [{ type: 'S3', location: `${input.prefix}-build-${input.accountId}/source.zip`, buildspec: JSON.stringify({
-        version: '0.2',
-        phases: {
-          pre_build: { commands: ['aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY%%/*}"'] },
-          build: { commands: ['if [ -n "${NPM_TOKEN:-}" ]; then set -- --secret id=npm_token,env=NPM_TOKEN; else set --; fi; docker build "$@" --platform linux/amd64 -f "${DOCKERFILE:-Dockerfile}" -t "$REGISTRY:$IMAGE_TAG" .', 'docker push "$REGISTRY:$IMAGE_TAG"'] },
-        },
-      }).replace(/\$\{/g, () => '$${') }],
+      source: [{ type: 'S3', location: `${input.prefix}-build-${input.accountId}/source.zip`, buildspec: JSON.stringify(awsImageBuildspec(input.webCommands)).replace(/\$\{/g, () => '$${') }],
       logs_config: [{ cloudwatch_logs: [{ status: 'ENABLED', group_name: `/hypervibe/${input.prefix}/builds` }] }],
     } },
   } };

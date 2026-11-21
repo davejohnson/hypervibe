@@ -46,8 +46,8 @@ code, .mono { font: .89em/1.45 ui-monospace, "SFMono-Regular", Consolas, monospa
 .stat span { color: var(--muted); }
 .review-flags { display: flex; gap: 6px 22px; flex-wrap: wrap; color: var(--muted); padding-top: 10px; font-size: .84rem; }
 .review-flags b { color: var(--text); margin-left: 3px; font-variant-numeric: tabular-nums; }
-[data-type="create"] { --status: #8ce2bb; } [data-type="update"] { --status: #a6c7ed; }
-[data-type="replace"] { --status: #f4c481; } [data-type="destroy"] { --status: #ffa29d; }
+[data-type="create"], [data-type="grant"] { --status: #8ce2bb; } [data-type="update"] { --status: #a6c7ed; }
+[data-type="replace"] { --status: #f4c481; } [data-type="destroy"], [data-type="revoke"] { --status: #ffa29d; }
 [data-type="noop"] { --status: #aab7bc; }
 .stat.has-actions strong, .status { color: var(--status); }
 section { margin-top: 30px; }

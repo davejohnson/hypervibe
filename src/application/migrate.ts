@@ -1,3 +1,4 @@
+import { browserApprovedRunActions } from './browser-approved-run.js';
 import { acquireMigrationTargetLease, type MigrationTargetLease } from '../adapters/db/migration-target-lease.js';
 import { cloudEngineFor } from './cloud-engines.js';
 import { engineSecretStore } from './engine-secrets.js';
@@ -32,6 +33,7 @@ import {
   type MigrationCopyEvidence,
 } from './infrastructure-engine.js';
 import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
+import { railwayExportPrefix } from '../domain/services/railway-export-prefix.js';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import {
@@ -243,6 +245,7 @@ interface MigrateParams {
   domain?: string;
   billingAccountName?: string;
   gcpSetupPlanId?: string;
+  browserAccess?: string;
   approveAccess?: string[];
   confirmActions?: string[];
   planId?: string;
@@ -286,7 +289,7 @@ export async function migrateEnvironment(ctx: CommandContext, params: MigratePar
     if ('blocked' in source) return { status: 'blocked', message: source.blocked };
     const { specResult, sourceEnvironment } = source;
     if (params.copyData || params.refreshData || params.cutover || params.confirmCutover || params.verifyOnly
-      || params.importSecrets || params.approveAccess?.length || params.gcpSetupPlanId || params.billingAccountName || params.domain || params.region || params.gcpProjectId) {
+      || params.importSecrets || params.approveAccess?.length || params.browserAccess || params.gcpSetupPlanId || params.billingAccountName || params.domain || params.region || params.gcpProjectId) {
       return { status: 'blocked', message: 'Review the source inspection separately from target changes, data transfer and cutover.' };
     }
     if (suppliedPlan && params.planId) {
@@ -367,6 +370,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     project: params.project, spec, specRevision: specResult.revision, environmentName: params.to,
     ...(params.billingAccountName ? { billingAccountName: params.billingAccountName } : {}),
     ...(params.gcpSetupPlanId ? { gcpSetupPlanId: params.gcpSetupPlanId } : {}),
+    ...(params.browserAccess && { browserAccess: params.browserAccess }),
     ...(params.approveAccess ? { approveAccess: params.approveAccess } : {}),
     ...(!sourcePlanApproval && params.planId ? { planId: params.planId } : {}),
     ...(!sourcePlanApproval && params.confirmActions ? { confirmActions: params.confirmActions } : {}),
@@ -685,7 +689,7 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
 
   const key = JSON.parse(context.adapter.engineConnection().credentials) as { client_email: string; private_key: string };
   const bucket = buildSourceBucketName(context.gcpProjectId);
-  const object = `migrations/${params.to}/${Date.now()}.dump`;
+  const object = `${railwayExportPrefix(params.to)}${Date.now()}.dump`;
   const sign = (method: 'PUT' | 'GET') => signedObjectUrl({ clientEmail: key.client_email, privateKey: key.private_key, bucket, object, method, expiresSeconds: 3600 });
   // The newest client reads every supported older server.
   const exported = await railway.adapter.runPrivateTask({
@@ -731,6 +735,7 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
         return { status: 'blocked', message: 'The saved source plan no longer matches this project, environment and spec. Review a new cutover plan.' };
       }
       reviewed = { planId, actions: loaded.document.actions };
+      if (confirmActions === undefined) confirmActions = browserApprovedRunActions(loaded.run, project.id);
     }
   }
 

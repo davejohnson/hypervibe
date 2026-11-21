@@ -12,11 +12,12 @@ export interface GitHubOidcContext {
 /** Authenticated, exact-bound image-only release capability. No infrastructure methods. */
 export interface EngineCiReleaseTarget {
   cloudName: string; buildPhrase: string; format: 'zip' | 'tar.gz'; dockerfileName: string;
+  missingDockerfileMessage?: string;
   addFiles?: Record<string, string>;
   dockerfileFor(params: { repositoryDockerfile?: string; runtime?: ProjectRuntime; startCommand?: string }): string;
   /** Verify every bound native workload before uploading source or starting a build. */
-  preflight(): Promise<void>;
-  build(source: LocalCommitSource): Promise<{ image: string; logsUrl?: string } | { error: string; unknown?: boolean; logsUrl?: string }>;
+  preflight(): Promise<void | { blocked: string }>;
+  build(source: LocalCommitSource): Promise<{ image: string; imagesByService?: Record<string, string>; logsUrl?: string } | { error: string; unknown?: boolean; logsUrl?: string }>;
   releaseWorkload(workload: { name: string; kind: string; resource: string; image: string }): Promise<EngineReleaseResult>;
   /** Private values used solely for redaction before receipt persistence. */
   redact: string[];

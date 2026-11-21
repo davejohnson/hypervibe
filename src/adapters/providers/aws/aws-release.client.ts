@@ -1,5 +1,7 @@
+import { isDeepStrictEqual } from 'node:util';
+import { awsImageBuildspec } from './aws-buildspec.js';
 import { healthCheckFailed } from '../../../domain/services/release-health.js';
-import { BatchGetBuildsCommand, CodeBuildClient, StartBuildCommand, type CodeBuildClientConfig } from '@aws-sdk/client-codebuild';
+import { BatchGetBuildsCommand, BatchGetProjectsCommand, CodeBuildClient, StartBuildCommand, type CodeBuildClientConfig } from '@aws-sdk/client-codebuild';
 import { DescribeImagesCommand, ECRClient } from '@aws-sdk/client-ecr';
 import {
   DescribeExpressGatewayServiceCommand, DescribeServiceDeploymentsCommand, DescribeServicesCommand, DescribeTaskDefinitionCommand, ECSClient, RegisterTaskDefinitionCommand,
@@ -33,12 +35,18 @@ export interface AwsReleaseTarget {
 export const RDS_CA_BUNDLE_URL = 'https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem';
 const RDS_CA_PATH = '/opt/hypervibe/rds-ca.pem';
 /** What Hypervibe adds to the image is part of its identity, even when the repository commit is unchanged. */
-export const awsImageTag = (commitSha: string): string => `${commitSha}-hv3`;
+export const awsImageTag = (commitSha: string, webCommand = false): string => `${commitSha}-${webCommand ? 'hv-web1' : 'hv3'}`;
+export const usesAwsWebCommand = (service: { workloadKind?: string; startCommand?: string }) =>
+  (service.workloadKind ?? 'web') === 'web' && Boolean(service.startCommand);
+export function awsRequiredDockerfile(services: Array<{ workloadKind?: string; startCommand?: string }>): string | undefined {
+  return services.some(service => (service.workloadKind ?? 'web') === 'web' && !service.startCommand)
+    ? 'A web service without startCommand needs a repository Dockerfile with its own startup command. Declare its startCommand or add the Dockerfile before releasing.'
+    : undefined;
+}
 export const AWS_DOCKERFILE = '.hypervibe-aws.Dockerfile';
 
 /**
- * One image serves every workload: the repository's Dockerfile (or the generated
- * one) plus the RDS certificate authorities. Generated images pull their base from ECR Public, avoiding Docker Hub
+ * The base image uses the repository's Dockerfile (or the generated one) plus the RDS certificate authorities. Generated images pull their base from ECR Public, avoiding Docker Hub
  * pull limits on shared CodeBuild hosts.
  */
 export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; runtime?: ProjectRuntime; startCommand?: string }): string {
@@ -58,24 +66,73 @@ export function awsReleaseDockerfile(params: { repositoryDockerfile?: string; ru
 /** One packaged commit: its SHA and the source archive to build. */
 export interface AwsBuildSource { commitSha: string; archive: Buffer }
 
-/** Uploads the commit, builds it in CodeBuild and returns the digest-pinned image. */
-export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSource, transport: Pick<CodeBuildClientConfig, 'requestHandler'> = {}): Promise<{ imageUri: string; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }> {
+export interface AwsBuildTarget extends AwsReleaseTarget {
+  environmentId: string;
+  webCommands?: boolean;
+}
+
+const registryUrl = (target: AwsReleaseTarget) => target.repositoryUrl ?? `${target.accountId}.dkr.ecr.${target.region}.amazonaws.com/${target.prefix}`;
+const buildProjectArn = (target: AwsReleaseTarget) => target.buildProjectArn ?? `arn:aws:codebuild:${target.region}:${target.accountId}:project/${target.prefix}-images`;
+const buildBucket = (target: AwsReleaseTarget) => target.sourceBucket ?? `${target.prefix}-build-${target.accountId}`;
+const buildProjectError = 'AWS could not confirm the managed build project configuration for this release. Review hv_plan scope="infrastructure" and apply the build project update before retrying.';
+
+export async function inspectAwsBuildProject(target: AwsBuildTarget, codebuild: CodeBuildClient): Promise<{ webCommands: boolean } | { error: string }> {
+  try {
+    const arn = buildProjectArn(target);
+    const response = await codebuild.send(new BatchGetProjectsCommand({ names: [arn] }));
+    const project = response.projects?.[0];
+    const tags = Object.fromEntries((project?.tags ?? []).map(tag => [tag.key, tag.value]));
+    const registries = project?.environment?.environmentVariables?.filter(variable => variable.name === 'REGISTRY');
+    if (response.projectsNotFound?.length || response.projects?.length !== 1 || project?.arn !== arn
+      || tags['managed-by'] !== 'hypervibe' || tags['hv-environment'] !== target.environmentId.toLowerCase()
+      || project.serviceRole !== `arn:aws:iam::${target.accountId}:role/hypervibe/app/${target.prefix}-build`
+      || project.environment?.type !== 'LINUX_CONTAINER' || project.environment.privilegedMode !== true
+      || project.source?.type !== 'S3' || project.source.location !== `${buildBucket(target)}/source.zip`
+      || registries?.length !== 1 || (registries[0]?.type ?? 'PLAINTEXT') !== 'PLAINTEXT' || registries[0]?.value !== registryUrl(target)) return { error: buildProjectError };
+    const recipe: unknown = JSON.parse(project.source.buildspec ?? '');
+    if (isDeepStrictEqual(recipe, awsImageBuildspec(true))) return { webCommands: true };
+    if (isDeepStrictEqual(recipe, awsImageBuildspec(false))) return { webCommands: false };
+  } catch { /* An unreadable or unfamiliar project cannot authorize a build. */ }
+  return { error: buildProjectError };
+}
+
+export interface AwsBuiltImages { imageUri: string; webImageUri?: string; logsUrl?: string }
+export function awsWorkloadImages(built: AwsBuiltImages, webOverrides: string[]) {
+  const { webImageUri } = built;
+  return { image: built.imageUri, ...(webImageUri ? { imagesByService: Object.fromEntries(webOverrides.map(name => [name, webImageUri])) } : {}),
+    ...(built.logsUrl ? { logsUrl: built.logsUrl } : {}) };
+}
+export type AwsBuildResult = AwsBuiltImages | { error: string; logsUrl?: string; unknown?: boolean };
+
+/** Reuse immutable images and request only missing outputs from one managed build. */
+export async function buildImage(target: AwsBuildTarget, source: AwsBuildSource, transport: Pick<CodeBuildClientConfig, 'requestHandler'> = {},
+  inspectedProject?: { webCommands: boolean }): Promise<AwsBuildResult> {
   const { region, credentials } = target;
   if (target.deadlineMs && Date.now() >= target.deadlineMs) return { error: 'The release deadline elapsed before the build started.' };
-  const bucket = target.sourceBucket ?? `${target.prefix}-build-${target.accountId}`;
+  const bucket = buildBucket(target);
   const key = `sources/${source.commitSha}.zip`;
-  // Tags are immutable: a commit that was already built is released from its existing image.
-  const ecr = new ECRClient({ ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}), ...transport, region, credentials });
-  const existing = await imageFor(ecr, target, awsImageTag(source.commitSha));
-  if (existing) return { imageUri: existing };
-  await new S3Client({ ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}), ...transport, region, credentials }).send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: source.archive, ContentType: 'application/zip' }));
-  const codebuild = new CodeBuildClient({ ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}), ...transport, region, credentials });
+  const options = { ...(target.requestTimeoutMs ? { requestHandler: { requestTimeout: target.requestTimeoutMs, connectionTimeout: 5000 } } : {}), ...transport, region, credentials };
+  const ecr = new ECRClient(options);
+  const tag = awsImageTag(source.commitSha);
+  const webTag = awsImageTag(source.commitSha, true);
+  let imageUri = await imageFor(ecr, target, tag);
+  let webImageUri = target.webCommands ? await imageFor(ecr, target, webTag) : undefined;
+  const buildWeb = target.webCommands && !webImageUri;
+  if (imageUri && !buildWeb) return { imageUri, ...(webImageUri ? { webImageUri } : {}) };
+  const codebuild = new CodeBuildClient(options);
+  const project = inspectedProject ?? await inspectAwsBuildProject(target, codebuild);
+  if ('error' in project || (buildWeb && !project.webCommands)) return { error: buildProjectError };
+  await new S3Client(options).send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: source.archive, ContentType: 'application/zip' }));
   if (target.deadlineMs && Date.now() >= target.deadlineMs) return { error: 'The release deadline elapsed after uploading source; no build was started.' };
   let started;
   try { started = await codebuild.send(new StartBuildCommand({
-    projectName: target.buildProjectArn ?? `${target.prefix}-images`, sourceTypeOverride: 'S3', sourceLocationOverride: `${bucket}/${key}`,
+    projectName: buildProjectArn(target), sourceTypeOverride: 'S3', sourceLocationOverride: `${bucket}/${key}`,
     environmentVariablesOverride: [
-      { name: 'IMAGE_TAG', value: awsImageTag(source.commitSha), type: 'PLAINTEXT' },
+      { name: 'IMAGE_TAG', value: tag, type: 'PLAINTEXT' },
+      ...(project.webCommands ? [
+        { name: 'SKIP_DEFAULT_IMAGE', value: imageUri ? '1' : '0', type: 'PLAINTEXT' as const },
+        { name: 'WEB_IMAGE_TAG', value: buildWeb ? webTag : '', type: 'PLAINTEXT' as const },
+      ] : []),
       { name: 'DOCKERFILE', value: AWS_DOCKERFILE, type: 'PLAINTEXT' },
       { name: 'DOCKER_BUILDKIT', value: '1', type: 'PLAINTEXT' },
       ...(target.packageTokenParameter ? [{ name: 'NPM_TOKEN', value: target.packageTokenParameter, type: 'PARAMETER_STORE' as const }] : []),
@@ -99,15 +156,20 @@ export async function buildImage(target: AwsReleaseTarget, source: AwsBuildSourc
   }
   if (status === 'IN_PROGRESS') return { error: 'The image build is still running.', logsUrl, unknown: true };
   if (status !== 'SUCCEEDED') return { error: `The image build ${String(status ?? 'failed').toLowerCase()}; see its log.`, logsUrl };
-  const imageUri = await imageFor(ecr, target, awsImageTag(source.commitSha));
-  if (!imageUri) return { error: 'The build finished without an image digest; refusing to release a mutable tag.', logsUrl };
-  return { imageUri, logsUrl };
+  imageUri ??= await imageFor(ecr, target, tag);
+  if (buildWeb) webImageUri = await imageFor(ecr, target, webTag);
+  if (!imageUri || (target.webCommands && !webImageUri)) return { error: 'The build did not publish each expected immutable image.', logsUrl };
+  return { imageUri, ...(webImageUri ? { webImageUri } : {}), logsUrl };
 }
 
 async function imageFor(ecr: ECRClient, target: AwsReleaseTarget, tag: string): Promise<string | undefined> {
   try {
-    const digest = (await ecr.send(new DescribeImagesCommand({ repositoryName: target.prefix, imageIds: [{ imageTag: tag }] }))).imageDetails?.[0]?.imageDigest;
-    return digest && /^sha256:[0-9a-f]{64}$/.test(digest) ? `${target.repositoryUrl ?? `${target.accountId}.dkr.ecr.${target.region}.amazonaws.com/${target.prefix}`}@${digest}` : undefined;
+    const result = await ecr.send(new DescribeImagesCommand({ repositoryName: target.prefix, imageIds: [{ imageTag: tag }] }));
+    const detail = result.imageDetails?.[0];
+    if (result.imageDetails?.length !== 1 || !detail?.imageTags?.includes(tag) || !/^sha256:[0-9a-f]{64}$/.test(detail.imageDigest ?? '')) {
+      throw new Error('AWS did not confirm the requested immutable image or its absence.');
+    }
+    return `${registryUrl(target)}@${detail.imageDigest}`;
   } catch (error) {
     if (error instanceof Error && error.name === 'ImageNotFoundException') return undefined;
     throw error;
@@ -134,11 +196,16 @@ const ROLLED_BACK = new Set(['ROLLBACK_REQUESTED', 'ROLLBACK_IN_PROGRESS', 'ROLL
  * checks, and rolls the release back by itself if they fail. The release is
  * reported only when AWS confirms the rollout finished on the new image.
  */
-export async function releaseWebService(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string, strictHealth = false, pollMs = 10_000): Promise<EngineReleaseResult> {
+export async function releaseWebService(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, healthCheckPath: string, strictHealth = false, pollMs = 10_000, startCommand?: string): Promise<EngineReleaseResult> {
   const ecs = ecsClient(target);
   const serviceArn = awsWebServiceArn(target, resource);
   const read = async () => (await ecs.send(new DescribeExpressGatewayServiceCommand({ serviceArn }))).service;
-  const running = (service: ECSExpressGatewayService | undefined) => (service?.activeConfigurations ?? []).length === 1 && service!.activeConfigurations![0]!.primaryContainer?.image === imageUri;
+  const command = startCommand ? ['sh', '-c', startCommand] : [];
+  const running = (service: ECSExpressGatewayService | undefined) => {
+    const configurations = service?.activeConfigurations ?? [];
+    const container = configurations[0]?.primaryContainer;
+    return configurations.length === 1 && container?.image === imageUri && JSON.stringify(container.command ?? []) === JSON.stringify(command);
+  };
   let current = await read();
   if (current?.serviceArn !== serviceArn || current.status?.statusCode !== 'ACTIVE') return { service: name, status: 'unknown', message: 'AWS did not confirm the exact active web service before release.' };
   const deadline = target.deadlineMs ?? Date.now() + 20 * 60_000;
@@ -153,7 +220,7 @@ export async function releaseWebService(target: AwsReleaseTarget, name: string, 
     if (configurations.length !== 1 || !configurations[0]!.primaryContainer) return { service: name, status: 'unknown', message: `${name} is still rolling out an earlier release; try again when it finishes.` };
     if (Date.now() + 30_000 >= deadline) return { service: name, status: 'unknown', message: 'The release deadline elapsed before updating the web service.' };
     const before = current.currentDeployment;
-    await ecs.send(new UpdateExpressGatewayServiceCommand({ serviceArn, primaryContainer: { ...configurations[0]!.primaryContainer, image: imageUri } }));
+    await ecs.send(new UpdateExpressGatewayServiceCommand({ serviceArn, primaryContainer: { ...configurations[0]!.primaryContainer, image: imageUri, command } }));
     let deployment: string | undefined;
     let finished = false;
     let succeeded = false;
@@ -195,14 +262,19 @@ export async function releaseWebService(target: AwsReleaseTarget, name: string, 
  * engine-managed settings of the latest revision) and moves the worker to it.
  * Scheduled jobs reference the family, so their next run uses the new revision.
  */
-export async function releaseTask(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, worker: boolean, exact?: { clusterArn: string; taskDefinitionArn: string; serviceArn?: string }): Promise<EngineReleaseResult> {
+export async function releaseTask(target: AwsReleaseTarget, name: string, resource: string, imageUri: string, worker: boolean, exact?: { clusterArn: string; taskDefinitionArn: string; serviceArn?: string }, web?: { startCommand?: string }): Promise<EngineReleaseResult> {
   const ecs = ecsClient(target);
   const described = await ecs.send(new DescribeTaskDefinitionCommand({ taskDefinition: exact?.taskDefinitionArn ?? resource, include: ['TAGS'] }));
   const latest = described.taskDefinition;
   if (exact && latest?.taskDefinitionArn !== exact.taskDefinitionArn) return { service: name, status: 'unknown', message: 'AWS did not confirm the exact bound task definition before release.' };
   if (!latest?.containerDefinitions?.length) return { service: name, status: 'failed', message: `Task family ${resource} was not found. Run hv_plan scope="infrastructure" and hv_apply.` };
+  const app = latest.containerDefinitions.find(container => container.name === 'app');
+  if (!app) return { service: name, status: 'unknown', message: 'AWS did not confirm the application container in the task definition.' };
+  const { entryPoint: _entryPoint, command: _command, ...imageDefaults } = app;
+  const releasedApp = web ? { ...imageDefaults, image: imageUri, ...(web.startCommand ? { command: ['sh', '-c', web.startCommand] } : {}) }
+    : { ...app, image: imageUri };
   const input: RegisterTaskDefinitionCommandInput = {
-    family: latest.family!, containerDefinitions: latest.containerDefinitions.map((container) => container.name === 'app' ? { ...container, image: imageUri } : container),
+    family: latest.family!, containerDefinitions: latest.containerDefinitions.map((container) => container.name === 'app' ? releasedApp : container),
     ...(latest.taskRoleArn ? { taskRoleArn: latest.taskRoleArn } : {}), ...(latest.executionRoleArn ? { executionRoleArn: latest.executionRoleArn } : {}),
     ...(latest.networkMode ? { networkMode: latest.networkMode } : {}), ...(latest.requiresCompatibilities ? { requiresCompatibilities: latest.requiresCompatibilities } : {}),
     ...(latest.cpu ? { cpu: latest.cpu } : {}), ...(latest.memory ? { memory: latest.memory } : {}), ...(latest.runtimePlatform ? { runtimePlatform: latest.runtimePlatform } : {}),
@@ -217,7 +289,9 @@ export async function releaseTask(target: AwsReleaseTarget, name: string, resour
   await ecs.send(new UpdateServiceCommand({ cluster: exact?.clusterArn ?? target.prefix, service: exact?.serviceArn ?? resource, taskDefinition: registered }));
   const service = (await ecs.send(new DescribeServicesCommand({ cluster: exact?.clusterArn ?? target.prefix, services: [exact?.serviceArn ?? resource] }))).services?.[0];
   if (service?.taskDefinition !== registered || exact && (service?.serviceArn !== exact.serviceArn || service.clusterArn !== exact.clusterArn)) return { service: name, imageUri, status: 'unknown', message: `${resource} did not report the new revision.` };
-  return { service: name, imageUri, taskDefinitionArn: registered, status: 'released', message: service.desiredCount ? `Released to ${resource}; its tasks are being replaced.` : `Released to ${resource}; it starts with the new image when work is queued.` };
+  return { service: name, imageUri, taskDefinitionArn: registered, status: 'released', message: service.desiredCount === 0
+    ? `Released to ${resource} at zero desired tasks. The next task will use the new image.`
+    : `Updated the task definition for ${resource}.` };
 }
 
 /** Whether a web service exists: a public one through Express Mode, a private one as an ordinary service. */

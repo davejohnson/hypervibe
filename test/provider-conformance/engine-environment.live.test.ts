@@ -8,10 +8,11 @@ import { AwsEngineCredentialsSchema } from '../../src/adapters/providers/aws/aws
 import { awsEngineAuthentication } from '../../src/adapters/providers/aws/tofu/aws-engine.backend.js';
 import { AzureEngineCredentialsSchema } from '../../src/adapters/providers/azure/azure-engine.adapter.js';
 import { AzureTokens } from '../../src/adapters/providers/azure/azure-ops.client.js';
+import { CloudRunAdapter, CloudRunCredentialsSchema } from '../../src/adapters/providers/gcp/cloudrun.adapter.js';
 import { getSecretStore, SecretStore } from '../../src/adapters/secrets/secret-store.js';
 import { assertFixtureLifecycleConsent, readFixtureTarget } from './fixture-authorization.js';
-import { engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
-  readAzureDatabaseExposure, readAzureInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
+import { ENGINE_FIXTURE_ENTRYPOINT, engineFixtureEntrypointDockerfile, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAwsContainerTrouble, readAwsDatabaseExposure, readAwsInventory, sampleAwsWebRelease,
+  readAzureDatabaseExposure, readAzureInventory, readGcpDatabaseExposure, readGcpInventory, sinceBaseline, type DatabaseExposure, type EngineFixtureCloud } from './engine-fixture.js';
 import { readFixtureJournal, resourceKey, runDisposableFixture, saveFixtureJournal, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
 
@@ -44,12 +45,12 @@ async function processOutput(executable: string, args: string[], cwd: string, da
 }
 
 /**
- * AWS and Azure testing environment with a web service, a worker and a database.
- * Every change goes through the installed CLI; the provider calls here only read.
- * Leftovers are found by comparing everything in the dedicated account region
- * (AWS) or project resource group (Azure) with what was there before the run.
+ * AWS, Azure and Google Cloud testing environment with a web service, workers, a scheduled job,
+ * file storage and a database. Every change goes through the installed CLI; the provider calls
+ * here only read. Leftovers are found by comparing what the dedicated account region (AWS),
+ * project resource group (Azure) or Google project holds with what was there before the run.
  */
-live('AWS and Azure engine disposable environment fixture', () => {
+live('AWS, Azure and Google Cloud engine disposable environment fixture', () => {
   it(process.env.HYPERVIBE_LIVE_CLEANUP_ONLY === '1' ? 'resumes teardown without claiming full lifecycle proof'
     : process.env.HYPERVIBE_LIVE_MODE !== 'run' ? 'shows the first plan without applying or claiming live lifecycle proof'
     : 'creates, serves, keeps the database off the internet, noops, updates and leaves nothing behind', async () => {
@@ -77,23 +78,38 @@ live('AWS and Azure engine disposable environment fixture', () => {
     try {
       const project = db.prepare('SELECT id, git_remote_url FROM projects WHERE name = ?').get(projectName) as { id: string; git_remote_url?: string } | undefined;
       if (!project) throw new Error('The dedicated test project does not exist in HYPERVIBE_LIVE_DATA_DIR.');
+      // Google connections belong to a GitHub repository. A project that has not applied yet carries that identity only in its spec.
+      if (!project.git_remote_url) {
+        const stored = db.prepare('SELECT document FROM project_specs WHERE project_id = ? ORDER BY revision DESC LIMIT 1').get(project.id) as { document: string } | undefined;
+        const remote = stored ? (JSON.parse(stored.document) as Json).gitRemoteUrl : undefined;
+        if (typeof remote === 'string' && remote) project.git_remote_url = remote;
+      }
       const repository = project.git_remote_url?.replace(/^.*github\.com[/:]/, '').replace(/\.git$/, '').replace(/\/$/, '') || projectName;
 
       // The saved deploy access, matched to the marker's exact account or subscription before any call.
       process.env.HYPERVIBE_DATA_DIR = dataDir; SecretStore.resetInstance();
       const marker = JSON.parse(readFileSync(markerFile, 'utf8')) as Json;
-      const connections = (db.prepare('SELECT credentials_encrypted FROM connections WHERE provider = ? AND status = ?').all(cloud, 'verified') as Array<{ credentials_encrypted: string }>)
+      const connections = (db.prepare('SELECT credentials_encrypted FROM connections WHERE provider = ? AND status = ?').all(cloud === 'gcp' ? 'cloudrun' : cloud, 'verified') as Array<{ credentials_encrypted: string }>)
         .map((row) => { try { return getSecretStore().decryptObject(row.credentials_encrypted) as Json; } catch { return undefined; } });
       const aws = cloud === 'aws' ? connections.map((value) => AwsEngineCredentialsSchema.safeParse(value)).find((parsed) => parsed.success && parsed.data.accountId === marker.nativeProjectId)?.data : undefined;
       const azure = cloud === 'azure' ? connections.map((value) => AzureEngineCredentialsSchema.safeParse(value)).find((parsed) => parsed.success && parsed.data.subscriptionId === marker.nativeProjectId)?.data : undefined;
-      const connection = aws ?? azure;
+      const gcp = cloud === 'gcp' ? connections.map((value) => CloudRunCredentialsSchema.safeParse(value)).find((parsed) => parsed.success && parsed.data.projectId === marker.nativeProjectId)?.data : undefined;
+      const connection = aws ?? azure ?? gcp;
       if (!connection) throw new Error(`No verified Hypervibe ${cloud} connection matches the marker's account. Connect the dedicated test account through Hypervibe first.`);
       readFixtureTarget(markerFile, { profile: profile.id, project: projectName, internalProjectId: project.id, repository,
-        nativeProjectId: aws?.accountId ?? azure!.subscriptionId, region: aws?.region ?? azure!.location });
+        // A Google connection has no region of its own; the marker names the one the fixture uses.
+        nativeProjectId: aws?.accountId ?? azure?.subscriptionId ?? gcp!.projectId, region: aws?.region ?? azure?.location ?? marker.region });
+
+      let google: { projectId: string; region: string; token: () => Promise<string> } | undefined;
+      if (gcp) {
+        const adapter = new CloudRunAdapter(); await adapter.connect(gcp); adapter.configureTarget({ region: marker.region });
+        google = { projectId: gcp.projectId, region: marker.region, token: () => adapter.engineAccessToken() };
+      }
 
       const tokens = azure ? new AzureTokens(azure) : undefined;
       const inventoryNow = async (): Promise<NativeFixtureResource[]> => {
         if (azure) return readAzureInventory(tokens!, azure.subscriptionId, azure.resourceGroup);
+        if (google) return readGcpInventory(google);
         const auth = await awsEngineAuthentication(aws!); // One-hour role credentials; taken fresh for each read.
         return readAwsInventory({ region: aws!.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } });
       };
@@ -103,6 +119,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
           if (servers.length !== 1) throw new Error(`The fixture should have created exactly one database server; found ${servers.length}.`);
           return readAzureDatabaseExposure(tokens!, servers[0]!.id);
         }
+        if (google) return readGcpDatabaseExposure(google, created, environmentName);
         const auth = await awsEngineAuthentication(aws!);
         return readAwsDatabaseExposure({ region: aws!.region, credentials: { accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! } }, created);
       };
@@ -142,6 +159,11 @@ live('AWS and Azure engine disposable environment fixture', () => {
       };
       if (!existsSync(path.join(workspace, '.git'))) {
         cpSync(path.join(import.meta.dirname, 'fixture-database'), workspace, { recursive: true });
+        if (cloud === 'aws') {
+          // AWS runs the web start-command checks, which need an image with its own entrypoint.
+          writeFileSync(path.join(workspace, 'entry.sh'), ENGINE_FIXTURE_ENTRYPOINT);
+          writeFileSync(path.join(workspace, 'Dockerfile'), engineFixtureEntrypointDockerfile(readFileSync(path.join(workspace, 'Dockerfile'), 'utf8')));
+        }
         writeFileSync(path.join(workspace, '.gitignore'), '.hypervibe/\nnode_modules/\nfixture-evidence.json\nfixture-baseline.json\n.env*\n');
         // Hypervibe builds from the repository that holds the project's spec file. Without it a plan has no
         // source, builds no image and creates no workloads (live 2026-11-18: the release was then refused).
@@ -151,7 +173,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
         writeFileSync(repoSpecFile, `${JSON.stringify(JSON.parse(stored.document), null, 2)}\n`);
         for (const args of [['init', '-b', 'main'], ['config', 'user.name', 'Hypervibe fixture'], ['config', 'user.email', 'fixture@hypervibe.invalid'],
           ...(project.git_remote_url ? [['remote', 'add', 'origin', project.git_remote_url]] : []),
-          ['add', 'Dockerfile', 'package.json', 'server.mjs', '.gitignore'], ['commit', '-m', 'Disposable engine conformance fixture']]) {
+          ['add', 'Dockerfile', 'package.json', 'server.mjs', '.gitignore', ...(cloud === 'aws' ? ['entry.sh'] : [])], ['commit', '-m', 'Disposable engine conformance fixture']]) {
           await processOutput('git', args, workspace, dataDir);
         }
       }
@@ -175,8 +197,10 @@ live('AWS and Azure engine disposable environment fixture', () => {
           runtime: original.runtime ?? { kind: 'node', version: '22', installCommand: 'npm install --omit=dev' },
           environments: environment ? { ...others, [name]: environment } : others } });
       };
-      const setEnvironment = (revision: 'create' | 'update' | undefined) =>
-        setSpecEnvironment(environmentName, revision ? engineFixtureEnvironment(cloud, revision, marker.region, region) : undefined);
+      // On AWS the web service starts as its image says, gains a start command, changes it and drops it again.
+      const imageStart = cloud === 'aws' ? { entrypoint: true, startedWith: null } : undefined;
+      const setEnvironment = (revision: 'create' | 'update' | undefined, webStart: string | null | undefined = cloud === 'aws' ? null : undefined) =>
+        setSpecEnvironment(environmentName, revision ? engineFixtureEnvironment(cloud, revision, marker.region, region, webStart) : undefined);
       const plan = async (input: Json = {}, name = environmentName) => {
         const envelope = await cli(['plan'], { project: projectName, env: name, ...input });
         if (!Array.isArray(envelope.data?.actions) || (envelope.data.blocked ?? []).length) throw new Error('The fixture plan is blocked or incomplete.');
@@ -281,7 +305,7 @@ live('AWS and Azure engine disposable environment fixture', () => {
           }
           // Between the first environment's checks and its update, a second one comes and goes.
           if (revision === 'update' && !journal.checks.sibling) await siblingJoinsAndLeaves();
-          await setEnvironment(revision);
+          const settle = async () => {
           for (let attempt = 0; attempt < 8; attempt++) {
             const envelope = await plan();
             if (!changesOf(envelope).length) {
@@ -307,9 +331,22 @@ live('AWS and Azure engine disposable environment fixture', () => {
             }
           }
           throw new Error('Fixture convergence exceeded its bounded apply steps.');
+          };
+          if (revision === 'update' && cloud === 'aws' && !journal.checks.webCommand) {
+            for (const word of ['gained', 'changed']) {
+              await setEnvironment('create', `node server.mjs ${word}`);
+              await settle();
+              await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, 'create', { entrypoint: false, startedWith: word }));
+            }
+            journal.checks.webCommand = true; save(journal);
+          }
+          await setEnvironment(revision);
+          await settle();
         },
         verifyRunning: async (revision) => {
-          await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, revision));
+          await webAnswer(environmentName, (status, body) => engineFixtureResponseProblem(status, body, revision, imageStart));
+          // After the start command is dropped the image's own startup is back, and nothing is left to change.
+          if (revision === 'update' && cloud === 'aws') await assertUnchanged(environmentName);
           // The app reached its database above. From this computer the same database must be closed.
           const database = await exposure(await inventory());
           if (database.problems.length) throw new Error(`The database is exposed: ${database.problems.join('; ')}.`);

@@ -48,15 +48,30 @@ export function readBucket(token: string, bucket: string): Promise<Response> {
   return fetchWithRetry(`https://storage.googleapis.com/storage/v1/b/${bucket}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
+/** One page of a bucket's objects, every stored version included. */
+export function listBucketObjects(token: string, bucket: string, pageToken?: string): Promise<Response> {
+  const url = new URL(`https://storage.googleapis.com/storage/v1/b/${bucket}/o`);
+  url.searchParams.set('versions', 'true');
+  url.searchParams.set('fields', 'items(name,generation),nextPageToken');
+  if (pageToken) url.searchParams.set('pageToken', pageToken);
+  return fetchWithRetry(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
+}
+
+/** Deletes one exact stored version of an object. */
+export function deleteBucketObject(token: string, bucket: string, name: string, generation: string): Promise<Response> {
+  return fetchWithRetry(`https://storage.googleapis.com/storage/v1/b/${bucket}/o/${encodeURIComponent(name)}?generation=${encodeURIComponent(generation)}`,
+    { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+}
+
 /** Reads a project by id; its `name` carries the project number. */
 export function readGcpProject(token: string, gcpProjectId: string): Promise<Response> {
   return fetchWithRetry(`https://cloudresourcemanager.googleapis.com/v3/projects/${gcpProjectId}`, { headers: { Authorization: `Bearer ${token}` } });
 }
 
 /** Lists Cloud Logging entries matching a filter. */
-export function listLogEntries(token: string, body: Record<string, unknown>): Promise<Response> {
+export function listLogEntries(token: string, body: Record<string, unknown>, quotaProject?: string): Promise<Response> {
   return fetchWithRetry('https://logging.googleapis.com/v2/entries:list', {
-    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(quotaProject ? { 'X-Goog-User-Project': quotaProject } : {}) }, body: JSON.stringify(body),
   });
 }
 
@@ -65,20 +80,22 @@ export function listLogEntries(token: string, body: Record<string, unknown>): Pr
  * deployment identity's key. It grants exactly one method on one object and
  * expires; it carries no reusable credential.
  */
-export function signedObjectUrl(params: { clientEmail: string; privateKey: string; bucket: string; object: string; method: 'PUT' | 'GET'; expiresSeconds: number; now?: Date }): string {
+export function signedObjectUrl(params: { clientEmail: string; privateKey: string; bucket: string; object: string; method: 'PUT' | 'GET'; expiresSeconds: number; generation?: string; now?: Date }): string {
   const now = params.now ?? new Date();
   const datetime = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   const date = datetime.slice(0, 8);
   const scope = `${date}/auto/storage/goog4_request`;
   const encode = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
   const path = `/${params.bucket}/${params.object.split('/').map(encode).join('/')}`;
+  if (params.generation !== undefined && !/^[1-9]\d*$/.test(params.generation)) throw new Error('Invalid object generation.');
   const query = Object.entries({
+    ...(params.generation ? { generation: params.generation } : {}),
     'X-Goog-Algorithm': 'GOOG4-RSA-SHA256',
     'X-Goog-Credential': `${params.clientEmail}/${scope}`,
     'X-Goog-Date': datetime,
     'X-Goog-Expires': String(params.expiresSeconds),
     'X-Goog-SignedHeaders': 'host',
-  }).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${encode(key)}=${encode(value)}`).join('&');
+  }).map(([key, value]) => `${encode(key)}=${encode(value)}`).sort().join('&');
   const canonical = [params.method, path, query, 'host:storage.googleapis.com', '', 'host', 'UNSIGNED-PAYLOAD'].join('\n');
   const toSign = ['GOOG4-RSA-SHA256', datetime, scope, crypto.createHash('sha256').update(canonical).digest('hex')].join('\n');
   const signature = crypto.createSign('RSA-SHA256').update(toSign).sign(params.privateKey, 'hex');
@@ -93,4 +110,6 @@ export interface TransferResources {
   secretIds: string[];
   ownershipToken?: string;
   jobUid?: string;
+  /** Written before jobs.create and advanced durably before the first :run request. */
+  probe?: { stage: 'before-run' | 'run-may-be-submitted'; serviceAccount: string; etag?: string };
 }

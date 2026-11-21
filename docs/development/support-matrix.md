@@ -41,6 +41,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | --- | --- | --- | --- |
 | Web services | yes | yes: always-on containers with an HTTPS address; built 2026-11-17, not yet run live | yes |
 | Background workers, on-demand workers | yes | yes | yes |
+| Pause one fixed-size worker (`workerPaused`) | yes, Cloud Run worker pool manual count | yes, ECS service desired count. Offline plan and CI release coverage | blocked ([#791](https://github.com/davejohnson/hypervibe/issues/791)) |
 | Scheduled jobs | yes | yes | yes, UTC schedules only |
 | PostgreSQL, testing environments | yes | yes | yes, one shared server per project |
 | Managed database query and inspection | Cloud SQL connector; retained regression coverage, live query unverified here | Aurora Data API with environment app login; offline contracts and local SQL isolation regression, live unverified | Shared Flexible Server, exact environment database and private credential; offline contracts, live unverified |
@@ -54,6 +55,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Custom domains | Primary `domain` plus `domains: [{ domain, dns }]` on the same public service. Each hostname selects a DNS-only zone and connection. | blocked (#606) | blocked (#606) |
 | Buying a domain | reviewed Cloudflare purchase followed by Cloudflare DNS and Cloud Run attachment; offline coverage (#627) | blocked (#627) | blocked (#627) |
 | Generated and outside secrets | yes | yes | yes |
+| Secret limited to named services (`secrets.<KEY>.services`) | yes: only the named workloads receive the reference; offline verification, no live run. One shared runtime identity can still read every secret through the API. | refused in spec and planning | refused in spec and planning |
 | Branch CI releases | implemented GitHub OIDC path; existing evidence retained | implemented, offline verification; live OIDC/build/release unverified | implemented with a dedicated environment build registry, offline verification; live OIDC/build/release unverified |
 | Private package build token (`npm_token`) | implemented; private-package live run unverified | implemented; native request, generated command and configuration verified; live run unverified | implemented; ACR task request and configuration verified; live run unverified |
 | Manual release without a local checkout | implemented for a verified GitHub repository connection; exact-commit archive and build request checked offline, live unverified | unavailable; local checkout required | unavailable; local checkout required |

@@ -1,0 +1,171 @@
+{
+  "terraform_version": "1.13.9",
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "google_secret_manager_secret.transfer_eac786758dfd3af4cb78",
+      "mode": "managed",
+      "type": "google_secret_manager_secret",
+      "name": "transfer_eac786758dfd3af4cb78",
+      "provider_name": "registry.opentofu.org/hashicorp/google",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "annotations": null,
+          "deletion_policy": "DELETE",
+          "deletion_protection": true,
+          "effective_labels": {
+            "goog-terraform-provisioned": "true",
+            "hv-purpose": "railway-copy",
+            "hv-transfer": "eac786758dfd3af4cb78",
+            "managed-by": "hypervibe"
+          },
+          "labels": {
+            "hv-purpose": "railway-copy",
+            "hv-transfer": "eac786758dfd3af4cb78",
+            "managed-by": "hypervibe"
+          },
+          "project": "sample-project",
+          "replication": [
+            {
+              "auto": [
+                {
+                  "customer_managed_encryption": []
+                }
+              ],
+              "user_managed": []
+            }
+          ],
+          "rotation": [],
+          "secret_id": "hv-transfer-eac786758dfd3af4cb78",
+          "secret_type": null,
+          "tags": null,
+          "terraform_labels": {
+            "goog-terraform-provisioned": "true",
+            "hv-purpose": "railway-copy",
+            "hv-transfer": "eac786758dfd3af4cb78",
+            "managed-by": "hypervibe"
+          },
+          "timeouts": null,
+          "topics": [],
+          "ttl": null,
+          "version_aliases": null,
+          "version_destroy_ttl": null
+        },
+        "after_unknown": {
+          "create_time": true,
+          "effective_annotations": true,
+          "effective_labels": {},
+          "expire_time": true,
+          "id": true,
+          "labels": {},
+          "name": true,
+          "replication": [
+            {
+              "auto": [
+                {
+                  "customer_managed_encryption": []
+                }
+              ],
+              "user_managed": []
+            }
+          ],
+          "rotation": [],
+          "terraform_labels": {},
+          "topics": []
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "effective_annotations": {},
+          "effective_labels": {},
+          "labels": {},
+          "replication": [
+            {
+              "auto": [
+                {
+                  "customer_managed_encryption": []
+                }
+              ],
+              "user_managed": []
+            }
+          ],
+          "rotation": [],
+          "terraform_labels": {},
+          "topics": []
+        },
+        "after_identity": {
+          "project": null,
+          "secret_id": null
+        }
+      }
+    },
+    {
+      "address": "google_secret_manager_secret_iam_member.transfer_eac786758dfd3af4cb78",
+      "mode": "managed",
+      "type": "google_secret_manager_secret_iam_member",
+      "name": "transfer_eac786758dfd3af4cb78",
+      "provider_name": "registry.opentofu.org/hashicorp/google",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "condition": [],
+          "member": "serviceAccount:hv-copy-eac786758dfd3af4cb78@sample-project.iam.gserviceaccount.com",
+          "project": "sample-project",
+          "role": "roles/secretmanager.secretAccessor",
+          "secret_id": "hv-transfer-eac786758dfd3af4cb78"
+        },
+        "after_unknown": {
+          "condition": [],
+          "etag": true,
+          "id": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {
+          "condition": []
+        }
+      }
+    },
+    {
+      "address": "google_service_account.transfer_eac786758dfd3af4cb78",
+      "mode": "managed",
+      "type": "google_service_account",
+      "name": "transfer_eac786758dfd3af4cb78",
+      "provider_name": "registry.opentofu.org/hashicorp/google",
+      "change": {
+        "actions": [
+          "create"
+        ],
+        "before": null,
+        "after": {
+          "account_id": "hv-copy-eac786758dfd3af4cb78",
+          "create_ignore_already_exists": null,
+          "deletion_policy": "DELETE",
+          "description": "Hypervibe Railway copy eac786758dfd3af4cb78",
+          "disabled": false,
+          "display_name": "Hypervibe copy job",
+          "email": "hv-copy-eac786758dfd3af4cb78@sample-project.iam.gserviceaccount.com",
+          "member": "serviceAccount:hv-copy-eac786758dfd3af4cb78@sample-project.iam.gserviceaccount.com",
+          "project": "sample-project",
+          "timeouts": null
+        },
+        "after_unknown": {
+          "id": true,
+          "name": true,
+          "unique_id": true
+        },
+        "before_sensitive": false,
+        "after_sensitive": {},
+        "after_identity": {
+          "email": null,
+          "project": null
+        }
+      }
+    }
+  ]
+}

@@ -1,4 +1,7 @@
 import crypto from 'crypto';
+import { isDeepStrictEqual } from 'node:util';
+import { PROBE_IMAGE, probeCommand, probeEnvironment, parseAccessProbeFileEvidence, type AccessProbeFileEvidence, type AccessProbeJobInput } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
+export { parseAccessProbeFileEvidence, type AccessProbeFileEvidence, type AccessProbeJobInput } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
 import { POSTGRES_DATABASE_IDENTITY_PATTERN, POSTGRES_DATABASE_IDENTITY_SQL } from '../domain/services/postgres-database-identity.js';
 import { readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { cloudRunJobRequest, readCloudRunOperation } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -25,7 +28,7 @@ export interface TransferContext {
   recordTransferResources?: (resources: TransferResources | null) => void | Promise<void>;
 }
 
-type TransferScope = Pick<TransferContext, 'gcpProjectId' | 'region' | 'token'>;
+type TransferScope = Pick<TransferContext, 'gcpProjectId' | 'region' | 'token'> & Partial<Pick<TransferContext, 'runtimeServiceAccountEmail' | 'recordTransferResources'>>;
 
 export interface DatabaseManifest {
   tables: Record<string, string>;
@@ -264,13 +267,59 @@ export function transferCredentialHandoffProblem(needsSourceValue: boolean): str
     : undefined;
 }
 
-/** Runs one transfer job to completion and returns its parsed result line. */
-export async function runTransferJob<T extends { ok: boolean; error?: string }>(context: TransferContext, job: TransferJob): Promise<T> {
+type TemporaryJob = TransferJob | (Omit<TransferJob, 'purpose' | 'script'> & { purpose: 'access' });
+type JobResult = { ok: boolean; error?: string };
+export type AccessProbeJobResult = JobResult & { fileEvidence?: AccessProbeFileEvidence; accessPassed?: true };
+// Only the native job runner can attach an execution result to a cleanup failure.
+const executionBeforeCleanup = Symbol('access probe execution before cleanup');
+type RawProbeResult = JobResult & { check?: unknown; fileEvidence?: unknown; [executionBeforeCleanup]?: RawProbeResult };
+
+/** Runs the existing copy workers with their existing execution contract. */
+export function runTransferJob<T extends JobResult>(context: TransferContext, job: TransferJob): Promise<T> {
+  return runTemporaryJob<T>(context, job);
+}
+
+/** Only the synthetic challenge and its scoped references can enter the probe job. */
+export async function runAccessProbeJob(context: TransferContext, input: AccessProbeJobInput): Promise<AccessProbeJobResult> {
+  try {
+    const env = probeEnvironment(input, context.environmentLabel, context.gcpProjectId, context.runtimeServiceAccountEmail);
+    if (!env || !context.recordTransferResources) return { ok: false, error: 'The test job scope or cleanup journal is incomplete.' };
+    const job = await runTemporaryJob<RawProbeResult>(context, { purpose: 'access', image: PROBE_IMAGE, env, sourceSecrets: {}, timeoutSeconds: 90 });
+    const result = job[executionBeforeCleanup] ?? job;
+    const fileEvidence = input.role === 'copy' ? undefined : parseAccessProbeFileEvidence(result.fileEvidence);
+    const passedFile = result.ok === true && fileEvidence?.outcome === 'denied' && Object.keys(result).length === 2;
+    if (job[executionBeforeCleanup]) return {
+      ok: false, error: 'Cleanup of the temporary test job could not be verified.',
+      ...(fileEvidence ? { fileEvidence } : {}), ...(input.role === 'file-app' && passedFile ? { accessPassed: true } : {}),
+    };
+    if (result.ok === true) {
+      if (input.role === 'copy' && Object.keys(result).length === 1) return { ok: true };
+      if (passedFile) return { ok: true, fileEvidence };
+    }
+    const errors: Record<string, string> = {
+      identity: 'The test workload could not confirm its attached service account, project and token.',
+      'secret-denial': 'The app workload could not confirm denial of access to the test secret version.',
+      'object-denial': fileEvidence?.outcome === 'readable'
+        ? 'The app could directly read the test file generation.'
+        : 'The app workload could not confirm denial of direct access to the test object generation.',
+      'secret-read': 'The copy workload could not verify the challenge in the test secret version.',
+      'signed-object': 'The copy workload could not verify the signed download of the test object generation.',
+    };
+    if (result.ok === false && typeof result.check === 'string' && Object.hasOwn(errors, result.check)) {
+      return { ok: false, error: errors[result.check], ...(fileEvidence ? { fileEvidence } : {}) };
+    }
+  } catch { /* Provider errors and workload logs may contain private values. */ }
+  return { ok: false, error: 'The temporary test job did not verify the requested access and cleanup.' };
+}
+
+/** Runs one owned job to completion and returns its parsed result line. */
+async function runTemporaryJob<T extends JobResult>(context: TransferContext, job: TemporaryJob): Promise<T> {
   const handoff = transferCredentialHandoffProblem(Object.keys(job.sourceSecrets).length > 0);
   if (handoff) return { ok: false, error: handoff } as T;
   const id = `hv-migrate-${job.purpose}-${crypto.randomBytes(8).toString('hex')}`;
   const ownershipToken = crypto.randomUUID();
   let resources: TransferResources = { gcpProjectId: context.gcpProjectId, region: context.region, jobId: id, secretIds: [], ownershipToken };
+  if (job.purpose === 'access') resources.probe = { stage: 'before-run', serviceAccount: context.runtimeServiceAccountEmail };
   if (!await verifyTransferResourcesAbsent(context, resources)) {
     return { ok: false, error: 'The temporary transfer job name could not be confirmed unused in the target project and region.' } as T;
   }
@@ -278,6 +327,7 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
   let outcome: T | undefined;
   let thrown: unknown;
   let executionMayBeRunning = false;
+  let creationMayHaveStarted = false;
   try {
     const secretEnv: Array<Record<string, unknown>> = [];
     for (const [name, ref] of Object.entries(job.secretRefs ?? {})) {
@@ -285,13 +335,14 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
     }
     const container: Record<string, unknown> = {
       image: job.image,
-      command: ['/bin/sh'],
-      args: ['-c', job.script],
+      ...(job.purpose === 'access' ? probeCommand : { command: ['/bin/sh'], args: ['-c', job.script] }),
       env: [...Object.entries(job.env).map(([name, value]) => ({ name, value })), ...secretEnv],
-      resources: { limits: { cpu: '2', memory: '4Gi' } },
+      resources: { limits: job.purpose === 'access' ? { cpu: '1', memory: '512Mi' } : { cpu: '2', memory: '4Gi' } },
       ...(job.cloudSqlConnectionName ? { volumeMounts: [{ name: 'cloudsql', mountPath: '/cloudsql' }] } : {}),
     };
-    const created = await cloudRunJobRequest(await context.token(), context, `?jobId=${id}`, {
+    const createToken = await context.token();
+    creationMayHaveStarted = true;
+    const created = await cloudRunJobRequest(createToken, context, `?jobId=${id}`, {
       method: 'POST',
       body: JSON.stringify({
         labels: { 'managed-by': 'hypervibe', 'hv-temporary': 'true', 'hv-transfer': ownershipToken },
@@ -304,7 +355,10 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
         } },
       }),
     });
-    if (!created.ok) throw new Error(`Creating the ${job.purpose} copy job failed (HTTP ${created.status}).`);
+    if (!created.ok) {
+      if ([400, 401, 403, 404, 412].includes(created.status)) creationMayHaveStarted = false;
+      throw new Error(`Creating the ${job.purpose} copy job failed (HTTP ${created.status}).`);
+    }
     const creation = await waitOperation(context, await created.json());
     if (creation.error) throw new Error('The transfer job could not be created.');
     const createdJob = creation.response as { name?: string; uid?: string } | undefined;
@@ -315,7 +369,14 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
     await context.recordTransferResources?.(resources);
     const observedJob = await ownedJob(context, resources);
     if (!observedJob) throw new Error('The created job identity could not be verified.');
+    if (job.purpose === 'access' && !observedProbeMatches(observedJob, container, context.runtimeServiceAccountEmail)) {
+      throw new Error('The observed test job differs from the requested workload.');
+    }
     const runToken = await context.token();
+    if (resources.probe) {
+      resources = { ...resources, probe: { ...resources.probe, stage: 'run-may-be-submitted', etag: observedJob.etag } };
+      await context.recordTransferResources?.(resources);
+    }
     executionMayBeRunning = true;
     const started = await cloudRunJobRequest(runToken, context, `/${id}:run`, { method: 'POST', body: JSON.stringify({ etag: observedJob.etag }) });
     if (!started.ok) {
@@ -342,7 +403,10 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
       throw new Error('A completed transfer execution could not be verified for this job.');
     }
     executionMayBeRunning = false;
-    const result = await readResultLine(context, id, executionName);
+    if (job.purpose === 'access' && (execution.succeededCount !== 1 || (execution.failedCount ?? 0) !== 0 || (execution.cancelledCount ?? 0) !== 0)) {
+      throw new Error('The test job did not complete its single task successfully.');
+    }
+    const result = await readResultLine(context, id, executionName, job.purpose === 'access');
     outcome = result ? result as T : { ok: false, error: `The ${job.purpose} copy finished without a result. Check hv_logs for job ${id}.` } as T;
   } catch (error) {
     thrown = error ?? new Error('The copy failed.');
@@ -350,10 +414,24 @@ export async function runTransferJob<T extends { ok: boolean; error?: string }>(
   if (executionMayBeRunning) {
     return { ok: false, error: `Completion of transfer job ${id} in ${context.gcpProjectId}/${context.region} is unverified. Its job identity is retained for recovery.` } as T;
   }
-  if (!await removeTransferLeftovers(context, resources)) {
+  let removed: boolean;
+  if (resources.probe?.stage === 'before-run') {
+    removed = creationMayHaveStarted ? await recoverTerminalTransferResources(context, resources) : await verifyTransferResourcesAbsent(context, resources);
+  } else {
+    removed = await removeTransferLeftovers(context, resources);
+  }
+  if (removed) {
+    try { await context.recordTransferResources?.(null); }
+    catch (error) {
+      if (job.purpose !== 'access') throw error;
+      removed = false;
+    }
+  }
+  if (!removed) {
+    if (job.purpose === 'access' && outcome && 'fileEvidence' in outcome)
+      return { ...outcome, ok: false, [executionBeforeCleanup]: outcome };
     return { ok: false, error: `Cleanup of transfer job ${id} in ${context.gcpProjectId}/${context.region} is unverified. Its recorded identity must be resolved before another copy.` } as T;
   }
-  await context.recordTransferResources?.(null);
   if (thrown) throw thrown;
   return outcome!;
 }
@@ -362,7 +440,7 @@ function validTransferScope(context: TransferScope, resources: TransferResources
   return !!resources && resources.gcpProjectId === context.gcpProjectId && resources.region === context.region
     && /^(?:[a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]+)$/.test(resources.gcpProjectId)
     && /^[a-z]+(?:-[a-z0-9]+)+$/.test(resources.region)
-    && /^hv-migrate-(?:database|storage)-(?:[a-f0-9]{6}|[a-f0-9]{16})$/.test(resources.jobId)
+    && /^hv-migrate-(?:(?:database|storage)-(?:[a-f0-9]{6}|[a-f0-9]{16})|access-[a-f0-9]{16})$/.test(resources.jobId)
     && Array.isArray(resources.secretIds) && resources.secretIds.every(id => typeof id === 'string'
       && id.startsWith(`${resources.jobId}-`) && /^[a-z0-9][a-z0-9-]*$/.test(id.slice(resources.jobId.length + 1)));
 }
@@ -395,7 +473,20 @@ async function scopedCloudRunName(context: TransferScope, name: unknown, resourc
 
 interface NativeJob {
   name: string; uid: string; etag: string; labels?: Record<string, string>;
+  template?: { taskCount?: number; parallelism?: number; template?: { serviceAccount?: string; containers?: Record<string, unknown>[]; volumes?: unknown[] } };
   executionCount?: number; latestCreatedExecution?: { name?: string }; reconciling?: boolean;
+}
+
+/** The etag on :run binds these observations to the revision that will execute. */
+function observedProbeMatches(job: NativeJob, expected: Record<string, unknown>, email: string): boolean {
+  const task = job.template?.template;
+  const containers = task?.containers;
+  if (task?.serviceAccount !== email || (job.template?.taskCount ?? 1) !== 1 || (job.template?.parallelism ?? 1) !== 1
+      || task.volumes?.length || !Array.isArray(containers) || containers.length !== 1) return false;
+  const [observed] = containers;
+  return !!observed && observed.image === expected.image && (observed.volumeMounts == null || isDeepStrictEqual(observed.volumeMounts, [])) && !observed.workingDir
+    && isDeepStrictEqual(observed.command, expected.command) && isDeepStrictEqual(observed.args, expected.args)
+    && isDeepStrictEqual(observed.env, expected.env);
 }
 
 async function ownedJob(context: TransferScope, resources: TransferResources): Promise<NativeJob | undefined> {
@@ -406,6 +497,7 @@ async function ownedJob(context: TransferScope, resources: TransferResources): P
   if (!await scopedCloudRunName(context, job.name, new RegExp(`^jobs/${resources.jobId}$`))
       || typeof job.uid !== 'string' || !job.uid || (resources.jobUid !== undefined && job.uid !== resources.jobUid)
       || typeof job.etag !== 'string' || !job.etag || !resources.ownershipToken
+      || (resources.probe && job.template?.template?.serviceAccount !== resources.probe.serviceAccount)
       || job.labels?.['managed-by'] !== 'hypervibe' || job.labels['hv-temporary'] !== 'true'
       || job.labels['hv-transfer'] !== resources.ownershipToken) throw new Error('The temporary job belongs to a different transfer.');
   return job;
@@ -437,6 +529,7 @@ async function removeTransferLeftovers(context: TransferScope, resources: Transf
 
 interface ExecutionInventoryEntry {
   name?: string; uid?: string; job?: string; completionTime?: string; runningCount?: number; reconciling?: boolean;
+  succeededCount?: number; failedCount?: number; cancelledCount?: number;
 }
 
 function executionCompleted(execution: ExecutionInventoryEntry): boolean {
@@ -444,12 +537,42 @@ function executionCompleted(execution: ExecutionInventoryEntry): boolean {
     && typeof execution.completionTime === 'string' && Number.isFinite(Date.parse(execution.completionTime));
 }
 
+/** ProtoJSON omits empty repeated fields. Require an empty, single-page inventory including deleted executions. */
+async function recoverUnsubmittedProbe(context: TransferScope, resources: TransferResources, job: NativeJob): Promise<boolean> {
+  if (job.reconciling || (job.executionCount ?? 0) !== 0 || job.latestCreatedExecution != null
+      || (resources.probe?.etag !== undefined && job.etag !== resources.probe.etag)) return false;
+  const page = await cloudRunJobRequest(await context.token(), context, `/${resources.jobId}/executions?pageSize=1&showDeleted=true`);
+  if (!page.ok) return false;
+  const inventory = await page.json() as { executions?: unknown; nextPageToken?: unknown };
+  if (!inventory || typeof inventory !== 'object' || Array.isArray(inventory)
+      || Object.keys(inventory).some(key => !['executions', 'nextPageToken'].includes(key))
+      || (inventory.executions !== undefined && !isDeepStrictEqual(inventory.executions, []))
+      || (inventory.nextPageToken !== undefined && inventory.nextPageToken !== '')) return false;
+  // A second interruption can follow a successful delete. Persist the recovered UID before removing its only native evidence.
+  if (!resources.jobUid) {
+    if (!resources.probe || !context.recordTransferResources) return false;
+    resources = { ...resources, jobUid: job.uid, probe: { ...resources.probe, etag: job.etag } };
+    await context.recordTransferResources(resources);
+  }
+  return removeTransferLeftovers(context, resources, job);
+}
+
 /** Explicit refresh only. Never terminate an unobserved or unfinished execution to recover a copy. */
 export async function recoverTerminalTransferResources(context: TransferScope, resources: TransferResources): Promise<boolean> {
-  if (!validTransferScope(context, resources) || !resources.jobUid || !resources.ownershipToken) return false;
+  if (!validTransferScope(context, resources) || !resources.ownershipToken) return false;
+  const probe = resources.probe;
+  if (resources.jobId.startsWith('hv-migrate-access-')) {
+    if (!probe || !['before-run', 'run-may-be-submitted'].includes(probe.stage) || resources.secretIds.length
+        || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(resources.ownershipToken)
+        || !context.runtimeServiceAccountEmail || probe.serviceAccount !== context.runtimeServiceAccountEmail
+        || !probe.serviceAccount.endsWith(`@${context.gcpProjectId}.iam.gserviceaccount.com`)
+        || (probe.stage === 'run-may-be-submitted' && (!resources.jobUid || !probe.etag))) return false;
+  } else if (probe || !resources.jobUid) return false;
   try {
     const job = await ownedJob(context, resources);
-    if (!job) return verifyTransferResourcesAbsent(context, resources);
+    // A create can still arrive after its response was lost. Without a UID, a 404 does not settle that request.
+    if (!job) return !!resources.jobUid && verifyTransferResourcesAbsent(context, resources);
+    if (probe?.stage === 'before-run') return await recoverUnsubmittedProbe(context, resources, job);
     if (resources.secretIds.length || job.reconciling || !Number.isSafeInteger(job.executionCount) || !job.executionCount
         || !job.latestCreatedExecution?.name) return false;
     // Until at least one execution materializes a previously unacknowledged
@@ -512,22 +635,24 @@ async function waitOperation(context: TransferScope, value: unknown, timeoutSeco
 }
 
 /** Reads the single result line the job printed; logs can lag the execution by a few seconds. */
-async function readResultLine(context: TransferContext, jobName: string, executionName: string): Promise<Record<string, unknown> | undefined> {
+async function readResultLine(context: TransferContext, jobName: string, executionName: string, probe: boolean): Promise<Record<string, unknown> | undefined> {
   const filter = [
     'resource.type="cloud_run_job"',
+    ...(probe ? [`logName="projects/${context.gcpProjectId}/logs/run.googleapis.com%2Fstdout"`] : []),
     `resource.labels.job_name="${jobName}"`,
     `resource.labels.location="${context.region}"`,
     `labels."run.googleapis.com/execution_name"="${executionName.split('/').pop()}"`,
     `textPayload:"${RESULT_MARKER.trim()}"`,
   ].join(' AND ');
   for (let attempt = 0; attempt < 12; attempt++) {
-    const response = await listLogEntries(await context.token(), { resourceNames: [`projects/${context.gcpProjectId}`], filter, orderBy: 'timestamp desc', pageSize: 5 });
+    const response = await listLogEntries(await context.token(), { resourceNames: [`projects/${context.gcpProjectId}`], filter, orderBy: 'timestamp desc', pageSize: 5 }, probe ? context.gcpProjectId : undefined);
     if (response.ok) {
       const entries = (await response.json() as { entries?: Array<{ textPayload?: string }> }).entries ?? [];
       const line = entries.map((entry) => entry.textPayload ?? '').find((text) => text.includes(RESULT_MARKER));
       if (line) {
         let parsed: Record<string, unknown>;
         try { parsed = JSON.parse(line.slice(line.indexOf(RESULT_MARKER) + RESULT_MARKER.length)); } catch { return undefined; }
+        if (probe) return line.startsWith(RESULT_MARKER) ? parsed : undefined;
         const errors = await listLogEntries(await context.token(), { resourceNames: [`projects/${context.gcpProjectId}`], filter: filter.replace(`textPayload:"${RESULT_MARKER.trim()}"`, 'textPayload:"HV_RESTORE_ERROR"'), pageSize: 5 }).then((response) => response.ok ? response.json() as Promise<{ entries?: Array<{ textPayload?: string }> }> : { entries: [] }).catch(() => ({ entries: [] }));
         const sample = (errors.entries ?? []).map((entry) => (entry.textPayload ?? '').replace('HV_RESTORE_ERROR ', '').replace(/postgres(ql)?:\/\/\S+/g, '<url>').slice(0, 200));
         return sample.length ? { ...parsed, restoreErrors: sample } : parsed;

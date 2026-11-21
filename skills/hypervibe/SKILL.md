@@ -47,8 +47,12 @@ replace them with remembered permission tables or dashboard procedures.
    a possibly misspelled project selector.
 2. Express infrastructure intent through `hv_spec`, then obtain a plan with
    `hv_plan`. Present the chosen resources, practical changes, costs where known,
-   and consequential actions. Link the local browser report returned in
-   `htmlPath` when presenting a saved plan. To open an older plan, use
+   and consequential actions. Share the clickable `reviewUrl` returned with a saved
+   plan or test result. The review shows its approval or execution status.
+   After the user approves in the browser, use the returned continuation.
+   Reopening the review checks its status without running it.
+   `hypervibe reviews` prints a link to the local library. When the server is unavailable,
+   `htmlPath` identifies the saved export. To reopen an older plan, use
    `hv_runs action="report" runId=<planId>`. For a Google Cloud setup plan,
    also supply its Hypervibe `project` and native `gcpProjectId`. Setup
    previews still pending at upgrade can be opened. Earlier versions discarded
@@ -58,7 +62,8 @@ replace them with remembered permission tables or dashboard procedures.
    another question; billing, ownership, spending, adoption, and destructive
    changes retain their required decisions and confirmations.
 3. Apply the exact reviewed plan with `hv_apply`, supplying only its required
-   confirmations after authorization. A stale or changed plan needs a fresh
+   confirmations after authorization. For a recorded browser approval, pass
+   its exact `planId` with `useBrowserApproval=true`. A stale or changed plan needs a fresh
    review. When a prerequisite stage succeeds and the requested work includes
    the next stage, prepare its plan yourself and present any changes that need
    approval. Preparing the preview does not authorize applying it.
@@ -78,8 +83,10 @@ SQL database, storage buckets and custom domain in reviewed rounds, releases
 the committed local code and verifies it. Ask the user only at its stop points:
 `needs_billing_choice` (ask which billing account should pay; the choice does
 not approve infrastructure or permissions), `needs_access` (show its saved OpenTofu setup plan and exact permissions,
-then pass its `accessId` in `approveAccess` after approval), `needs_confirmation` (show the changes and estimated
-monthly cost, then pass its exact `planId` and `confirmActions`) and `needs_secrets` (keys only
+then follow the returned continuation. A Google Cloud browser approval uses its exact
+`gcpSetupPlanId` and `browserAccess`), `needs_confirmation` (show the changes and estimated
+monthly cost, then return the exact `planId` after browser approval or supply
+`confirmActions` for the changes the user approved directly) and `needs_secrets` (keys only
 an outside service issues, such as API keys: a local page is open with a link to
 each key's page, and one-click use of a value already in `.env.<env>` or the
 shared `.env` (never shown); share the link and call again once they are saved). Declare
@@ -126,16 +133,43 @@ The worker then runs only while that count is above zero and starts within
 about a minute of new work. Keep a worker always on only when it must react
 instantly or does not use the app database.
 
-For a new destination, `hv_migrate` proposes an OpenTofu-managed GCP target.
-It can import runtime settings into an existing AWS target. Guided migration
-to Azure is unavailable. Railway database and bucket transfers require a planned
-private credential handoff that is still unavailable. For private PostgreSQL source inventory, use `hv_migrate` with
-`inspectSource=true` to plan one fixed query on the exact running Railway database
-using the connection's pre-registered SSH identity and trusted host keys. The
-named destination may use any cloud or may be undeclared. The inspection
-accesses only the source. Show the saved action before applying it. It returns
-a version, user-table count and estimated live rows. Verifying a copy of
-private Railway and Cloud SQL databases
+For an existing Railway source and Cloud Run target, prepare the empty copy
+credential container with `hv_connections` action `prepare`, provider
+`cloudrun`, `migrationAccess="empty-transfer-slot"`, the project, Railway
+`migrationSourceEnvironment` and destination `environment`. Show the saved
+plan for its service account, empty container and secret-level read grant.
+After browser approval, resume the same call with its exact `gcpSetupPlanId` and omit `confirm`. Keep the container
+empty. After this setup, use the same source, target and project with
+`migrationAccess="restrict-app-access"` to review the two app permission
+changes. Confirm the exact saved plan after approval. Once applied, preview
+`migrationAccess="verify-copy-access"` for the same source and destination. Show the saved HTML before confirming its
+exact `gcpSetupPlanId`. This one-time check runs two temporary Cloud Run jobs
+and may incur charges. Using disposable data, it verifies the copy account
+can read the test version and download the file through its short-lived link,
+and requires both direct reads by the app account to be denied. Report the outcome and cleanup,
+including any period when the deleted file stays recoverable. The private
+handoff and actual data copy require a separate plan.
+
+When only the app's direct export-file access needs retesting, preview
+`migrationAccess="verify-export-file-access"` with the same project, source
+and destination. Show its saved HTML and confirm its exact `gcpSetupPlanId`
+after approval. The plan checks the contents of one disposable export file,
+runs one temporary job as the app account, and cleans up the job and file.
+Google may charge for the job, requests and storage. Report whether the app
+read the file, Google denied access, or the read remains unverified. Include
+cleanup and any soft-delete period. This result covers only direct file access.
+
+Use `hv_migrate` with `inspectSource=true` to review one query of the running
+Railway PostgreSQL database. The connection needs its pre-registered SSH
+identity and trusted host keys. Show the saved action before applying it.
+The result includes the server version, user-table count and estimated live
+rows. The destination can be on any cloud or can be undeclared.
+
+`hv_migrate` proposes an OpenTofu-managed Google Cloud environment for a new
+destination. It can import runtime settings into an existing AWS environment.
+Guided migration to Azure is unavailable. Railway database and bucket transfers
+still require a planned private credential handoff. A fresh comparison of
+private Railway and Cloud SQL databases also
 requires reviewed verification jobs. Historical receipts record what matched at
 the time of the copy. Report these limits before requesting a maintenance window.
 For supported operations the workflow also stops at

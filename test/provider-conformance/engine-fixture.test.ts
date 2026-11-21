@@ -4,7 +4,7 @@ import { azureEngineProblems } from '../../src/application/infrastructure-engine
 import type { AzureTokenProvider } from '../../src/adapters/providers/azure/azure-ops.client.js';
 import { projectSpecSchema } from '../../src/domain/spec/spec.schema.js';
 import { environmentProfile } from '../../src/domain/services/infrastructure-engine-selection.js';
-import { classifyDatabaseProbe, engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAzureDatabaseExposure,
+import { classifyDatabaseProbe, engineFixtureEnvironment, readGcpDatabaseExposure, readGcpInventory, engineFixtureResponseProblem, engineFixtureSiblingEnvironment, engineFixtureSiblingResponseProblem, probeDatabaseFromHere, readAzureDatabaseExposure,
   readAzureInventory, sinceBaseline } from './engine-fixture.js';
 import { resourceKey, runDisposableFixture, type FixtureJournal, type NativeFixtureResource } from './lifecycle-live-harness.js';
 import { selectLiveFixtureProfile } from './live-fixture-profiles.js';
@@ -141,5 +141,52 @@ describe('leftover inventory', () => {
     journal.phase = 'prepared'; journal.resources = [];
     account = [account[0]!];
     await expect(run([])).resolves.toMatchObject({ phase: 'cleaned', checks: { created: true, updated: true, absent: true } });
+  });
+});
+
+describe('web start command checks', () => {
+  it('leaves the image in charge when no start command is given, and reports how the web service was started', async () => {
+    const { engineFixtureEnvironment, engineFixtureResponseProblem, engineFixtureEntrypointDockerfile } = await import('./engine-fixture.js');
+    const services = (webStart?: string | null) => (engineFixtureEnvironment('aws', 'create', 'us-east-1', undefined, webStart) as { services: Record<string, { startCommand?: string }> }).services;
+    expect(services(null).web).not.toHaveProperty('startCommand');
+    expect(services().web!.startCommand).toBe('node server.mjs');
+    expect(services('node server.mjs gained').web!.startCommand).toBe('node server.mjs gained');
+    const body = { service: 'hypervibe-provider-conformance', revision: 'create', database: true, worker: true, storage: true, scheduled: true, onDemand: true, entrypoint: false, startedWith: 'gained' };
+    expect(engineFixtureResponseProblem(200, body, 'create', { entrypoint: false, startedWith: 'gained' })).toBeUndefined();
+    expect(engineFixtureResponseProblem(200, body, 'create', { entrypoint: true, startedWith: null })).toContain("without the image's entrypoint");
+    expect(engineFixtureResponseProblem(200, body, 'create')).toBeUndefined();
+    const dockerfile = engineFixtureEntrypointDockerfile('FROM node:22-alpine\nCMD ["node", "server.mjs"]\n');
+    expect(dockerfile).toContain('ENTRYPOINT ["/app/entry.sh"]\nCMD ["node", "server.mjs"]');
+    expect(() => engineFixtureEntrypointDockerfile('FROM scratch\n')).toThrow();
+  });
+});
+
+describe('Google Cloud fixture readers', () => {
+  const access = { projectId: 'p1', region: 'us-central1', token: async () => 'token' };
+  const instance = (networks: Array<{ value: string }>) => ({ settings: { ipConfiguration: { ipv4Enabled: true, authorizedNetworks: networks } }, ipAddresses: [{ type: 'PRIMARY', ipAddress: '203.0.113.7' }] });
+  const created: NativeFixtureResource[] = ['hv-fx-1-db-aaaaaa', 'hv-fs-1-db-bbbbbb'].map((id) => ({ provider: 'gcp', type: 'sql-instance', id, address: `sql-instance/${id}` }));
+
+  it('builds a spec the schema accepts', () => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'fixture', environments: {
+      one: engineFixtureEnvironment('gcp', 'create', 'us-central1'), two: engineFixtureSiblingEnvironment('gcp') } });
+    expect(spec.environments.one).toMatchObject({ hosting: { provider: 'cloudrun', region: 'us-central1' }, database: { provider: 'cloudsql' }, storage: { files: { provider: 'gcs' } } });
+  });
+
+  it('reports any network allowed to connect, on either environment, and refuses an unreadable or missing answer', async () => {
+    const original = globalThis.fetch;
+    const answer = (byName: Record<string, unknown>, status = 200) => { globalThis.fetch = (async (url: string | URL) => new Response(JSON.stringify(byName[String(url).split('/').pop()!] ?? {}), { status })) as typeof fetch; };
+    try {
+      answer({ 'hv-fx-1-db-aaaaaa': instance([]), 'hv-fs-1-db-bbbbbb': instance([]) });
+      expect(await readGcpDatabaseExposure(access, created, 'fx-1')).toEqual({ host: '203.0.113.7', problems: [] });
+      answer({ 'hv-fx-1-db-aaaaaa': instance([]), 'hv-fs-1-db-bbbbbb': instance([{ value: '0.0.0.0/0' }]) });
+      expect((await readGcpDatabaseExposure(access, created, 'fx-1')).problems).toEqual(['instance hv-fs-1-db-bbbbbb allows connections from 0.0.0.0/0']);
+      answer({}, 403);
+      await expect(readGcpDatabaseExposure(access, created, 'fx-1')).rejects.toThrow(/exposure is unknown/);
+      answer({ 'hv-fx-1-db-aaaaaa': {}, 'hv-fs-1-db-bbbbbb': instance([]) });
+      await expect(readGcpDatabaseExposure(access, created, 'fx-1')).rejects.toThrow(/no network settings/);
+      await expect(readGcpDatabaseExposure(access, created, 'fx-9')).rejects.toThrow(/exactly one database instance/);
+      answer({}, 500);
+      await expect(readGcpInventory(access)).rejects.toThrow(/what exists is unknown/);
+    } finally { globalThis.fetch = original; }
   });
 });

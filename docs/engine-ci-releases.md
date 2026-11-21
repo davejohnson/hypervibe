@@ -71,14 +71,26 @@ runner observed; it does not prove a later scheduled job succeeded or qualify
 backup/recovery readiness. Live qualification remains tracked separately from
 the offline implementation evidence.
 
-AWS CI also refuses an explicit web `startCommand` together with a repository
-Dockerfile until [#717](https://github.com/davejohnson/hypervibe/issues/717) adds the
-native command override. A generated Dockerfile and native ECS workload commands
-retain their existing paths.
-Multiple AWS web services with different start commands are also refused because
-one generated image cannot preserve those distinct commands without that native
-override. Private web services remain blocked for this CI runner: authenticated
-AWS function health and Azure private-network health access are not implemented.
+On AWS, a web service with an explicit `startCommand` receives a separate
+image with its entrypoint cleared. ECS runs that service's command with
+`sh -c`, so the image must contain `sh`. The ordinary image retains the
+Dockerfile entrypoint and default command for web services without an override,
+workers and scheduled jobs. A single CodeBuild job can publish both images for
+one commit. Removing a web override selects the ordinary image again.
+When Hypervibe generates the Dockerfile, each web service needs its own
+explicit startup command.
+
+Existing AWS environments that add a web override need the reviewed build
+project update from `hv_plan scope="infrastructure"` and `hv_apply` before CI
+can build the web image. If an older environment needs to create a web
+service using Dockerfile defaults, release an existing workload from the
+Dockerfile commit before planning that change. This records the source of
+the ordinary image. Tests cover the Docker image configurations and ECS
+requests offline. Live AWS qualification remains open.
+[#717](https://github.com/davejohnson/hypervibe/issues/717)
+
+Private web services still require local releases. This CI runner needs public
+HTTP access to verify web health.
 
 Azure's current app/job update API documents JSON Merge Patch without an
 `If-Match` condition. Releases re-read the exact template immediately before

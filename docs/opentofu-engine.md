@@ -110,6 +110,31 @@ live journey below records create, update and delete results from the same date.
   confirmation gate governs deletion; provider-side protection would only break an
   approved teardown.
 
+## Teardown
+
+`hv_plan scope="teardown"` removes a whole Google Cloud environment as one
+reviewed plan; every action needs its own confirmation:
+
+1. Hypervibe empties each storage bucket, every version of every file. It first
+   checks the bucket's labels say it belongs to this environment, and stops
+   without deleting anything if the environment changed since the plan was made.
+   Buckets are created without `force_destroy`, so deleting files is never a
+   side effect of another change.
+2. OpenTofu destroys what it created: services, workers, jobs, schedules, queues,
+   buckets, the database instance and the secrets Hypervibe generated.
+3. Hypervibe reads the services, the database instance, the buckets and its
+   secrets again. If any still exists, or cannot be read, the apply fails and the
+   environment stays in the spec; run the teardown plan again.
+4. Only then are the environment's bindings cleared and the environment removed
+   from the spec, so the next plan does not recreate it.
+
+The database is deleted with its backups, and so are the environment's secrets,
+including values imported from another host. An environment with custom domains is refused until the domains
+are removed from the spec and applied, because teardown does not change DNS. The
+project-level setup (the Google project, its identities, the shared image
+repository and the state bucket) stays; removing it is still open in
+[#103](https://github.com/davejohnson/hypervibe/issues/103).
+
 ## Release ownership with CI (Cloud Run)
 
 The engine ignores only `template[0].containers[0].image` plus the `client` and
@@ -134,6 +159,38 @@ OpenTofu owns secret containers. Hypervibe keeps credential generation, private
 value storage and version publication inside its operational secret boundary.
 Raw credential values do not belong in public plans or generated configuration.
 Cloud Run receives Secret Manager references.
+
+### Limiting a secret to named services
+
+A secret declaration may list `services`. Cloud Run then puts its Secret Manager
+reference only in those services, workers and scheduled jobs, in every
+environment the secret targets. Without the list, every service receives it.
+
+```json
+"secrets": {
+  "SOURCE_API_KEY": {
+    "ownership": "delegated",
+    "principal": "source system administrator",
+    "environments": ["staging"],
+    "services": ["catchup"]
+  }
+}
+```
+
+- Every named service must exist in every environment the secret targets.
+- The release command borrows the web service's configuration, so it holds a
+  limited secret only when the web service does.
+- Adding `services` to a secret that is already live produces an ordinary
+  reviewed update of each service that loses the reference.
+- This limits which workloads have the value in their environment. It is not an
+  access boundary: every workload of an environment runs as one runtime service
+  account, and setup grants that account Secret Accessor on the project. A
+  workload that does not list the secret can still read it through the Secret
+  Manager API. `gcpRuntimeSecretGrants: "per-secret"` grants per secret but to
+  the same account. Separate identities per service are not built.
+- AWS, Azure and Railway cannot limit a secret to named services. A spec that
+  asks for it there is refused; the secret is never given to every service
+  instead. `services` cannot be combined with `credential` tracking.
 
 ## Cross-cloud boundaries
 
@@ -180,6 +237,49 @@ sign-in, credential values, image builds/releases, logs, health, SQL and object
 transfer operations. Existing Railway infrastructure continues through its
 retained lifecycle.
 
+### Prepare the target app's secret access
+
+In the target environment's existing Cloud Run hosting settings, set
+`gcpRuntimeSecretGrants` to `"per-secret"` with `hv_spec`. Run `hv_plan` with
+`scope="infrastructure"` and review each `secret-runtime-access:` action. It
+names the Google secret and the service account that will receive Secret
+Accessor on that secret's enabled versions. Confirm the desired actions with `hv_apply`. The environment owns
+these grants, so removing a secret reference from every workload or removing
+the setting produces a reviewed removal.
+
+Only secrets referenced by a service, worker, scheduled job or release job
+qualify. A build-only token, an empty import slot or a container merely found
+in the project receives no grant from this preparation. Existing direct grants
+outside the environment's engine state block implicit adoption. Hypervibe also
+preserves an existing grant if its local apply record cannot confirm the
+original secret, including after an interrupted apply. Project-wide
+grants still apply, and the private transfer still needs its own reviewed job
+and isolated credentials.
+
+### App secret access on AWS and Azure
+
+The Cloud Run setting applies only to Google Cloud. The other engines grant app
+access as part of the environment's existing infrastructure plan.
+
+- **AWS.** ECS uses one environment role for task execution and for running
+  containers. Its app-secret policy names individual Parameter Store parameters.
+  With an on-demand worker, that same role can read any Secrets Manager secret
+  under `hypervibe/<environment-prefix>/`, where the worker's database login
+  lives. The account deploy role can manage
+  parameters and secrets across Hypervibe's namespace. The setup permissions
+  boundary caps what an app role can receive. [AWS engine](opentofu-engine-aws.md)
+  · [AWS permissions boundaries](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_boundaries.html)
+- **Azure.** Container Apps and jobs share an environment identity with Key Vault
+  Secrets User on each named app secret, including the query credential for an
+  on-demand worker. The project's deployment identity holds Key Vault Secrets
+  Officer on the resource group. Permissions inherited from a parent scope
+  still apply alongside individual secret grants. [Azure engine](opentofu-engine-azure.md)
+  · [Azure role scopes](https://learn.microsoft.com/en-us/azure/role-based-access-control/scope-overview)
+
+These identities live with the environment or its deployment setup. Neither
+engine provisions a temporary identity to copy a private database or files.
+`hv_migrate` can copy runtime settings to AWS. Azure migration is unavailable.
+
 ## Flow exercised by the early GCP implementation
 
 1. `hv_spec` with `environments.<env>.hosting = { provider: "cloudrun" }`.
@@ -191,7 +291,7 @@ retained lifecycle.
 4. `hv_deploy` builds from the git remote and releases it: a recorded plan run under
    the environment lock that changes only the running image (etag-guarded), then
    checks the health path.
-5. Teardown: remove services and secrets from the spec, plan, apply with confirmations.
+5. Teardown: `hv_plan scope="teardown"` → `hv_apply` with confirmations (see [Teardown](#teardown)).
 
 The pinned OpenTofu binary is downloaded and checksum-verified on first use into
 `~/.hypervibe/engine/bin`; providers are cached in `~/.hypervibe/engine/plugins`.

@@ -136,7 +136,18 @@ describe('engine hv_plan command boundaries', () => {
     expect(f.teardown).not.toHaveBeenCalled();
   });
 
-  it.each(['cloudrun', 'railway'] as const)('rejects teardown of %s before any planner', async provider => {
+  it('reaches Google Cloud teardown, and no other planner', async () => {
+    const f = fixture('cloudrun');
+    const gcpTeardown = vi.spyOn(engine, 'planGcpTeardown').mockResolvedValue({ blocked: ['GCP_TEARDOWN_REACHED'] });
+    const result = await f.commands.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'teardown' });
+    expect(JSON.stringify(result)).toContain('GCP_TEARDOWN_REACHED');
+    expect(gcpTeardown).toHaveBeenCalledExactlyOnceWith(f.ctx, expect.objectContaining({ environmentName: 'staging' }));
+    expect(f.infrastructure).not.toHaveBeenCalled();
+    expect(f.teardown).not.toHaveBeenCalled();
+    expect(f.scoped).not.toHaveBeenCalled();
+  });
+
+  it.each(['railway'] as const)('rejects teardown of %s before any planner', async provider => {
     const f = fixture(provider);
     const result = await f.commands.execute('hv_plan', { project: f.project.name, env: 'staging', scope: 'teardown' });
     expect(result.ok).toBe(false);

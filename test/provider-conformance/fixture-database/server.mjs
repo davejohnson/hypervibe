@@ -7,6 +7,8 @@ import pg from 'pg';
 const role = ['worker', 'scheduled', 'ondemand'].includes(process.argv[2]) ? process.argv[2] : 'web';
 
 function pool() {
+  // Google Cloud hands the app a socket inside the container (`?host=/cloudsql/...`), which has no TLS of its own.
+  if (/[?&]host=%2F|[?&]host=\//.test(process.env.DATABASE_URL)) return new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 2, connectionTimeoutMillis: 10_000 });
   const url = new URL(process.env.DATABASE_URL);
   // Encrypted, but the certificate is not verified: this throwaway app carries no provider CA bundle.
   url.search = '';
@@ -36,7 +38,7 @@ async function onDemandWork() {
   return done.rows[0].lately === true;
 }
 
-/** Writes a file with the workload's own identity and reads it back. No keys are involved on either cloud. */
+/** Writes a file with the workload's own identity and reads it back. No keys are involved on any cloud. */
 async function storageRoundTrip() {
   const text = `conformance ${Date.now()}`;
   if (process.env.OBJECT_STORAGE_PROVIDER === 's3') {
@@ -57,6 +59,19 @@ async function storageRoundTrip() {
     const put = await fetch(blob, { method: 'PUT', headers: { ...headers, 'x-ms-blob-type': 'BlockBlob', 'content-type': 'text/plain' }, body: text, signal: AbortSignal.timeout(10_000) });
     if (put.status !== 201) return false;
     const got = await fetch(blob, { headers, signal: AbortSignal.timeout(10_000) });
+    return got.status === 200 && await got.text() === text;
+  }
+  if (process.env.OBJECT_STORAGE_PROVIDER === 'gcs') {
+    const token = (await (await fetch('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token',
+      { headers: { 'Metadata-Flavor': 'Google' }, signal: AbortSignal.timeout(10_000) })).json()).access_token;
+    const bucket = encodeURIComponent(process.env.OBJECT_STORAGE_BUCKET);
+    const headers = { authorization: `Bearer ${token}` };
+    const object = `https://storage.googleapis.com/storage/v1/b/${bucket}/o/conformance.txt`;
+    const put = await fetch(`https://storage.googleapis.com/upload/storage/v1/b/${bucket}/o?uploadType=media&name=conformance.txt`,
+      { method: 'POST', headers: { ...headers, 'content-type': 'text/plain' }, body: text, signal: AbortSignal.timeout(10_000) });
+    if (put.status !== 200) return false;
+    const got = await fetch(`${object}?alt=media`, { headers, signal: AbortSignal.timeout(10_000) });
+    // The file stays: teardown has to empty the bucket itself.
     return got.status === 200 && await got.text() === text;
   }
   return false;
@@ -84,6 +99,8 @@ if (role === 'worker') {
       return;
     }
     const body = { service: 'hypervibe-provider-conformance', revision: process.env.CONFORMANCE_APP_REVISION || 'unknown',
+      // How this process was started: through the image's own entrypoint or not, and with which first argument.
+      entrypoint: process.env.CONFORMANCE_ENTRYPOINT === '1', startedWith: process.argv[2] ?? null,
       database: false, worker: false, scheduled: false, onDemand: false, storage: false };
     // Errors can carry connection details; the booleans are the whole answer.
     try {

@@ -14,6 +14,38 @@ const report = (actions: PlanReportAction[], extra: Partial<PlanReport> = {}): P
 });
 
 describe('standalone infrastructure plan report', () => {
+  it('distinguishes the stored secret and its read permission, including previously saved plans', () => {
+    const key = 'hv-example-api-key';
+    const stored = action('secret-container:' + key, key, { kind: 'secret', type: 'noop' });
+    const grant = action('secret-runtime-access:' + key, key, { kind: 'secret', requiresConfirm: true });
+    const html = renderPlanReportHtml(report([stored, grant]));
+    expect(html).toContain('data-type="create"><strong>0</strong>');
+    expect(html).toContain('data-type="grant"><strong>1</strong>');
+    expect(html).toContain('<option value="grant">Grant access</option>');
+    expect(html).toContain('<span class="status">Grant access</span>');
+    expect(html).toContain('<span class="action-name">App read access to ' + key + '</span>');
+    expect(html).toContain('<span class="node-title">Secret permissions</span>');
+    expect(html).toContain('<span class="node-title">Secrets</span>');
+    expect(html).toContain('<code>' + grant.id + '</code>');
+    expect(html).toContain('Confirmation required');
+
+    const mixed = renderPlanReportHtml(report([{ ...stored, type: 'create' }, { ...grant, type: 'destroy' }]));
+    expect(mixed).toContain('data-type="create"><strong>1</strong>');
+    expect(mixed).toContain('data-type="revoke"><strong>1</strong>');
+    expect(mixed).toContain('<span class="status">Revoke access</span>');
+  });
+
+  it.each(['azure', 'aws'])('distinguishes the bundled %s app identity from a service named runtime', provider => {
+    const appIdentity = action('identity:runtime', 'runtime', { kind: 'service', provider });
+    const service = action('service:runtime', 'runtime', { kind: 'service', provider });
+    const html = renderPlanReportHtml(report([appIdentity, service]));
+    expect(html).toContain('<span class="node-title">App identity and permissions</span>');
+    expect(html).toContain('<span class="node-title">runtime</span>');
+    expect(html).toContain('<span class="action-name">App runtime identity</span>');
+    expect(html).toContain('data-type="create"><strong>2</strong>');
+    expect(html).not.toContain('<option value="grant">');
+  });
+
   it('groups Google Cloud setup by purpose and wires only explicit cross-group dependencies', () => {
     const api1 = action('project-setup:google_project_service:run', 'Enable run.googleapis.com');
     const api2 = action('project-setup:google_project_service:build', 'Enable cloudbuild.googleapis.com', { dependsOn: [api1.id] });
@@ -92,10 +124,54 @@ describe('standalone infrastructure plan report', () => {
     expect(html).not.toContain('class="map-canvas"');
   });
 
+  it('presents the reviewed access check without attributing future results to an infrastructure plan', () => {
+    const html = renderPlanReportHtml(report([action('app-read', 'App read check')], {
+      scope: 'Google Cloud transfer access check', approval: 'whole-plan',
+    }));
+    expect(html).toContain('<span class="brand-topic">Transfer access check</span>');
+    expect(html).toContain('Google Cloud transfer access check');
+    expect(html).toContain('<span class="node-title">App read check</span>');
+    expect(html).not.toMatch(/infrastructure plan|verified at planning time/i);
+  });
+
   it('explains how approval works when reviewing a saved project setup', () => {
     const setup = report([action('create-project', 'Google Cloud project')], { approval: 'whole-plan' });
-    expect(renderPlanReportHtml(setup)).toContain('Applying this setup requires approval of the whole plan.');
-    expect(renderPlanReportHtml(report([]))).not.toContain('approval of the whole plan');
+    expect(renderPlanReportHtml(setup)).toContain('Approve the whole plan in the chat or terminal where you requested it.');
+    expect(renderPlanReportHtml(report([]))).not.toContain('Approve the whole plan');
+  });
+
+  it('describes only the file and the app job in an export file access check', () => {
+    const html = renderPlanReportHtml(report([action('app', 'Check direct file access'),
+      action('cleanup', 'Remove test resources', { reason: 'The deleted file is recoverable for 7 days.' })], {
+      scope: 'Google Cloud export file access check', approval: 'whole-plan',
+    }));
+    expect(html).toContain('<span class="brand-topic">Export file access check</span>');
+    expect(html).toMatch(/one temporary Cloud Run job/i);
+    expect(html).toMatch(/app account/i);
+    expect(html).toContain('7 days');
+    expect(html).not.toMatch(/infrastructure plan|verified at planning time|two temporary Cloud Run jobs|test secret|copy account/i);
+  });
+
+  it('explains replacing app access grants without reporting a data replacement or suppressing a real warning', () => {
+    const actions = [action('runtime-access', 'App access to secrets', { type: 'replace' }),
+      action('transfer-slot:secret:fixture', 'The copy job’s secret', { kind: 'secret', type: 'noop' })];
+    const html = renderPlanReportHtml(report(actions, { scope: 'Google Cloud project setup',
+      setupPurpose: 'railway-transfer-isolation', warnings: ['A separate permission requires review.'] }));
+    expect(html).toContain('The two permissions reviewed here belong to the app');
+    expect(html).toContain('the contents of temporary database exports');
+    expect(html).toContain('A separate permission requires review.');
+    expect(html).not.toContain('This plan reserves an empty Google Cloud secret');
+  });
+
+  it('takes the reader from the copy explanation to the reserved secret when its row is unambiguous', () => {
+    const scope = { scope: 'Google Cloud project setup', setupPurpose: 'railway-transfer' as const };
+    const unrelated = action('secret:app', 'App API key', { kind: 'secret', type: 'noop' });
+    const slot = action('transfer-slot:secret:one', 'Empty migration secret', { kind: 'secret' });
+    const render = (actions: PlanReportAction[]) => renderPlanReportHtml(report(actions, scope));
+    const link = '<a href="#action-1">View the secret in this plan</a>';
+    expect(render([unrelated, slot])).toContain(link);
+    expect(render([unrelated, { ...slot, type: 'noop' }])).toContain(link);
+    expect(render([slot, { ...slot, id: 'transfer-slot:secret:two' }])).not.toContain('View the secret in this plan');
   });
 
   it('escapes every untrusted text boundary and embeds only its hashed script and stylesheet', () => {

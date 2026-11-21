@@ -326,7 +326,7 @@ export const planRunDocumentSchema = z.object({
   const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
     'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
     'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete', 'awsImageBuild', 'awsDatabaseDrop',
-    'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup'];
+    'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup', 'azureFailedAppEnvironment', 'gcpStorageEmpty', 'gcpTeardownCleanup'];
   if (document.scope === 'infrastructure-engine') {
     const engine = (document as { engine?: { planId?: unknown } }).engine;
     if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha
@@ -664,7 +664,7 @@ export interface ConvergeResult {
   receipts: ActionReceipt[];
 }
 
-const DEFAULT_MAX_PLAN_AGE_MS = 24 * 60 * 60 * 1000;
+export const DEFAULT_MAX_PLAN_AGE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Stable fingerprint of observed state, ignoring volatile fields

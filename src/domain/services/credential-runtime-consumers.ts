@@ -4,6 +4,7 @@ import type { Component } from '../entities/component.entity.js';
 import type { DatabaseCredentialTarget } from '../ports/database-credential.port.js';
 import { buildDatabaseEnvVarsFromComponent } from './database-env.js';
 import { replaceDatabasePassword } from './database-credential-value.js';
+import { secretServiceScopeProblems, secretServicesFor } from './secret-service-scope.js';
 
 export function credentialRuntimeServices(spec: ProjectSpec, environment: string, variable: string, descriptor?: CredentialTracking): string[] {
   const desired = spec.environments[environment];
@@ -17,7 +18,10 @@ export function credentialRuntimeServices(spec: ProjectSpec, environment: string
     const webhook = desired.payments?.stripe?.webhooks[descriptor.stripeWebhook.webhook];
     return descriptor.stripeWebhook.environment === environment && webhook?.envVar === variable ? [webhook.service] : [];
   }
-  return Object.keys(desired.services).sort();
+  // Callers on a provider that cannot limit a secret to named services must stop, not widen it.
+  const unsupported = secretServiceScopeProblems(spec, environment).find(problem => problem.startsWith(`Secret ${variable} `));
+  if (unsupported) throw new Error(unsupported);
+  return secretServicesFor(spec, environment, variable);
 }
 
 /** Private templates are frozen inside the encrypted plan, never in metadata. */

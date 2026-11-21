@@ -3,7 +3,10 @@ import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { engineEnvironmentProblems } from '../../domain/services/infrastructure-engine-selection.js';
 import { buildCloudRunConfiguration, planWithCloudRunRevisionMinimums } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { buildEngineInput } from '../infrastructure-engine.js';
-import { ciReleaseTargets } from '../launch.js';
+import { buildAwsEngineInput } from '../infrastructure-engine-aws.js';
+import { buildAwsConfiguration } from '../../adapters/providers/aws/tofu/aws-engine.config.js';
+import { parseEnginePlan, translateEnginePlan } from '../../adapters/engine/opentofu/plan-mapping.js';
+import { ciReleaseTargets, estimateAwsMonthlyCost, estimateMonthlyCost } from '../launch.js';
 import { startCommandFields } from '../../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { RELEASE_SCRIPT } from '../../adapters/providers/gcp/gcp-ci-release-script.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from '../gcp-database-shape.js';
@@ -41,10 +44,68 @@ function configuration() {
     })) });
 }
 
+describe('fixed-size Fargate workers', () => {
+  it.each([[true, 0], [false, 1], [undefined, 1]] as const)('plans and prices workerPaused=%s', (workerPaused, count) => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'studio', environments: { staging: {
+      hosting: { provider: 'aws' }, services: { api: { public: false }, worker: { workloadKind: 'worker', workerPaused } },
+    } } });
+    const context = { prefix: 'hv-studio', parameterPath: '/hypervibe/s1/', environment: { id: 's1', platformBindings: {} },
+      connection: { accountId: '111122223333', region: 'us-west-2' } };
+    const configuration = buildAwsConfiguration(buildAwsEngineInput(spec, 'staging', context as never, { secretKeys: [], image: 'registry/app:test' }));
+    const resources = (configuration.files['tasks.tf.json'] as any).resource;
+    expect(resources.aws_ecs_service.worker).toMatchObject({ name: 'hv-studio-worker', desired_count: count });
+    expect(resources.aws_ecs_service.worker.lifecycle?.[0]?.ignore_changes ?? []).not.toContain('desired_count');
+    expect(resources.aws_ecs_service.api.desired_count).toBe(1);
+    expect(resources.aws_sfn_state_machine).toBeUndefined();
+    expect(resources.aws_scheduler_schedule).toBeUndefined();
+    const estimate = estimateAwsMonthlyCost(spec.environments.staging!).find(line => line.item.includes('worker ('));
+    expect(estimate?.item).toContain(workerPaused ? 'paused' : 'always on');
+    if (workerPaused) expect(estimate?.estimate).toContain('$0');
+    const review = translateEnginePlan({ provider: 'aws', configuration,
+      segment: { id: 'test', engine: 'opentofu', planDigest: 'p', configurationDigest: 'c', engineVersion: '1', providerVersions: {} },
+      parsed: parseEnginePlan(JSON.stringify({ resource_changes: [{ address: 'aws_ecs_service.worker', type: 'aws_ecs_service', mode: 'managed',
+        change: { actions: ['update'], before: { desired_count: 1 - count }, after: { desired_count: count } } }] })) });
+    expect(review).toMatchObject({ blockers: [], actions: [{ id: 'service:worker', type: 'update', requiresConfirm: true,
+      diff: [{ field: 'aws_ecs_service.desired_count' }] }] });
+  });
+});
+
 describe('production settings on Google Cloud', () => {
   const files = configuration().files as Record<string, any>;
   const services = files['cloudrun.tf.json'].resource.google_cloud_run_v2_service;
   const buckets = files['storage.tf.json'].resource.google_storage_bucket;
+
+  it.each([[true, 0], [false, 1], [undefined, 1]] as const)('plans the fixed worker count with workerPaused=%s', (workerPaused, count) => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'studio', environments: { staging: {
+      hosting: { provider: 'cloudrun' }, services: { web: {}, worker: { workloadKind: 'worker', workerPaused } },
+    } } });
+    const input = engineInput(spec);
+    const estimate = estimateMonthlyCost(spec.environments.staging!).find(line => line.item.startsWith('Worker worker'));
+    expect(estimate?.item).toContain(workerPaused ? 'paused' : 'always on');
+    if (workerPaused) expect(estimate?.estimate).toContain('$0');
+    const files = buildCloudRunConfiguration({ ...input, runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' }).files as Record<string, any>;
+    const resources = files['workerpools.tf.json'].resource;
+    const pool = resources.google_cloud_run_v2_worker_pool.worker;
+    expect(pool.name).toBe('worker-staging');
+    expect(pool.scaling).toEqual([{ scaling_mode: 'MANUAL', manual_instance_count: count }]);
+    expect(pool.lifecycle[0].ignore_changes).not.toContain('scaling[0].manual_instance_count');
+    expect(resources.google_cloud_scheduler_job).toBeUndefined();
+    expect(files['cloudrun.tf.json'].resource.google_cloud_run_v2_service.web).toBeDefined();
+  });
+
+  it.each([
+    ['cloudrun', { workloadKind: 'web' }],
+    ['cloudrun', { workloadKind: 'worker', onDemand: { pendingWorkQuery: 'SELECT 1' } }],
+    ['aws', { workloadKind: 'worker', onDemand: { pendingWorkQuery: 'SELECT 1' } }], ['aws', { workloadKind: 'web' }],
+    ['aws', { workloadKind: 'cron', cronSchedule: '0 1 * * *' }],
+    ['railway', { workloadKind: 'worker' }], ['azure', { workloadKind: 'worker' }],
+  ])('rejects workerPaused when %s cannot hold that workload at zero', (provider, service) => {
+    const result = projectSpecSchema.safeParse({ version: 1, project: 'studio', environments: { staging: {
+      hosting: { provider }, services: { worker: { ...service as object, workerPaused: true } },
+    } } });
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error.issues.map(issue => issue.path.at(-1))).toContain('workerPaused');
+  });
 
   it('keeps an always-on web service running with its CPU available, and leaves others to scale to zero', () => {
     expect(services.web.template[0].scaling[0].min_instance_count).toBe(1);

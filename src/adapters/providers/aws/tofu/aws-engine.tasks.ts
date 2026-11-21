@@ -92,7 +92,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
       wait_for_steady_state: true,
       depends_on: ['aws_ecs_cluster_capacity_providers.main', 'aws_iam_role_policy.runtime'],
       // The release path (CI or hv_deploy) owns the image after creation.
-      lifecycle: [{ ignore_changes: ['primary_container[0].image'] }],
+      lifecycle: [{ ignore_changes: ['primary_container[0].image', 'primary_container[0].command'] }],
     };
     resources[`aws_ecs_express_gateway_service.${key}`] = mapping;
     outputs[`service_${key}_url`] = { value: `\${aws_ecs_express_gateway_service.${key}.ingress_paths[0].endpoint}` };
@@ -105,7 +105,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
     definitions[key] = taskDefinition(worker);
     services[key] = {
       name: worker.resourceName, cluster: '${aws_ecs_cluster.main.id}', task_definition: `\${aws_ecs_task_definition.${key}.arn}`, launch_type: 'FARGATE',
-      desired_count: worker.pendingWorkQuery ? 0 : 1, network_configuration: network,
+      desired_count: worker.paused || worker.pendingWorkQuery ? 0 : 1, network_configuration: network,
       // The waker owns the task count of on-demand workers.
       ...(worker.pendingWorkQuery ? { lifecycle: [{ ignore_changes: ['desired_count'] }] } : {}),
     };

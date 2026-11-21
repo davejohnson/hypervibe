@@ -364,6 +364,30 @@ export interface ProviderCredentialUpdateCapability {
   >;
 }
 
+export const migrationAccessModes = ['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access'] as const;
+export type MigrationAccess = (typeof migrationAccessModes)[number];
+
+export function isMigrationAccessCheck(mode: MigrationAccess): boolean {
+  return mode === 'verify-copy-access' || mode === 'verify-export-file-access';
+}
+
+export interface MigrationAccessCapability {
+  sourceProvider: string;
+  prepare(input: {
+    mode: MigrationAccess;
+    project: Project;
+    sourceEnvironment: string;
+    targetEnvironment: string;
+    targetProjectId: string;
+    region: string;
+    runtimeEmail: string;
+    deployEmail: string;
+    token: () => Promise<string>;
+    planId?: string;
+    requireBrowserApproval?: boolean;
+  }): Promise<Record<string, unknown> & { success: boolean }>;
+}
+
 export interface RegisteredProvider {
   metadata: ProviderMetadata;
   factory: (credentials: unknown) => unknown | Promise<unknown>;
@@ -377,6 +401,8 @@ export interface RegisteredProvider {
   hostedObservation?: HostedObservationCapability;
   /** Provider-owned deletion driver for explicitly retained non-lifecycle resources. */
   retainedCleanup?: ProviderRetainedCleanupCapability;
+  /** Prepare or verify the reviewed migration access for this source provider. */
+  migrationAccess?: MigrationAccessCapability;
   /** Provider-owned projection from database bindings to workload runtime variables. */
   databaseRuntime?: ProviderDatabaseRuntimeProjection;
   /** Existing infrastructure can be adopted only when a provider declares and tests this capability. */

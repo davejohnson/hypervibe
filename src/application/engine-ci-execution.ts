@@ -59,24 +59,16 @@ export async function executeEngineCiRelease(input: EngineCiReleaseInput): Promi
     for (const service of Object.values(environment.services)) if ((service.workloadKind ?? 'web') === 'web') assertHealthCheckPath(service.healthCheckPath ?? '/');
     if (Object.values(environment.services).some((s) => (s.workloadKind ?? 'web') === 'web' && s.public === false)) return { version: 1, status: 'blocked', message: 'CI cannot verify private web services on AWS or Azure yet. No build or release was started.' };
     if (environment.migrations?.mode === 'releaseCommand' || Object.values(environment.services).some((s) => s.releaseCommand)) throw new Error('Release commands are not implemented for these engine CI releases.');
-    if (binding.provider === 'aws') {
-      const web = Object.values(environment.services).filter((s) => (s.workloadKind ?? 'web') === 'web');
-      // One image carries one web command; web services have no per-service
-      // override. An omitted command is not proof of equivalence to an explicit one.
-      if (new Set(web.map((s) => s.startCommand)).size > 1) return { version: 1, status: 'blocked', message: 'AWS web services share one image and cannot use different start commands in CI yet. Declare the same startCommand for every web service before releasing.' };
-      if (web.some((s) => s.startCommand)) {
-        const dockerfile = (await exec('git', ['-C', directory, 'ls-tree', '--name-only', head, 'Dockerfile'])).stdout.trim();
-        if (dockerfile) return { version: 1, status: 'blocked', message: 'AWS web startCommand with a repository Dockerfile is not supported yet. Use the generated Dockerfile path or declare the command in the repository Dockerfile before releasing.' };
-      }
-    }
     const workloads = selectReleaseWorkloads(environment, undefined);
     if ('blocked' in workloads || workloads.selected.length === 0 || workloads.selected.length > 20) throw new Error('CI release requires between one and twenty exact workload bindings.');
     const provider = cloudEngines.find((entry) => entry.hostingProvider === binding.provider);
     if (!provider?.ciRelease) throw new Error('The selected engine does not implement CI image releases.');
     const target = await provider.ciRelease(binding, { ...input.github, deadlineMs: Date.now() + 35 * 60_000 }, spec);
-    await target.preflight();
-    const source = await packageLocalCommit(directory, { format: target.format, dockerfileName: target.dockerfileName, addFiles: target.addFiles, commitSha: head,
+    const preflight = await target.preflight();
+    if (preflight) return { version: 1, ...context, status: 'blocked', message: preflight.blocked };
+    const source = await packageLocalCommit(directory, { format: target.format, dockerfileName: target.dockerfileName, missingDockerfileMessage: target.missingDockerfileMessage, addFiles: target.addFiles, commitSha: head,
       dockerfileFor: (repositoryDockerfile) => target.dockerfileFor({ repositoryDockerfile, runtime: spec.runtime, startCommand: workloads.startCommand }) });
+    if ('blocked' in source && source.blocked === target.missingDockerfileMessage) return { version: 1, ...context, status: 'blocked', message: target.missingDockerfileMessage };
     if ('blocked' in source || source.commitSha !== head) throw new Error('The exact release source could not be packaged.');
     const dataDir = mkdtempSync(join(tmpdir(), 'hypervibe-ci-release-'));
     const previous = { data: process.env.HYPERVIBE_DATA_DIR, key: process.env.HYPERVIBE_SECRET_KEY, repo: process.env.HYPERVIBE_DISABLE_REPO_SPEC };
@@ -95,8 +87,8 @@ export async function executeEngineCiRelease(input: EngineCiReleaseInput): Promi
           try {
             const built = await target.build(packaged);
             if ('error' in built) { stopped = true; return { error: 'The cloud image build did not finish successfully. Inspect its managed build logs before retrying.', ...(built.unknown ? { unknown: true } : {}) }; }
-            if (!/@sha256:[a-f0-9]{64}$/.test(built.image)) { stopped = true; return { error: 'The cloud did not confirm an immutable image digest.', unknown: true }; }
-            return { image: built.image };
+            if ([built.image, ...Object.values(built.imagesByService ?? {})].some(image => !/@sha256:[a-f0-9]{64}$/.test(image))) { stopped = true; return { error: 'The cloud did not confirm an immutable image digest.', unknown: true }; }
+            return { image: built.image, imagesByService: built.imagesByService };
           } catch { stopped = true; return { error: 'The cloud build outcome could not be verified. Inspect its managed build logs before retrying.', unknown: true }; }
         },
         recordImage: () => undefined,

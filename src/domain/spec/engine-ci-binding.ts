@@ -83,7 +83,12 @@ export function admitEngineCiRelease(input: { rawSpec: unknown; bindings: unknow
   }
   const services = spec.environments[input.environmentName]!.services;
   if (Object.keys(services).length !== Object.keys(binding.services).length
-    || Object.entries(services).some(([name, service]) => binding.services[name]?.workloadKind !== (service.workloadKind ?? 'web'))) {
+    || Object.entries(services).some(([name, service]) => {
+      const bound = binding.services[name];
+      const kind = service.workloadKind ?? 'web';
+      return bound?.workloadKind !== kind || (binding.provider === 'aws' && kind === 'web'
+        && bound.resourceType !== (service.public === false ? 'ecs-service' : 'ecs-express'));
+    })) {
     throw new Error('Every declared workload needs its exact applied native identity before CI can release.');
   }
   return { status: 'ready', binding, spec };

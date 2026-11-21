@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { GCP_PROJECT_ID_PATTERN } from '../services/gcp-environment-target.js';
 import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
+import { SECRET_SERVICE_SCOPE_PROVIDERS } from '../services/secret-service-scope.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
 import { withDefaultDatabaseProvider, withoutEngineFlag } from './database-defaults.js';
 import { dnsHostnameBelongsToZone, dnsHostnameSchema, dnsSpecSchema } from './dns.schema.js';
@@ -96,6 +97,8 @@ export const serviceSpecSchema = z.object({
    * workers are already always on unless onDemand is set.
    */
   alwaysOn: z.boolean().optional(),
+  /** Hold a fixed-size Cloud Run worker pool or ECS worker service at zero configured instances. */
+  workerPaused: z.boolean().optional(),
   /**
    * Run a background worker only while it has work: it scales to zero when
    * idle and starts within about a minute of new work. pendingWorkQuery is one
@@ -847,6 +850,13 @@ export const envFileSpecSchema = z.object({
   exclude: z.array(z.string().min(1)).default([]),
 }).strict().prefault({});
 
+/**
+ * Services that receive the secret, in every environment it targets. Omitted:
+ * every service of each environment. Named: those services only.
+ */
+const secretServicesSchema = z.array(z.string().min(1)).min(1, 'services must name at least one service; omit it to target every service')
+  .refine(names => new Set(names).size === names.length, 'services cannot contain duplicates');
+
 export const delegatedSecretSpecSchema = z.object({
   credential: credentialTrackingSchema.optional(),
   /** Delegated values are supplied explicitly at plan time and never stored in the spec. */
@@ -855,6 +865,8 @@ export const delegatedSecretSpecSchema = z.object({
   principal: z.string().min(1),
   /** Runtime environments in which this secret must be injected. */
   environments: z.array(z.string().min(1)).default([]),
+  /** Limit the secret to these services instead of every service in each environment. */
+  services: secretServicesSchema.optional(),
   /** Optional GitHub Actions destinations managed by the canonical GitHub environment plan. */
   githubActions: z.object({
     repository: z.boolean().default(false),
@@ -875,6 +887,13 @@ export const delegatedSecretSpecSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: 'delegated secrets require at least one runtime or GitHub Actions destination',
       path: ['environments'],
+    });
+  }
+  if (secret.services && secret.environments.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'services limits runtime injection and requires at least one runtime environment',
+      path: ['services'],
     });
   }
   const githubEnvironments = secret.githubActions?.environments ?? [];
@@ -915,6 +934,8 @@ export const hypervibeRandomSecretSpecSchema = z.object({
     1,
     'Hypervibe-owned secrets require at least one runtime environment'
   ),
+  /** Limit the secret to these services instead of every service in each environment. */
+  services: secretServicesSchema.optional(),
 }).strict().superRefine((secret, ctx) => {
   if (secret.conflictsWith !== undefined && secret.replacementPolicy !== 'immutable') {
     ctx.addIssue({
@@ -1602,8 +1623,12 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
     region: z.string().trim().min(1).optional(),
     /** A dedicated Google Cloud project for this environment. Omit to use the repository connection. */
     gcpProjectId: z.string().regex(GCP_PROJECT_ID_PATTERN, 'Invalid Google Cloud project ID').optional(),
+    /** Prepare explicit access on each secret the app consumes before project IAM is narrowed separately. */
+    gcpRuntimeSecretGrants: z.literal('per-secret').optional(),
   }).strict().refine(hosting => !hosting.gcpProjectId || hosting.provider === 'cloudrun', {
     path: ['gcpProjectId'], message: 'gcpProjectId requires Cloud Run hosting',
+  }).refine(hosting => !hosting.gcpRuntimeSecretGrants || hosting.provider === 'cloudrun', {
+    path: ['gcpRuntimeSecretGrants'], message: 'gcpRuntimeSecretGrants requires Cloud Run hosting',
   }),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
@@ -1951,6 +1976,10 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
     }
   }
   for (const [serviceName, service] of Object.entries(environment.services)) {
+    if (service.workerPaused !== undefined && (!['cloudrun', 'aws'].includes(environment.hosting.provider) || service.workloadKind !== 'worker' || service.onDemand)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['services', serviceName, 'workerPaused'],
+        message: 'workerPaused requires a fixed-size Google Cloud or AWS worker. On-demand workers have a separate wake-up mechanism.' });
+    }
     for (const alias of Object.keys(service.databaseEnvAliases ?? {})) {
       databaseAliasKeys.add(alias);
       if (!environment.database) {
@@ -2529,6 +2558,26 @@ export const projectSpecSchema = z.object({
       ? 'delegated secret'
       : 'Hypervibe-owned secret';
     const seen = new Set<string>();
+    if (secret.services) {
+      if (secret.credential) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secrets', key, 'services'],
+          message: `${secretKind} "${key}" cannot combine services with credential tracking; a tracked credential is not limited to named services yet` });
+      }
+      for (const environmentName of new Set(secret.environments)) {
+        const environment = spec.environments[environmentName];
+        if (!environment) continue;
+        if (!SECRET_SERVICE_SCOPE_PROVIDERS.includes(environment.hosting.provider)) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secrets', key, 'services'],
+            message: `${secretKind} "${key}" is limited to named services, which hosting provider "${environment.hosting.provider}" does not support yet: every service in "${environmentName}" would receive it. Remove services or host "${environmentName}" on Cloud Run` });
+        }
+        for (const serviceName of secret.services) {
+          if (!Object.hasOwn(environment.services, serviceName)) {
+            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['secrets', key, 'services'],
+              message: `${secretKind} "${key}" names service "${serviceName}", which environment "${environmentName}" does not declare` });
+          }
+        }
+      }
+    }
     if (secret.ownership === 'hypervibe' && secret.conflictsWith?.includes(key)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,

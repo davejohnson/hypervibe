@@ -3,7 +3,8 @@ import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindin
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
-import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
+import { secretServiceScopeProblems } from '../domain/services/secret-service-scope.js';
+import { describeFixedWorkerCountChanges, specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
@@ -19,7 +20,7 @@ import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers
 import {
   awsKey, awsRegistryUrl, awsSharedClusterArn, buildAwsBuildConfiguration, buildAwsSharedConfiguration, type AwsEngineInput, type AwsSharedInput,
 } from '../adapters/providers/aws/tofu/aws-engine.config.js';
-import { awsImageTag } from '../adapters/providers/aws/aws-release.client.js';
+import { awsImageTag, awsRequiredDockerfile, usesAwsWebCommand } from '../adapters/providers/aws/aws-release.client.js';
 import { localRepositoryFor } from './local-repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
@@ -58,6 +59,10 @@ export interface AwsEngineBinding {
   kind?: 'opentofu';
   /** Image built by the release path; services are created once it exists. */
   imageUri?: string;
+  /** Image without an inherited entrypoint, used only by web services with an explicit command. */
+  webImageUri?: string;
+  /** True when the ordinary image came from the Dockerfile in its exact source commit. */
+  imageHasDockerfile?: boolean;
   /** The app's database login exists and DATABASE_URL is in Parameter Store. */
   databaseLoginAt?: string;
   /** The environment's database is on the project's shared testing cluster (earlier versions gave each environment its own). */
@@ -193,7 +198,7 @@ export async function resolveAwsEngineContext(ctx: CommandContext, project: Proj
 /** Desired state the AWS engine cannot manage yet; listed problems block planning instead of being ignored. */
 export function awsEngineProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName]!;
-  const problems: string[] = commonEngineProblems(environment);
+  const problems: string[] = [...commonEngineProblems(environment), ...secretServiceScopeProblems(spec, environmentName)];
   if (environment.database && awsProfileFor(environmentName) === 'production') {
     problems.push(`${environmentName} uses the production profile (RDS db.t4g.micro), which the AWS engine does not build yet. Testing environments (Aurora that pauses when idle) are supported.`);
   }
@@ -220,9 +225,11 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   secretKeys: string[];
   /** The image the plan builds first, when the environment has none yet. */
   image?: string;
+  webImage?: string;
 }): AwsEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
-  const imageUri = awsBinding(context.environment).imageUri ?? extra.image;
+  const imageUri = extra.image ?? awsBinding(context.environment).imageUri;
+  const webImageUri = extra.webImage ?? awsBinding(context.environment).webImageUri;
   const name = (service: string) => awsResourceName(context.prefix, service);
   const services = Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b));
   // Workloads need an image in this environment's registry, so they are created after the first build.
@@ -247,11 +254,14 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
     storage: Object.entries(environmentSpec.storage ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([name, storage]) => ({
       name, bucket: bucketName(name), ...(storage.versioning ? { versioning: true } : {}), ...(storage.browserUploads ? { browserUploads: true } : {}),
     })),
+    webCommands: services.some(([, service]) => usesAwsWebCommand(service)),
     services: withImage.filter(([, service]) => (service.workloadKind ?? 'web') === 'web').map(([logicalName, service]) => ({
-      logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, public: service.public ?? true,
+      logicalName, resourceName: name(logicalName), initialImageUri: service.startCommand && webImageUri ? webImageUri : imageUri!, public: service.public ?? true,
+      ...(webImageUri && service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
       env: envFor(logicalName), ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
     })),
     workers: withImage.filter(([, service]) => service.workloadKind === 'worker').map(([logicalName, service]) => ({
+      ...(service.workerPaused ? { paused: true } : {}),
       logicalName, resourceName: name(logicalName), initialImageUri: imageUri!, env: envFor(logicalName),
       ...(service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
       ...(service.onDemand ? { pendingWorkQuery: service.onDemand.pendingWorkQuery, ...(service.onDemand.nextWorkAtQuery ? { nextWorkAtQuery: service.onDemand.nextWorkAtQuery } : {}) } : {}),
@@ -304,12 +314,12 @@ async function awsSharedInputFor(context: AwsEngineContext, spec: ProjectSpec, e
 }
 
 /** The engine configuration for an environment as it stands: what plans compare against and teardown destroys. */
-async function awsEngineConfigurationFor(context: AwsEngineContext, spec: ProjectSpec, environmentName: string, ownedSecretKeys: string[], image?: string) {
+async function awsEngineConfigurationFor(context: AwsEngineContext, spec: ProjectSpec, environmentName: string, ownedSecretKeys: string[], image?: string, webImage?: string) {
   const environmentSpec = spec.environments[environmentName]!;
   const binding = awsBinding(context.environment);
   // The login is created in the same apply, before anything starts, so workloads are wired to DATABASE_URL from the start.
   const secretKeys = [...ownedSecretKeys, ...(environmentSpec.database ? [ENGINE_DATABASE_URL_KEY] : [])];
-  const input = buildAwsEngineInput(spec, environmentName, context, { secretKeys, ...(image ? { image } : {}) });
+  const input = buildAwsEngineInput(spec, environmentName, context, { secretKeys, image, webImage });
   return { binding, input, configuration: awsEngineBackend.buildConfiguration(input), buildConfiguration: buildAwsBuildConfiguration(input) };
 }
 
@@ -481,10 +491,22 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   // The first image is built in this apply from the local commit, so the workloads are created in the same reviewed plan.
   const workloads = Object.keys(environmentSpec.services).length;
   const previous = awsBinding(context.environment);
-  const commit = !previous.imageUri && workloads ? localCommit(project) : undefined;
-  const firstImage = commit ? `${awsRegistryUrl({ accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix })}:${awsImageTag(commit.commitSha)}` : undefined;
+  const needsWebImage = Object.values(environmentSpec.services).some(usesAwsWebCommand);
+  const upgrade = previous.imageUri && !previous.webImageUri && needsWebImage;
+  const defaults = Object.entries(environmentSpec.services).filter(([, service]) => (service.workloadKind ?? 'web') === 'web' && !service.startCommand).map(([name]) => name);
+  const commit = (!previous.imageUri || upgrade) && workloads ? localCommit(project) : undefined;
+  if (upgrade && !commit) return { blocked: ['Run the plan in the local repository to build an image that supports per-service web commands.'] };
+  if (commit && defaults.length) {
+    try {
+      const entry = execFileSync('git', ['-C', commit.directory, 'ls-tree', '-l', commit.commitSha, '--', 'Dockerfile'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+      if (!/^100[0-7]{3} blob [a-f0-9]+\s+[1-9]\d*\tDockerfile$/.test(entry.trim())) throw new Error('Missing committed Dockerfile');
+    } catch { return { blocked: [awsRequiredDockerfile(Object.values(environmentSpec.services))!] }; }
+  }
+  const registry = awsRegistryUrl({ ...context.connection, prefix: context.prefix });
+  const firstImage = commit ? `${registry}:${awsImageTag(commit.commitSha)}` : undefined;
+  const webImage = commit && needsWebImage ? `${registry}:${awsImageTag(commit.commitSha, true)}` : undefined;
   // An optional key without a value is left out, so no workload references a parameter that does not exist.
-  const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported.filter((key) => !secrets.unset?.includes(key))], firstImage);
+  const built = await awsEngineConfigurationFor(context, spec, environmentName, [...generated, ...imported.filter((key) => !secrets.unset?.includes(key))], firstImage, webImage);
   const { binding, input, configuration } = built;
   if (environmentSpec.database && binding.databaseLoginAt && !binding.sharedDatabase) {
     return { blocked: [`${environmentName} was created with its own database cluster, before testing environments shared one. Tear it down (hv_plan scope="teardown") and launch it again to move it onto the shared cluster.`] };
@@ -515,15 +537,21 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   // 2. The first image.
   const imageActions: PlanAction[] = commit ? [{
     id: 'build:image', type: 'create', verified: true, resource: { kind: 'service', name: 'image', provider: 'aws' },
-    reason: `Hypervibe will build commit ${commit.commitSha.slice(0, 12)} in CodeBuild (a few cents) so the services start from it.`,
+    reason: `Hypervibe will build commit ${commit.commitSha.slice(0, 12)} in CodeBuild (a few cents)${webImage ? ', including an image for web services with start commands' : ''}.`,
     ...(buildChanging.length ? { dependsOn: buildChanging } : {}),
-    metadata: { operation: AWS_IMAGE_BUILD_OPERATION, accountId: context.connection.accountId, commitSha: commit.commitSha, directory: commit.directory, image: firstImage },
+    metadata: { operation: AWS_IMAGE_BUILD_OPERATION, accountId: context.connection.accountId, commitSha: commit.commitSha, directory: commit.directory, image: firstImage, ...(webImage ? { webImage } : {}) },
   }] : [];
   // 3. Everything else.
   const planId = crypto.randomUUID();
   const planned = await engine.plan({ backend: awsEngineBackend, configuration, auth: context.auth, state: context.state, planId });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   if (planned.blockers.length) return { blocked: planned.blockers };
+
+  // Earlier bindings have no Dockerfile provenance. An unrelated/no-op plan needs no new image evidence.
+  if (!commit && previous.imageUri && previous.imageHasDockerfile !== true && planned.actions.some(action =>
+    ['create', 'replace', 'update'].includes(action.type) && action.resource.kind === 'service' && defaults.includes(action.resource.name))) {
+    return { blocked: ['The existing image has no confirmed Dockerfile startup command for the changing web service. Release an existing workload from a commit with a Dockerfile using hv_deploy, then plan again. For a first workload, declare its startCommand in hv_spec.'] };
+  }
 
   // The app login is created once; each on-demand worker's waker login once its secret exists.
   const wakers = (input.workers ?? []).filter((worker) => worker.pendingWorkQuery);
@@ -543,6 +571,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const prerequisites = [...secretActions, ...buildPlanned.actions, ...imageActions, ...appLoginActions].filter((action) => action.type !== 'noop').map((action) => action.id);
   const engineActions = planned.actions.map((action) => (action.type === 'create' || action.type === 'update' || action.type === 'replace') && prerequisites.length
     ? { ...action, dependsOn: [...new Set([...(action.dependsOn ?? []), ...prerequisites])] } : action);
+  describeFixedWorkerCountChanges(engineActions, environmentSpec, 'aws_ecs_service.desired_count');
   // What the environment's own plan creates is filled in after it: the query credential and each waker's secret.
   const queryCredential = Boolean(environmentSpec.database) && (appLogin || !binding.database?.querySecretArn || engineActions.some(action => action.id === 'database-query:credential' && action.type !== 'noop'));
   const missingWakers = wakerSecrets.filter((secret) => !(binding.wakerLogins ?? []).includes(secret));
@@ -591,6 +620,16 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     || reviewed.aws.region !== context.connection.region || reviewed.aws.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different AWS account, region or environment. Re-run hv_plan.' };
   }
+  // A saved older plan may have approved only the original image. Re-plan before adding another build output.
+  const buildAction = document.actions.find(action => action.metadata?.operation === AWS_IMAGE_BUILD_OPERATION);
+  if (buildAction) {
+    const { image, webImage, commitSha } = buildAction.metadata!;
+    const registry = awsRegistryUrl({ ...context.connection, prefix: context.prefix });
+    const needsWebImage = Object.values(params.spec.environments[environmentName]!.services).some(usesAwsWebCommand);
+    if (typeof commitSha !== 'string' || image !== `${registry}:${awsImageTag(commitSha)}` || webImage !== (needsWebImage ? `${registry}:${awsImageTag(commitSha, true)}` : undefined)) {
+      return { kind: 'blocked', reason: 'The reviewed image build differs from the images required for these workloads. Run hv_plan again.' };
+    }
+  }
   clearEngineCiBinding(ctx, context.environment);
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
@@ -608,15 +647,15 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
         if (metadata.operation === AWS_PARAMETER_OPERATION) return await ensureGeneratedParameter(access, (action.metadata as { name: string }).name);
         if (metadata.operation === AWS_IMAGE_BUILD_OPERATION) {
           const { buildAwsCommitImage } = await import('./infrastructure-engine-aws-release.js');
-          const { directory, commitSha, image } = action.metadata as { directory: string; commitSha: string; image: string };
+          const { directory, commitSha, image, webImage } = action.metadata as { directory: string; commitSha: string; image: string; webImage?: string };
           const token = await presentBuildTokenKey(params.spec, environmentName, (key) => parameterExists(access, `${context.parameterPath}${key}`));
           if ('error' in token) return { success: false, status: 'blocked', message: token.error };
-          const target = { ...(token.key ? { packageTokenParameter: `${context.parameterPath}${token.key}` } : {}), region: context.connection.region, accountId: context.connection.accountId, prefix: context.prefix, credentials: context.credentials };
+          const target = { environmentId: context.environment.id, ...(token.key ? { packageTokenParameter: `${context.parameterPath}${token.key}` } : {}), region: context.connection.region, accountId: context.connection.accountId, prefix: context.prefix, credentials: context.credentials };
           const built = await buildAwsCommitImage(target, params.spec, environmentName, directory, commitSha);
           if ('error' in built) return { success: false, ...(built.unknown ? { status: 'pending' as const } : {}), message: built.error, error: built.error };
           // Record the reference the reviewed plan creates the services from (the registry's tags are immutable), not the digest, or the next plan replaces them.
           const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: image } });
+          ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), kind: 'opentofu', imageUri: image, imageHasDockerfile: built.hasDockerfile, ...(webImage ? { webImageUri: webImage } : {}) } });
           return { success: true, message: `Built ${built.imageUri}.`, data: { imageUri: built.imageUri } };
         }
         if (metadata.operation === AWS_SNAPSHOT_DELETE_OPERATION) {

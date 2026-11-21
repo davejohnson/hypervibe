@@ -536,6 +536,7 @@ describe('current source credential handoff', () => {
     expect(await f.migrate({ inspectSource: true, to: 'future-target', planId: review.planId })).toMatchObject({ status: 'blocked' });
     expect(await f.migrate({ inspectSource: true, to: 'wrong-target', planId: review.planId, confirmActions: review.confirmActions })).toMatchObject({ status: 'blocked' });
     expect(await f.migrate({ inspectSource: true, copyData: true })).toMatchObject({ status: 'blocked' });
+    expect(await f.migrate({ inspectSource: true, browserAccess: 'gcp-setup' })).toMatchObject({ status: 'blocked' });
     f.versionSource.imageDigest = 'sha256:' + 'b'.repeat(64);
     expect(await f.migrate({ inspectSource: true, to: 'future-target', planId: review.planId, confirmActions: review.confirmActions })).toMatchObject({ status: 'blocked' });
     expect(f.versionInspection.inspect).not.toHaveBeenCalled();

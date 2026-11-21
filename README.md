@@ -117,6 +117,12 @@ hypervibe apply --plan-id <plan-id>
 hypervibe status --env staging
 ```
 
+Saved plans and test results have private browser links on this computer. Run
+`hypervibe reviews` for a link to the library. A plan page shows whether it is awaiting
+approval, approved or already used. Approve the plan there, then continue the
+original command to run it. The page records your decision separately from the
+execution result.
+
 Use an environment declared in your project. Human-readable output is the default;
 add `--json` for automation. See the [command reference](docs/TOOLS.md) for the
 current interface and confirmation requirements.

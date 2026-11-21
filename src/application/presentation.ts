@@ -845,8 +845,11 @@ function renderPresentation(presentation: CommandPresentation, envelope: Command
   const lines = [formatHypervibeHeader(presentation.icon, presentation.title)];
   if (presentation.context) lines.push(presentation.context);
   if (presentation.summary) lines.push('', presentation.summary);
-  const reportPath = stringValue(record(envelope.data)?.htmlPath);
-  if (reportPath) lines.push('', 'Open the plan in a browser', reportPath);
+  const review = record(envelope.data) ?? record(envelope.error?.details);
+  const reviewUrl = stringValue(review?.reviewUrl);
+  const reportPath = stringValue(review?.htmlPath);
+  if (reviewUrl) lines.push('', stringValue(review?.reviewStatus) ?? 'Open review', reviewUrl);
+  else if (reportPath) lines.push('', 'Open the plan in a browser', reportPath);
 
   for (const section of presentation.sections) {
     if (section.lines.length === 0) continue;
@@ -862,14 +865,26 @@ function renderPresentation(presentation: CommandPresentation, envelope: Command
  * structured envelope is deliberately not modified.
  */
 export function formatCommandResult(commandId: string, envelope: CommandEnvelope): string {
+  const original = envelope;
+  const dataWithReview = record(envelope.data) ?? record(envelope.error?.details);
+  if (dataWithReview?.reviewUrl) {
+    // The structured API retains the export path. Human output links to the same review once.
+    const { reviewUrl: _url, reviewStatus: _status, htmlPath: _path, ...publicFields } = dataWithReview;
+    const grants = record(publicFields.grants);
+    if (grants?.htmlPath) {
+      const { htmlPath: _nestedPath, ...rest } = grants;
+      publicFields.grants = rest;
+    }
+    envelope = envelope.ok ? { ...envelope, data: publicFields } : { ...envelope, error: { ...envelope.error!, details: publicFields } };
+  }
   if (!envelope.ok) {
-    const text = renderPresentation(errorPresentation(commandId, envelope), envelope);
+    const text = renderPresentation(errorPresentation(commandId, envelope), original);
     return envelope.error?.build ? `${text}\nHypervibe ${envelope.error.build.version}` : text;
   }
   const data = record(envelope.data);
   const presenter = PRESENTERS[commandId];
   return renderPresentation(
     data && presenter ? presenter(data) : commandPresentation(commandId, envelope.data),
-    envelope
+    original
   );
 }

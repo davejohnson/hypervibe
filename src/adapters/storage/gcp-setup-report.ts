@@ -13,6 +13,9 @@ const intentFile = /^setup-([a-f0-9]{64})\.json$/;
 type SetupScope = { projectId: string; gcpProjectId: string; projectName?: string; dataDir?: string };
 interface ReportSource {
   planId: string;
+  setupPurpose?: PlanReport['setupPurpose'];
+  bootstrapConnection?: PlanReport['bootstrapConnection'];
+  ciReleaseAccess?: PlanReport['ciReleaseAccess'];
   projectName?: string;
   createdAt?: string;
   planned: { actions: unknown; blockers?: unknown };
@@ -36,14 +39,16 @@ export function setupPlansDirectory({ projectId, gcpProjectId, dataDir = getData
   return plans;
 }
 
-function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
+export function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
   if (!setupId.test(source.planId) || !Array.isArray(source.planned?.actions)) {
     throw new Error('The saved Google Cloud setup plan is incomplete.');
   }
   const report = makePlanReport({
     planId: source.planId, project: source.projectName ?? scope.projectName ?? scope.projectId,
-    target: scope.gcpProjectId, scope: 'Google Cloud project setup', createdAt: source.createdAt,
+    target: scope.gcpProjectId, cloudTarget: { provider: 'gcp', projectId: scope.gcpProjectId },
+    scope: 'Google Cloud project setup', createdAt: source.createdAt,
     actions: source.planned.actions, blocked: source.planned.blockers, approval: 'whole-plan',
+    setupPurpose: source.setupPurpose, bootstrapConnection: source.bootstrapConnection, ciReleaseAccess: source.ciReleaseAccess,
   });
   if (report.actions.length !== source.planned.actions.length) throw new Error('The saved Google Cloud setup actions could not be read.');
 
@@ -83,7 +88,7 @@ function setupReport(scope: SetupScope, source: ReportSource): PlanReport {
 
 // A checksum binds the saved display model to its local owner. It detects damaged or
 // misplaced reports; confirmation always reads the engine's original intent manifest.
-function checksum(projectId: string, report: PlanReport): string {
+export function setupReportChecksum(projectId: string, report: PlanReport): string {
   return createHash('sha256').update(JSON.stringify([projectId, report])).digest('hex');
 }
 
@@ -95,7 +100,7 @@ export function saveSetupReport(scope: SetupScope, source: ReportSource, redact:
   const rendered = writePlanReport(directory, report);
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(temporary, JSON.stringify({ projectId: scope.projectId, checksum: checksum(scope.projectId, report), report }),
+    fs.writeFileSync(temporary, JSON.stringify({ projectId: scope.projectId, checksum: setupReportChecksum(scope.projectId, report), report }),
       { mode: PRIVATE_FILE_MODE, flag: 'wx' });
     fs.renameSync(temporary, file);
   } finally {
@@ -116,7 +121,7 @@ function storedReport(directory: string, scope: SetupScope, planId: string): Pla
   const snapshot = readStoredJson(path.join(directory, `${planId}.report.json`));
   const report = snapshot?.report as PlanReport | undefined;
   if (snapshot?.projectId === scope.projectId && report?.planId === planId && report.target === scope.gcpProjectId
-    && snapshot.checksum === checksum(scope.projectId, report)) return report;
+    && snapshot.checksum === setupReportChecksum(scope.projectId, report)) return report;
 }
 
 /** Preserve display data before a new preview replaces the previous intent manifest. */
@@ -131,6 +136,7 @@ export function findSavedSetupReport(projectId: string, gcpProjectId: string, pl
   if (!fs.existsSync(directory)) return;
   const report = storedReport(directory, scope, planId);
   if (report) return writePlanReport(directory, { ...report, approval: 'whole-plan',
+    cloudTarget: { provider: 'gcp', projectId: gcpProjectId },
     actions: report.actions.map(action => ({ ...action, requiresConfirm: false })) });
 
   // Older releases keyed their current approval by intent. Search only those
@@ -141,8 +147,14 @@ export function findSavedSetupReport(projectId: string, gcpProjectId: string, pl
     const file = path.join(directory, entry.name);
     const saved = readStoredJson(file);
     if (saved?.planId !== planId || saved.intent !== intent) continue;
+    const connection = record(saved.bootstrapConnection);
     return saveSetupReport(scope, {
       planId, planned: { actions: record(saved.planned).actions, blockers: record(saved.planned).blockers },
+      setupPurpose: saved.setupPurpose === 'railway-transfer' || saved.setupPurpose === 'railway-transfer-isolation'
+        ? saved.setupPurpose : undefined,
+      bootstrapConnection: typeof connection.scope === 'string' && typeof connection.deploymentAccount === 'string'
+        ? { scope: connection.scope, deploymentAccount: connection.deploymentAccount } : undefined,
+      ciReleaseAccess: Array.isArray(saved.ciReleaseAccess) ? saved.ciReleaseAccess.filter((grant): grant is string => typeof grant === 'string') : undefined,
       configuration: saved.configuration, projectName: typeof saved.projectName === 'string' ? saved.projectName : undefined,
       createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : fs.statSync(file).mtime.toISOString(),
     });

@@ -1,6 +1,6 @@
 import { strictHealthCheck } from '../domain/services/release-health.js';
 import {
-  AWS_DOCKERFILE, awsReleaseDockerfile, buildImage, releaseTask, releaseWebService, webServiceExists, type AwsReleaseTarget,
+  AWS_DOCKERFILE, awsReleaseDockerfile, buildImage, releaseTask, releaseWebService, webServiceExists, awsRequiredDockerfile, awsWorkloadImages, usesAwsWebCommand, type AwsBuildTarget, type AwsBuildResult,
 } from '../adapters/providers/aws/aws-release.client.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
@@ -13,8 +13,8 @@ import { parameterExists } from '../adapters/providers/aws/aws-engine.client.js'
 import { releaseCommandFor, type EngineReleaseResult } from './infrastructure-engine.js';
 
 /**
- * Releases a commit to an AWS engine environment: one CodeBuild image, then each
- * workload switches to it. The first release only builds the image, because the
+ * Releases a commit to an AWS engine environment: one CodeBuild job, then each
+ * workload switches to its matching image. The first release only builds the image, because the
  * engine creates workloads from an existing image; the next infrastructure plan
  * creates them. Never creates infrastructure itself.
  */
@@ -28,12 +28,18 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
   if ('blocked' in context) return context;
   const token = await presentBuildTokenKey(params.spec, params.environmentName, (key) => parameterExists({ region: context.connection.region, credentials: context.credentials }, `${context.parameterPath}${key}`));
   if ('error' in token) return { blocked: token.error };
-  const target: AwsReleaseTarget = { ...(token.key ? { packageTokenParameter: `${context.parameterPath}${token.key}` } : {}), region: context.connection.region, accountId: context.connection.accountId, prefix: context.prefix, credentials: context.credentials };
   const workloads = selectReleaseWorkloads(environmentSpec, params.services);
   if ('blocked' in workloads) return workloads;
-  const { selected, web, startCommand } = workloads;
+  const { selected, web } = workloads;
+  const firstImage = !awsBinding(context.environment).imageUri;
+  const all = selectReleaseWorkloads(environmentSpec, undefined);
+  const startCommand = ('blocked' in all ? undefined : all.startCommand) ?? workloads.startCommand;
+  const buildServices = firstImage ? Object.keys(environmentSpec.services) : selected;
+  const webOverrides = buildServices.filter(name => usesAwsWebCommand(environmentSpec.services[name]!));
+  const target: AwsBuildTarget = { ...(token.key ? { packageTokenParameter: `${context.parameterPath}${token.key}` } : {}),
+    environmentId: context.environment.id, webCommands: webOverrides.length > 0, region: context.connection.region, accountId: context.connection.accountId, prefix: context.prefix, credentials: context.credentials };
   const source = await packageLocalCommit(params.sourceDirectory, {
-    format: 'zip', dockerfileName: AWS_DOCKERFILE,
+    format: 'zip', dockerfileName: AWS_DOCKERFILE, missingDockerfileMessage: awsRequiredDockerfile(buildServices.map(name => environmentSpec.services[name]!)),
     dockerfileFor: (repositoryDockerfile) => awsReleaseDockerfile({
       ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(params.spec.runtime ? { runtime: params.spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
     }),
@@ -41,28 +47,32 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
   if ('blocked' in source) return source;
 
   // Workloads exist only once an image does; until then this release only builds.
-  const firstImage = !awsBinding(context.environment).imageUri;
   if (!firstImage && web) {
     const exists = await webServiceExists(target, awsResourceName(context.prefix, web), environmentSpec.services[web]!.public ?? true);
     if (exists === 'unknown') return { blocked: 'Hypervibe could not read the web service on AWS; try again.' };
     if (!exists) return { blocked: `Create the infrastructure first: ${web} does not exist yet. Run hv_plan scope="infrastructure" and hv_apply.` };
   }
+  let webImageUri: string | undefined;
   return runLocalCommitRelease(params, source, selected, {
     cloudName: 'AWS', provider: 'aws', environmentId: context.environment.id, buildPhrase: 'in CodeBuild', firstImage, createdNoun: 'services',
     resourceOf: (name) => awsResourceName(context.prefix, name),
     build: async (packaged) => {
       const built = await buildImage(target, packaged);
-      return 'error' in built ? built : { image: built.imageUri, ...(built.logsUrl ? { logsUrl: built.logsUrl } : {}) };
+      if ('error' in built) return built;
+      webImageUri = built.webImageUri;
+      return awsWorkloadImages(built, webOverrides);
     },
     recordImage: (imageUri) => {
       const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
-      ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...awsBinding(current), imageUri } });
+      const previous = awsBinding(current);
+      ctx.repos.environments.updatePlatformBindings(current.id, { aws: { ...previous, imageUri, imageHasDockerfile: source.hasDockerfile,
+        webImageUri: webImageUri ?? (params.services?.length ? previous.webImageUri : undefined) } });
     },
     releaseWorkload: async ({ name, kind, resource, image }) => {
       // A private web service is an ordinary ECS service, released like a worker.
       const result = kind === 'web' && (environmentSpec.services[name]!.public ?? true)
-        ? await releaseWebService(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/', strictHealthCheck(environmentSpec.services[name]!))
-        : await releaseTask(target, name, resource, image, kind !== 'cron');
+        ? await releaseWebService(target, name, resource, image, environmentSpec.services[name]!.healthCheckPath ?? '/', strictHealthCheck(environmentSpec.services[name]!), undefined, environmentSpec.services[name]!.startCommand)
+        : await releaseTask(target, name, resource, image, kind !== 'cron', undefined, kind === 'web' ? { startCommand: environmentSpec.services[name]!.startCommand } : undefined);
       if (result.status === 'released' && result.taskDefinitionArn) {
         const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
         const services = (current.platformBindings as { services?: Record<string, Record<string, unknown>> }).services ?? {};
@@ -79,16 +89,17 @@ export async function releaseAwsEngineServices(ctx: CommandContext, params: {
  * Builds one reviewed commit of the local repository for an environment (used by
  * the infrastructure apply for the first image), returning the digest-pinned image.
  */
-export async function buildAwsCommitImage(target: AwsReleaseTarget, spec: ProjectSpec, environmentName: string, directory: string, commitSha: string)
-  : Promise<{ imageUri: string; logsUrl?: string } | { error: string; logsUrl?: string; unknown?: boolean }> {
+export async function buildAwsCommitImage(target: AwsBuildTarget, spec: ProjectSpec, environmentName: string, directory: string, commitSha: string)
+  : Promise<AwsBuildResult & { hasDockerfile?: boolean }> {
   const workloads = selectReleaseWorkloads(spec.environments[environmentName]!, undefined);
   const startCommand = 'blocked' in workloads ? undefined : workloads.startCommand;
   const source = await packageLocalCommit(directory, {
-    format: 'zip', dockerfileName: AWS_DOCKERFILE, commitSha,
+    format: 'zip', dockerfileName: AWS_DOCKERFILE, commitSha, missingDockerfileMessage: awsRequiredDockerfile(Object.values(spec.environments[environmentName]!.services)),
     dockerfileFor: (repositoryDockerfile) => awsReleaseDockerfile({
       ...(repositoryDockerfile ? { repositoryDockerfile } : {}), ...(spec.runtime ? { runtime: spec.runtime as ProjectRuntime } : {}), ...(startCommand ? { startCommand } : {}),
     }),
   });
   if ('blocked' in source) return { error: source.blocked };
-  return buildImage(target, source);
+  const built = await buildImage({ ...target, webCommands: Object.values(spec.environments[environmentName]!.services).some(usesAwsWebCommand) }, source);
+  return 'error' in built ? built : { ...built, hasDockerfile: source.hasDockerfile };
 }

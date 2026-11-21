@@ -1,3 +1,4 @@
+import { browserApprovedRunActions } from './browser-approved-run.js';
 import { isDeepStrictEqual } from 'node:util';
 import { isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { applyCredentialLifecycle, pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
@@ -649,7 +650,7 @@ export type PlanApplyOutcome =
   | { kind: 'plan_not_found'; error: string }
   | { kind: 'env_missing'; envName: string }
   | { kind: 'input_required'; envName: string; requirements: DelegatedSecretInputRequirement[] }
-  | { kind: 'blocked'; applyBlocked: ConnectionBlock[] }
+  | { kind: 'blocked'; applyBlocked: ConnectionBlock[]; reviewPlanId?: string }
   | {
     kind: 'executed';
     envName: string;
@@ -759,6 +760,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
   specRevision: number;
   planId: string;
   confirmActions: string[];
+  useBrowserApproval?: boolean;
   /** Poll web services' healthCheckPath over HTTP during the bootstrap pass (hv_deploy). */
   verifyHttpHealth?: boolean;
   /**
@@ -782,6 +784,12 @@ export async function executePlanApply(ctx: CommandContext, params: {
     hint: providerValidation.hint, details: providerValidation.details } : undefined;
   if ('error' in loaded) {
     return invalidSpec ?? { kind: 'plan_not_found', error: loaded.error };
+  }
+  if (params.useBrowserApproval) {
+    const confirmed = browserApprovedRunActions(loaded.run, project.id);
+    if (!confirmed) return { kind: 'blocked', ...(loaded.run.projectId === project.id && { reviewPlanId: planId }), applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+      reason: 'This exact saved plan still needs browser approval. Open the review before applying it.' }] };
+    params = { ...params, confirmActions: confirmed };
   }
   // Older persisted plans may put GitHub secret writes before reviewed file
   // publication. Require the prerequisite before any effects, including when
