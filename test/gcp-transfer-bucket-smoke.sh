@@ -61,9 +61,12 @@ printf '%s\n' "$@" >> "$base/arguments"
 [ ! -f "$base/expire-token" ] || exit 1
 real=$(cat "$base/real-rclone")
 # Interrupt the fixture after one real file has committed at the destination.
-if [ -f "$base/interrupt-copy" ] && [ "$3" = copy ]; then
-  "$real" --config "$base/local-config" copyto 'source:railway-docs/Private & unusual [filename]' 'destination:gcp-docs/Private & unusual [filename]'
-  exit 1
+if [ -f "$base/interrupt-copy" ]; then
+  for arg do
+    [ "$arg" = copy ] || continue
+    "$real" --config "$base/local-config" copyto 'source:railway-docs/Private & unusual [filename]' 'destination:gcp-docs/Private & unusual [filename]'
+    exit 1
+  done
 fi
 exec "$real" --config "$base/local-config" "$@"
 TEST_REMOTES
