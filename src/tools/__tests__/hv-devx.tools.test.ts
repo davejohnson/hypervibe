@@ -223,7 +223,8 @@ describe('hv_runs', () => {
     const client = await makeClient();
     try {
       storeProbe(plan, { status: 'passed', marker: 'private-probe-marker' }, true);
-      storeProbe({ ...plan, planId: later, objectName: 'migrations/staging/access-check-B' }, { status: 'ready' }, true);
+      const fileOnly = { ...layout, fileOnly: true, planId: later, objectName: 'migrations/staging/access-check-B' };
+      storeProbe({ ...fileOnly, actions: probeActions(fileOnly) }, { status: 'ready' }, true);
       const input = { action: 'report', runId: planId, project: project.name, gcpProjectId };
       for (const wrong of [{ project: other.name }, { gcpProjectId: 'another-project' }]) {
         expect(await client.call('hv_runs', { ...input, ...wrong })).toMatchObject({ ok: false, error: { code: 'NOT_FOUND' } });
@@ -238,6 +239,12 @@ describe('hv_runs', () => {
         expect(html).toContain(text);
       }
       expect(html).not.toMatch(/Infrastructure plan|verified at planning time|OpenTofu|private-probe-marker|access-check-B/);
+      const fileReport = await client.call('hv_runs', { ...input, runId: later });
+      const fileHtml = readFileSync(fileReport.data.htmlPath, 'utf8');
+      for (const text of [later, fileOnly.objectName, plan.scope.runtimeEmail, 'Export file access check', '7 days']) {
+        expect(fileHtml).toContain(text);
+      }
+      expect(fileHtml).not.toMatch(/two temporary Cloud Run jobs|test secret|test version|copy account|access-check-A/i);
     } finally {
       vi.unstubAllEnvs();
       await client.close();

@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { PROBE_IMAGE, probeCommand, probeEnvironment, type AccessProbeJobInput } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
-export type { AccessProbeJobInput } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
+import { PROBE_IMAGE, probeCommand, probeEnvironment, parseAccessProbeFileEvidence, type AccessProbeFileEvidence, type AccessProbeJobInput } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
+export { parseAccessProbeFileEvidence, type AccessProbeFileEvidence, type AccessProbeJobInput } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
 import { POSTGRES_DATABASE_IDENTITY_PATTERN, POSTGRES_DATABASE_IDENTITY_SQL } from '../domain/services/postgres-database-identity.js';
 import { readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { cloudRunJobRequest, readCloudRunOperation } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
@@ -269,6 +269,10 @@ export function transferCredentialHandoffProblem(needsSourceValue: boolean): str
 
 type TemporaryJob = TransferJob | (Omit<TransferJob, 'purpose' | 'script'> & { purpose: 'access' });
 type JobResult = { ok: boolean; error?: string };
+export type AccessProbeJobResult = JobResult & { fileEvidence?: AccessProbeFileEvidence; accessPassed?: true };
+// Only the native job runner can attach an execution result to a cleanup failure.
+const executionBeforeCleanup = Symbol('access probe execution before cleanup');
+type RawProbeResult = JobResult & { check?: unknown; fileEvidence?: unknown; [executionBeforeCleanup]?: RawProbeResult };
 
 /** Runs the existing copy workers with their existing execution contract. */
 export function runTransferJob<T extends JobResult>(context: TransferContext, job: TransferJob): Promise<T> {
@@ -276,21 +280,33 @@ export function runTransferJob<T extends JobResult>(context: TransferContext, jo
 }
 
 /** Only the synthetic challenge and its scoped references can enter the probe job. */
-export async function runAccessProbeJob(context: TransferContext, input: AccessProbeJobInput): Promise<JobResult> {
+export async function runAccessProbeJob(context: TransferContext, input: AccessProbeJobInput): Promise<AccessProbeJobResult> {
   try {
     const env = probeEnvironment(input, context.environmentLabel, context.gcpProjectId, context.runtimeServiceAccountEmail);
     if (!env || !context.recordTransferResources) return { ok: false, error: 'The test job scope or cleanup journal is incomplete.' };
-    const result = await runTemporaryJob<JobResult & { check?: unknown }>(context, { purpose: 'access', image: PROBE_IMAGE, env, sourceSecrets: {}, timeoutSeconds: 90 });
-    if (result.ok === true && Object.keys(result).length === 1) return { ok: true };
+    const job = await runTemporaryJob<RawProbeResult>(context, { purpose: 'access', image: PROBE_IMAGE, env, sourceSecrets: {}, timeoutSeconds: 90 });
+    const result = job[executionBeforeCleanup] ?? job;
+    const fileEvidence = input.role === 'copy' ? undefined : parseAccessProbeFileEvidence(result.fileEvidence);
+    const passedFile = result.ok === true && fileEvidence?.outcome === 'denied' && Object.keys(result).length === 2;
+    if (job[executionBeforeCleanup]) return {
+      ok: false, error: 'Cleanup of the temporary test job could not be verified.',
+      ...(fileEvidence ? { fileEvidence } : {}), ...(input.role === 'file-app' && passedFile ? { accessPassed: true } : {}),
+    };
+    if (result.ok === true) {
+      if (input.role === 'copy' && Object.keys(result).length === 1) return { ok: true };
+      if (passedFile) return { ok: true, fileEvidence };
+    }
     const errors: Record<string, string> = {
       identity: 'The test workload could not confirm its attached service account, project and token.',
       'secret-denial': 'The app workload could not confirm denial of access to the test secret version.',
-      'object-denial': 'The app workload could not confirm denial of direct access to the test object generation.',
+      'object-denial': fileEvidence?.outcome === 'readable'
+        ? 'The app could directly read the test file generation.'
+        : 'The app workload could not confirm denial of direct access to the test object generation.',
       'secret-read': 'The copy workload could not verify the challenge in the test secret version.',
       'signed-object': 'The copy workload could not verify the signed download of the test object generation.',
     };
     if (result.ok === false && typeof result.check === 'string' && Object.hasOwn(errors, result.check)) {
-      return { ok: false, error: errors[result.check] };
+      return { ok: false, error: errors[result.check], ...(fileEvidence ? { fileEvidence } : {}) };
     }
   } catch { /* Provider errors and workload logs may contain private values. */ }
   return { ok: false, error: 'The temporary test job did not verify the requested access and cleanup.' };
@@ -404,10 +420,18 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
   } else {
     removed = await removeTransferLeftovers(context, resources);
   }
+  if (removed) {
+    try { await context.recordTransferResources?.(null); }
+    catch (error) {
+      if (job.purpose !== 'access') throw error;
+      removed = false;
+    }
+  }
   if (!removed) {
+    if (job.purpose === 'access' && outcome && 'fileEvidence' in outcome)
+      return { ...outcome, ok: false, [executionBeforeCleanup]: outcome };
     return { ok: false, error: `Cleanup of transfer job ${id} in ${context.gcpProjectId}/${context.region} is unverified. Its recorded identity must be resolved before another copy.` } as T;
   }
-  await context.recordTransferResources?.(null);
   if (thrown) throw thrown;
   return outcome!;
 }

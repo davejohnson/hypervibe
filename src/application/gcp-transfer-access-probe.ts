@@ -21,8 +21,11 @@ import {
   requireProbe,
   type AccessProbeRequest,
 } from './gcp-transfer-access-readiness.js';
-import { probeWorkloadDigest } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
-import { recoverTerminalTransferResources, runAccessProbeJob, type TransferContext } from './migration-transfer-gcp.js';
+import { parseAccessProbeFileEvidence, probeWorkloadDigest } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
+import {
+  recoverTerminalTransferResources,
+  runAccessProbeJob,
+} from './migration-transfer-gcp.js';
 
 function publicPlan(plan: ProbePlan) {
   const result = findTransferAccessProbeReport(plan.projectId, plan.scope.target.projectId, plan.planId);
@@ -32,6 +35,22 @@ function publicPlan(plan: ProbePlan) {
     htmlPath: result.htmlPath,
     actions: plan.actions,
     softDeleteSeconds: plan.softDeleteSeconds,
+  };
+}
+
+function fileFailure(run: ProbeRun) {
+  if (!run.operatorReadVerified) return 'Hypervibe could not verify the uploaded file contents before testing the app.';
+  if (run.fileEvidence?.outcome === 'readable') return 'Google allowed the app to read the test file.';
+  if (run.fileEvidence?.outcome === 'denied') return 'The app job reported a denial, but Hypervibe could not verify the complete test.';
+  return 'The app job did not establish that Google denied access to the test file.';
+}
+
+// Only return fields validated at the worker result boundary. The private run also holds the fixture marker.
+function publicEvidence(run: ProbeRun) {
+  const fileEvidence = parseAccessProbeFileEvidence(run.fileEvidence);
+  return {
+    ...(run.operatorReadVerified && { operatorReadVerified: true }),
+    ...(fileEvidence && { fileEvidence }),
   };
 }
 
@@ -47,23 +66,29 @@ async function runSavedCheck(input: AccessProbeRequest) {
   requireProbe(
     !input.confirm ||
       (saved &&
+        (saved.plan.fileOnly === true) === (input.fileOnly === true) &&
         isDeepStrictEqual(scope, saved.plan.scope) &&
         saved.plan.sourceName === input.sourceEnvironmentName &&
         saved.plan.deployEmail === input.deployEmail),
-    'The saved access check does not match this source, destination and Google project.',
+    'The saved plan does not match the requested access check, source, destination and Google project.',
   );
   if (saved?.run.status === 'passed')
     return {
       success: true,
       mode: 'confirm',
       ...publicPlan(saved.plan),
+      ...publicEvidence(saved.run),
       message:
         'This single-use test already passed and its cleanup was verified. Its results describe the time of the test.',
     };
-  requireProbe(
-    saved?.run.status !== 'failed',
-    'This single-use test ended without verifying access. Preview a new check to try again.',
-  );
+  if (saved?.run.status === 'failed')
+    return {
+      success: false,
+      planId,
+      ...publicEvidence(saved.run),
+      error: (saved.plan.fileOnly ? fileFailure(saved.run) + ' ' : '') +
+        'This single-use test finished cleanup. Preview a new check to try again.',
+    };
   const active = probeHistory(project.id, target.projectId, slot.secretId).find((x) => x.run.status === 'running');
   requireProbe(
     !active || active.plan.planId === planId,
@@ -74,9 +99,16 @@ async function runSavedCheck(input: AccessProbeRequest) {
   const fixtures = transferProbeFixtures(token, scope, id.slice('probe-'.length));
   const previousRun = saved?.run.status === 'running';
   const ready = previousRun ? undefined : await inspectProbeReadiness(input, token);
-  if (!previousRun) await fixtures.assertReady();
+  if (!previousRun) {
+    if (input.fileOnly) await fixtures.assertFileReady();
+    else {
+      requireProbe(ready?.sign, 'The reviewed link signer is unavailable.');
+      await fixtures.assertReady();
+    }
+  }
   const proposed: Omit<ProbePlan, 'actions'> = saved?.plan ?? {
     planId: id,
+    ...(input.fileOnly && { fileOnly: true }),
     createdAt: new Date().toISOString(),
     projectId: project.id,
     projectName: project.name,
@@ -96,7 +128,9 @@ async function runSavedCheck(input: AccessProbeRequest) {
       success: true,
       mode: 'preview',
       ...publicPlan(plan),
-      message: 'Review the two test jobs, the disposable data and cleanup before running the check.',
+      message: plan.fileOnly
+        ? 'Review the temporary app job, disposable export file and cleanup before running the check.'
+        : 'Review the two test jobs, the disposable data and cleanup before running the check.',
     };
   }
   requireProbe(
@@ -110,6 +144,10 @@ async function runSavedCheck(input: AccessProbeRequest) {
     'The access check or its Google Cloud settings changed. Preview the test again.',
   );
   const run = saved!.run;
+  requireProbe(
+    !plan.fileOnly || (!run.version && !run.destroyed && run.pending !== 'version'),
+    'The recorded test resources do not match the reviewed file check.',
+  );
   const save = (update: Partial<ProbeRun>) => {
     Object.assign(run, update);
     storeProbe(plan, run);
@@ -130,33 +168,45 @@ async function runSavedCheck(input: AccessProbeRequest) {
       const object = await fixtures.createObject(marker, () => save({ pending: 'object' }));
       save({ object, pending: undefined });
       await fixtures.readObject(object, marker);
-      const url = ready!.sign(object.name, object.generation);
-      const version = await fixtures.addVersion(marker, url, object, () => save({ pending: 'version' }));
-      save({ version, pending: undefined });
-      const common = {
+      const file = {
         projectNumber: scope.projectNumber,
-        secretId: slot.secretId,
-        version: version.name.split('/').at(-1)!,
-        bucket: scope.bucket,
+        bucket: object.bucket,
         object: object.name,
         generation: object.generation,
-        marker,
       };
-      for (const role of ['copy', 'app'] as const) {
-        const expectedEmail = role === 'copy' ? slot.accountEmail : scope.runtimeEmail;
-        failure =
-          role === 'copy'
-            ? 'The copy account did not prove it could read the test version and download the expected bytes.'
-            : 'The app did not prove it received permission denied for both the test version and the file.';
+      if (plan.fileOnly) {
+        save({ operatorReadVerified: true });
+        const expectedEmail = scope.runtimeEmail;
         const job = await runAccessProbeJob(
-          { ...ctx, runtimeServiceAccountEmail: expectedEmail } satisfies TransferContext,
-          { ...common, role, expectedEmail },
+          { ...ctx, runtimeServiceAccountEmail: expectedEmail },
+          { ...file, role: 'file-app', expectedEmail },
         );
-        if (!job.ok) {
-          if (job.error) failure = job.error;
-          break;
+        const fileEvidence = parseAccessProbeFileEvidence(job.fileEvidence);
+        const verifiedExecution = job.ok || (run.job !== undefined && job.accessPassed === true);
+        save({ fileEvidence, appPassed: verifiedExecution && fileEvidence?.outcome === 'denied' });
+      } else {
+        const url = ready!.sign!(object.name, object.generation);
+        const version = await fixtures.addVersion(marker, url, object, () => save({ pending: 'version' }));
+        save({ version, pending: undefined });
+        const secret = { secretId: slot.secretId, version: version.name.split('/').at(-1)! };
+        for (const role of ['copy', 'app'] as const) {
+          const expectedEmail = role === 'copy' ? slot.accountEmail : scope.runtimeEmail;
+          failure =
+            role === 'copy'
+              ? 'The copy account did not prove it could read the test version and download the expected bytes.'
+              : 'The app did not prove it received permission denied for both the test version and the file.';
+          const job = await runAccessProbeJob(
+            { ...ctx, runtimeServiceAccountEmail: expectedEmail },
+            { ...file, ...secret, marker, role, expectedEmail },
+          );
+          if (role === 'app' && job.fileEvidence)
+            save({ fileEvidence: parseAccessProbeFileEvidence(job.fileEvidence) });
+          if (!job.ok) {
+            if (job.error) failure = job.error;
+            break;
+          }
+          save(role === 'copy' ? { copyPassed: true } : { appPassed: true });
         }
-        save(role === 'copy' ? { copyPassed: true } : { appPassed: true });
       }
     } catch (error) {
       if (error instanceof ProbeCreateRejected && error.resource === run.pending) save({ pending: undefined });
@@ -169,7 +219,7 @@ async function runSavedCheck(input: AccessProbeRequest) {
   if (run.job) {
     try {
       const recovered = await recoverTerminalTransferResources(
-        { ...ctx, runtimeServiceAccountEmail: run.copyPassed ? scope.runtimeEmail : slot.accountEmail },
+        { ...ctx, runtimeServiceAccountEmail: plan.fileOnly || run.copyPassed ? scope.runtimeEmail : slot.accountEmail },
         run.job,
       );
       if (recovered) save({ job: undefined });
@@ -203,7 +253,7 @@ async function runSavedCheck(input: AccessProbeRequest) {
       waiting.push('test version');
     }
   }
-  if (run.object) {
+  if (run.object && (!plan.fileOnly || !run.job)) {
     try {
       await fixtures.deleteObject(run.object);
       save({ object: undefined });
@@ -211,29 +261,42 @@ async function runSavedCheck(input: AccessProbeRequest) {
       waiting.push('test file');
     }
   }
-  requireProbe(
-    !waiting.length,
-    `Cleanup is unverified for the ${waiting.join(' and ')}. Resume ${id} to check its recorded resources. A retry only finishes cleanup.`,
-  );
-  if (run.copyPassed && run.appPassed && run.destroyed) {
+  if (waiting.length)
+    return {
+      success: false, planId: id, ...publicEvidence(run),
+      error: `Cleanup is unverified for the ${waiting.join(' and ')}. Resume ${id} to check its recorded resources. A retry only finishes cleanup.`,
+    };
+  const controlsPassed = plan.fileOnly
+    ? run.operatorReadVerified && run.fileEvidence?.outcome === 'denied'
+    : run.copyPassed && run.destroyed;
+  if (controlsPassed && run.appPassed) {
     try {
       await inspectProbeReadiness(input, await input.token());
     } catch {
-      throw new ProbeProblem(
-        `The test jobs finished, but final verification of the account permissions and secret inventory is incomplete. Resume ${id} to verify cleanup.`,
-      );
+      return {
+        success: false, planId: id, ...publicEvidence(run),
+        error: plan.fileOnly
+          ? `The app job finished and the file was deleted. Resume ${id} to verify the final file access settings.`
+          : `The test jobs finished, but final verification of the account permissions and secret inventory is incomplete. Resume ${id} to verify cleanup.`,
+      };
     }
     save({ status: 'passed', finishedAt: new Date().toISOString(), marker: undefined });
     return {
       success: true,
       mode: 'confirm',
       ...publicPlan(plan),
-      message:
-        'The copy account read the disposable version and downloaded the expected file. Google denied both direct reads by the app. The jobs are gone, the version is destroyed, and the file generation was deleted.',
+      ...publicEvidence(run),
+      message: plan.fileOnly
+        ? 'Google denied the app access to the verified export file. The temporary job was removed and the test file generation was deleted.'
+        : 'The copy account read the disposable version and downloaded the expected file. Google denied both direct reads by the app. The jobs are gone, the version is destroyed, and the file generation was deleted.',
     };
   }
   save({ status: 'failed', finishedAt: new Date().toISOString(), marker: undefined });
-  throw new ProbeProblem(failure + ' The recorded fixtures were cleaned up. The production copy remains paused.');
+  return {
+    success: false, planId: id, ...publicEvidence(run),
+    error: (plan.fileOnly ? fileFailure(run) : failure) +
+      ' The recorded fixtures were cleaned up. The production copy remains paused.',
+  };
 }
 export async function runGcpTransferAccessProbe(
   input: AccessProbeRequest,

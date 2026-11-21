@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ProbeCreateRejected, transferProbeFixtures } from '../gcp-transfer-probe-fixtures.js';
+import { checkProbePermissions } from '../gcp-probe-permissions.js';
 import { transferSlot } from '../tofu/transfer-slot.js';
 
 // Synthetic responses from Google's documented SecretVersion resource and Storage JSON object operations.
@@ -90,6 +91,34 @@ describe('bounded migration access probe fixtures', () => {
     await api.readObject(captured, marker);
     await api.deleteObject(captured);
     expect(mock).toHaveBeenCalledTimes(6);
+  });
+
+  it('previews a file alone using only the original bucket and unused object name', async () => {
+    const mock = transport((url) => {
+      if (url.pathname === bucketPath) return Response.json(bucket);
+      expect(url.pathname).toBe(objectPath);
+      return new Response(null, { status: 404 });
+    });
+    await fixtures().assertFileReady();
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+
+  it('checks file-only operator permissions without requiring secret changes or the copy identity', async () => {
+    const mock = vi.fn(async (input: string, init: RequestInit) => {
+      const url = new URL(input);
+      if (url.pathname === bucketPath) return Response.json(bucket);
+      if (url.hostname === 'iam.googleapis.com') {
+        expect(decodeURIComponent(url.pathname)).toContain('/serviceAccounts/' + scope.runtimeEmail + ':');
+      } else if (url.hostname === 'storage.googleapis.com') {
+        return Response.json({ permissions: url.searchParams.getAll('permissions') });
+      } else {
+        expect(url.hostname).toBe('cloudresourcemanager.googleapis.com');
+      }
+      return Response.json(JSON.parse(String(init.body)));
+    });
+    vi.stubGlobal('fetch', mock);
+    expect(await checkProbePermissions(scope, 'operator', true)).toBe(0);
+    expect(mock).toHaveBeenCalledTimes(4);
   });
 
   it('checks the original bucket, original secret and exact unused test name during preview', async () => {

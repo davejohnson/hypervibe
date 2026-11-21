@@ -6,7 +6,7 @@ import { AuditRepository } from '../../adapters/db/repositories/audit.repository
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.client.js';
 import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/providers/gcp/google-browser-signin.js';
-import { migrationAccessModes, providerRegistry, type MigrationAccess } from '../registry/provider.registry.js';
+import { isMigrationAccessCheck, migrationAccessModes, providerRegistry, type MigrationAccess } from '../registry/provider.registry.js';
 import { GoogleAuth } from 'google-auth-library';
 import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress, isolationGrants, type TransferIsolationScope } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import { getGcpProjectSetupContribution, getGcpRuntimeIsolation, runGcpProjectSetup } from './gcp-project-setup.service.js';
@@ -176,7 +176,7 @@ export async function runCloudPrepare(params: {
       return { success: false, error: 'Select a supported migration access operation.' };
     }
     if (!params.environmentName || !params.migrationSourceEnvironment || params.environmentName === params.migrationSourceEnvironment ||
-      (params.migrationAccess === 'verify-copy-access' && (runtimeServiceAccountEmail || adminCredentialSource)) ||
+      (isMigrationAccessCheck(params.migrationAccess) && (runtimeServiceAccountEmail || adminCredentialSource)) ||
       !resolved.runtimeServiceAccountEmail || gcsAccess || memorystoreAccess || queueAccess || workerAccess || deployServiceAccountEmail ||
       adminCredentialsJson || adminAccessToken || adminAuth || (confirm !== !!params.gcpSetupPlanId)) {
       return { success: false, error: 'Select distinct source and target environments for the transfer slot. Confirm only with the saved migration setup plan ID.' };

@@ -188,7 +188,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       gcsAccess: z.enum(['inspect', 'lifecycle', 's3']).optional().describe('action="prepare" for cloudrun: explicitly add project-scoped GCS access. "inspect" grants the deploy identity roles/storage.viewer; "lifecycle" grants it roles/storage.admin and grants the distinct configured runtime identity roles/storage.objectUser in this GCP project with any approved migration exclusions preserved; "s3" grants it roles/storage.hmacKeyAdmin so S3-compatible bucket access keys can be created.'),
       memorystoreAccess: z.enum(['inspect', 'lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly add Memorystore access to the reused service account. "inspect" grants roles/redis.viewer; "lifecycle" grants roles/redis.admin.'),
       queueAccess: z.enum(['lifecycle', 'remove']).optional().describe('action="prepare" for cloudrun: explicitly grant Pub/Sub queue lifecycle access or remove that exact role from the reused service account.'),
-      migrationAccess: z.enum(migrationAccessModes).optional().describe('With action="prepare" and provider="cloudrun", reserve an empty secret and copy account, restrict app access, or test the app and copy accounts with disposable data. Select project, migrationSourceEnvironment and destination environment. Each operation has its own saved plan and uses existing Google Application Default Credentials.'),
+      migrationAccess: z.enum(migrationAccessModes).optional().describe('With action="prepare" and provider="cloudrun", reserve an empty secret and copy account, restrict app access, test both accounts with disposable data, or retest only the app’s direct access to a disposable export file. Select project, migrationSourceEnvironment and destination environment. Each operation has its own saved plan and uses existing Google Application Default Credentials.'),
       migrationSourceEnvironment: z.string().min(1).optional().describe('Existing source environment in the selected project for migration access preparation.'),
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
       environment: z.string().optional().describe('Filter view="requirements" by environment or select the environment for setup guidance. For GCP bootstrap and prepare, this selects the declared hosting.gcpProjectId and default region. For connect, the environment appears on the connect page.'),
@@ -646,15 +646,21 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           let message: string;
           let review: string;
           switch (migrationAccess) {
-            case 'verify-copy-access': {
+            case 'verify-copy-access':
+            case 'verify-export-file-access': {
               if (typeof payload.htmlPath !== 'string' || !payload.htmlPath.trim()) {
                 return commandError('PROVIDER_ERROR', 'The access check preview did not return its saved HTML report. Preview again.');
               }
               const retention = typeof payload.softDeleteSeconds === 'number' && payload.softDeleteSeconds > 0
                 ? ` Google keeps the deleted test object recoverable for ${payload.softDeleteSeconds / 86400} days.`
                 : '';
-              message = `Run two temporary Cloud Run jobs in ${environment} for ${targetProject.name} to test access to a disposable secret version and export object? Google Cloud charges may apply. Cleanup removes the jobs and test data.${retention}`;
-              review = 'Review the saved HTML for the exact app and copy accounts, test data, cleanup and retention. This approval covers one access check.';
+              if (migrationAccess === 'verify-export-file-access') {
+                message = `Run one temporary Cloud Run job as the app account in ${environment} for ${targetProject.name} to check whether it can read a disposable export file? Google Cloud charges may apply. Cleanup removes the job and test file.${retention}`;
+                review = 'Review the app account, test file, cleanup and retention in the saved HTML. This approval covers one export file access check.';
+              } else {
+                message = `Run two temporary Cloud Run jobs in ${environment} for ${targetProject.name} to test access to a disposable secret version and export object? Google Cloud charges may apply. Cleanup removes the jobs and test data.${retention}`;
+                review = 'Review the saved HTML for the exact app and copy accounts, test data, cleanup and retention. This approval covers one access check.';
+              }
               break;
             }
             case 'restrict-app-access':

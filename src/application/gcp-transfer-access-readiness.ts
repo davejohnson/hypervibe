@@ -35,6 +35,7 @@ export interface AccessProbeRequest {
   runtimeEmail: string;
   deployEmail: string;
   token: () => Promise<string>;
+  fileOnly?: boolean;
   confirm: boolean;
   planId?: string;
 }
@@ -92,7 +93,13 @@ export async function inspectProbeReadiness(input: AccessProbeRequest, token: st
     state.ok && state.present && state.value,
     'The original transfer resources and narrowed app grants could not be matched to their private infrastructure state.',
   );
-  const softDeleteSeconds = await checkProbePermissions(scope, token);
+  const readiness = {
+    scope,
+    evidenceDigest: evidence.evidenceDigest,
+    inventoryDigest: probeDigest(destroyed),
+    softDeleteSeconds: await checkProbePermissions(scope, token, input.fileOnly),
+  };
+  if (input.fileOnly) return { ...readiness, sign: undefined };
   const adapter = await engineGcpAdapter(input.project, project);
   const connection = adapter?.engineConnection();
   requireProbe(
@@ -114,10 +121,7 @@ export async function inspectProbeReadiness(input: AccessProbeRequest, token: st
     'The verified deployment identity must be able to sign one download link for the reviewed object.',
   );
   return {
-    scope,
-    evidenceDigest: evidence.evidenceDigest,
-    inventoryDigest: probeDigest(destroyed),
-    softDeleteSeconds,
+    ...readiness,
     sign: (object: string, generation: string) =>
       signedObjectUrl({
         clientEmail: parsed.data.client_email,

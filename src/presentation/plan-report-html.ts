@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { transferAccessCheckScope, type PlanReport, type PlanReportAction } from '../domain/plan/plan-report.js';
+import { transferAccessCheckScope, transferFileAccessCheckScope, type PlanReport, type PlanReportAction } from '../domain/plan/plan-report.js';
 import type { PlanActionType } from '../domain/plan/plan.types.js';
 import { actionTitle, buildReportMap, humanize, isNamedResource, isSecretReadPermission, lanes, providerName, type MapGroup } from './plan-report-map.js';
 import { planReportBrowser } from './plan-report-browser.js';
@@ -107,8 +107,9 @@ function actionRow(action: PlanReportAction, index: number, group: MapGroup, ind
 }
 
 export function renderPlanReportHtml(report: PlanReport): string {
-  const accessCheck = report.scope === transferAccessCheckScope;
-  const title = accessCheck ? 'Transfer access check' : 'Infrastructure plan';
+  const fileOnly = report.scope === transferFileAccessCheckScope;
+  const accessCheck = fileOnly || report.scope === transferAccessCheckScope;
+  const title = fileOnly ? 'Export file access check' : accessCheck ? 'Transfer access check' : 'Infrastructure plan';
   const map = buildReportMap(report.actions);
   const indexes = new Map<string, number | null>();
   report.actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
