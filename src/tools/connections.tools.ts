@@ -12,6 +12,7 @@ import {
 } from '../domain/registry/provider.registry.js';
 import { secretManagerRegistry } from '../domain/registry/secretmanager.registry.js';
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
+import { prepareSecretScopeAccess } from '../application/secret-scope-access.js';
 import { existingRepositoryGcpProjectId, runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
 import { gcpEnvironmentBindingConflict } from '../domain/services/gcp-environment-target.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -196,6 +197,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       azureSubscriptionId: z.string().uuid().optional().describe('provider="azure" action="connect": the subscription the user chose (when they have several), or the subscriptionId from the preview.'),
       azureApproved: z.literal(true).optional().describe('provider="azure" action="connect": set only after the user approves the preview\'s changes, together with its azureSubscriptionId.'),
       workerAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly grant on-demand worker access: Google Workflows for the deployment identity, plus permission for the app runtime to run the worker waker and read pending work through the Cloud SQL Data API.'),
+      secretScopeAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun, with environment: make secrets limited to named services (secret "services" in the spec) an access boundary. Creates one Google service identity per named service and narrows Secret Manager access so other identities cannot read those secrets. Needs a Google Cloud administrator sign-in (adminAuth="default" or adminAccessTokenRef). Preview, then confirm; hv_plan says when to run it again.'),
       adminAuth: z.literal('default').optional().describe('Use existing Google Application Default Credentials for bootstrap or confirmed ordinary prepare. Migration access preparation uses these credentials automatically.'),
       adminCredentialsJson: z.string().optional().describe('action="prepare": one-time admin service account JSON. Not stored.'),
       adminCredentialsJsonRef: z.string().optional().describe('action="prepare": env:NAME or file:/absolute/path resolving to one-time admin service account JSON. Not stored.'),
@@ -228,6 +230,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         migrationAccess,
         migrationSourceEnvironment,
         workerAccess,
+        secretScopeAccess,
         purpose,
         environment,
         awsAccountId,
@@ -320,6 +323,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           || memorystoreAccess !== undefined
           || queueAccess !== undefined
           || workerAccess !== undefined
+          || secretScopeAccess !== undefined
           || adminAuth !== undefined
           || adminCredentialsJson !== undefined
           || adminCredentialsJsonRef !== undefined
@@ -389,7 +393,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       if (requestedAction === 'describe') {
         const incompatible = suppliedOptionNames({ credentials, credentialsRef, credentialsKey, credentialsMap,
           gcpProjectId, region, billingAccountName, deployServiceAccountEmail,
-          gcsAccess, memorystoreAccess, queueAccess, workerAccess, adminAuth, adminCredentialsJson,
+          gcsAccess, memorystoreAccess, queueAccess, workerAccess, secretScopeAccess, adminAuth, adminCredentialsJson,
           adminCredentialsJsonRef, adminAccessToken, adminAccessTokenRef, confirm });
         if (incompatible.length) return commandError('VALIDATION', `describe does not accept: ${incompatible.join(', ')}.`);
         const { context: repositoryGuidance } = await resolveGuidanceContext();
@@ -415,6 +419,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         memorystoreAccess,
         queueAccess,
         workerAccess,
+        secretScopeAccess,
         adminCredentialsJson,
         adminCredentialsJsonRef,
         adminAccessToken,
@@ -470,6 +475,11 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       }
       if (requestedAction === 'prepare' && workerAccess && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'workerAccess is supported only when preparing the shared cloudrun connection.');
+      }
+      if (requestedAction === 'prepare' && secretScopeAccess) {
+        if (provider !== 'cloudrun' || !environment) return commandError('VALIDATION', 'secretScopeAccess is supported only when preparing cloudrun for one named environment.');
+        const other = suppliedOptionNames({ gcsAccess, memorystoreAccess, queueAccess, workerAccess, migrationAccess, deployServiceAccountEmail, adminCredentialsJson, adminCredentialsJsonRef });
+        if (other.length) return commandError('VALIDATION', `secretScopeAccess is reviewed on its own and signs in with adminAuth="default" or an access token; remove: ${other.join(', ')}.`);
       }
       if (requestedAction === 'prepare' && queueAccess && provider !== 'cloudrun') {
         return commandError('VALIDATION', 'queueAccess is supported only when preparing the shared cloudrun connection.');
@@ -614,6 +624,12 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const resolvedAdminAccessToken = adminAccessTokenRef
           ? resolveLocalSecretRef(adminAccessTokenRef)
           : adminAccessToken;
+        if (secretScopeAccess) {
+          const scoped = await prepareSecretScopeAccess(ctx, { project: targetProject, spec: new SpecStore().get(targetProject)?.spec, environmentName: environment!,
+            requestedGcpProjectId: gcpProjectId, adminAccessToken: resolvedAdminAccessToken, confirm });
+          if (!scoped.success) return commandError('PROVIDER_ERROR', String(scoped.error ?? 'Service identity setup failed'), { details: scoped });
+          return commandSuccess({ project: { id: targetProject.id, name: targetProject.name }, ...scoped }, { next: confirm ? ['hv_plan'] : ['hv_connections'] });
+        }
         const payload = await runCloudPrepare({
           project: targetProject,
           ...selection,

@@ -8,8 +8,9 @@ import { GcpBootstrapClient } from '../../adapters/providers/gcp/gcp-bootstrap.c
 import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/providers/gcp/google-browser-signin.js';
 import { isMigrationAccessCheck, migrationAccessModes, providerRegistry, type MigrationAccess } from '../registry/provider.registry.js';
 import { GoogleAuth } from 'google-auth-library';
-import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress, isolationGrants, type TransferIsolationScope } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress, isolationGrants, readSecretScopeInput, secretScopePolicyProblems, SECRET_ACCESSOR_ROLE, type TransferIsolationScope } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import { getGcpProjectSetupContribution, getGcpRuntimeIsolation, runGcpProjectSetup } from './gcp-project-setup.service.js';
+import { GCP_SECRET_SCOPE_CONTRIBUTION } from './gcp-secret-scope.js';
 import type { Project } from '../entities/project.entity.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
 import { GCP_PROJECT_ID_PATTERN, gcpConnectionScope } from './gcp-environment-target.js';
@@ -855,6 +856,10 @@ async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePla
   }
   const policy = await getProjectIamPolicy(token, plan.gcpProjectId);
   const restricted = isolation ? verifyRuntimeRestrictions(policy, isolation) : new Set<string>();
+  // Secrets limited to named services narrow the same grant with their own reviewed condition.
+  if (verifySecretScopeRestriction(policy, getGcpProjectSetupContribution(localProjectId, plan.gcpProjectId, GCP_SECRET_SCOPE_CONTRIBUTION), plan.runtimeMember)) {
+    restricted.add(SECRET_ACCESSOR_ROLE);
+  }
   if (isolation) {
     const account = await client.getServiceAccount(plan.gcpProjectId, isolation.runtimeEmail.split('@')[0]!);
     const project = await client.getProject(plan.gcpProjectId);
@@ -911,6 +916,20 @@ async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePla
     if (registry.name !== repository || registry.format !== 'DOCKER') throw new Error('The image repository identity or format did not converge.');
   }
   return { enabledApis, iamResult, runtimeIamResult, runtimeServiceAccountIamResult, runtimeSelfIamResult };
+}
+
+/**
+ * Whether the shared runtime identity's Secret Accessor grant is the reviewed conditional one instead of the
+ * plain grant base setup expects. Throws when the saved setup is unreadable or the live policy differs from it.
+ */
+export function verifySecretScopeRestriction(policy: IamPolicy, scopeSetup: Parameters<typeof readSecretScopeInput>[0] | undefined, runtimeMember: string | undefined): boolean {
+  if (!scopeSetup) return false;
+  const scope = readSecretScopeInput(scopeSetup);
+  if (!scope) throw new Error('The saved service identity setup does not match what Hypervibe builds.');
+  if (!scope.runtimeExcludedSecretIds.length || runtimeMember !== `serviceAccount:${scope.runtimeServiceAccountEmail}`) return false;
+  const problems = secretScopePolicyProblems(policy, { ...scope, identities: [] });
+  if (problems.length) throw new Error(`The app's Secret Manager restriction does not match the saved project setup. ${problems.join(' ')}`);
+  return true;
 }
 
 /** A second binding for the same app and role can restore access outside the reviewed condition. */

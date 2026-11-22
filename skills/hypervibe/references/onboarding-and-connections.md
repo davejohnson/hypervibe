@@ -118,10 +118,19 @@ reCAPTCHA or an auth vendor) need no Hypervibe connection. Use this template:
    When only some services should hold a sensitive key, add
    `"services": ["<service>", ...]` to that secret (delegated or
    Hypervibe-generated). Only those services receive it in each listed
-   environment; omit it to give the key to every service. Google Cloud only:
-   AWS, Azure and Railway refuse a spec that uses it. It keeps the key out of
-   the other services' environment, but all services of an environment share one
-   cloud identity, so do not describe it as blocking their access to the secret.
+   environment, and only they can read it from the cloud's secret store;
+   omit it to give the key to every service. Google Cloud, AWS and Azure;
+   Railway refuses it. On Google Cloud `hv_plan` stops and names one extra
+   step that needs a Google Cloud administrator sign-in
+   (`hv_connections ... action="prepare" secretScopeAccess="lifecycle"`,
+   preview then confirm). Read that step's result: a secret listed under
+   `notYetEnforced` is still readable by the other services. That is always
+   the case when the secret already exists in the environment; then run
+   `hv_plan` and `hv_apply`, and run the same step once more. Do not store
+   the real value until a setup result no longer lists the secret as not
+   enforced; plan, apply and status output say `NOT YET ENFORCED` until then. Say plainly that deployment and CI access, account
+   administrators and whoever writes the code can still read the value, and
+   that a key other services already held should be rotated.
 2. For each callback the service sends, declare an environment `webhooks` entry:
    `{ "vendor": "<service>", "service": "<public web service>", "path": "/webhooks/<service>/<event>" }`,
    plus `signingSecretEnvVar` when the service signs requests (for example

@@ -42,6 +42,8 @@ export interface GcpProjectSetupParams {
   dataDir?: string;
   /** Explicitly reviewed removals/imports; never inferred from engine output. */
   allowDestroyAddresses?: string[];
+  /** Grants whose access condition this contribution owns: a changed condition replaces the grant. */
+  allowReplaceAddresses?: string[];
   allowImportAddresses?: string[];
   /** Fresh provider observations proved these resources exist; creation cannot repair missing state. */
   existingResourceAddresses?: string[];
@@ -268,7 +270,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
     const isolation = params.transferIsolationReview;
     if (!!isolation !== isIsolationContribution(params.contribution.id)) return fail('Use a dedicated transfer isolation review for these runtime grants.');
     if (isolation) {
-      if (params.transferSlotReview || params.allowDestroyAddresses?.length || params.allowImportAddresses?.length ||
+      if (params.transferSlotReview || params.allowDestroyAddresses?.length || params.allowReplaceAddresses?.length || params.allowImportAddresses?.length ||
           params.existingResourceAddresses?.length || recoveryRequested || params.observedUnlinkedProject || params.observedLinkedProject) {
         return fail('Review the two application permission changes separately from other project setup.');
       }
@@ -309,7 +311,8 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       ...(review ? { transferSlotReview: review } : {}),
       ...(isolation ? { transferIsolationReview: isolation } : {}),
       authenticationScope: params.authenticationScope ?? 'google-project-admin',
-      destroy: params.allowDestroyAddresses ?? [], imports: params.allowImportAddresses ?? [], existing: params.existingResourceAddresses ?? [] });
+      destroy: params.allowDestroyAddresses ?? [], imports: params.allowImportAddresses ?? [], existing: params.existingResourceAddresses ?? [],
+      ...(params.allowReplaceAddresses?.length ? { replace: params.allowReplaceAddresses } : {}) });
     const previewFile = path.join(paths.plans, `setup-${intent}.json`);
     const bootstrap = params.contribution.id === 'bootstrap';
     const observed = bootstrap ? params.observedUnlinkedProject : undefined;
@@ -443,6 +446,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       if (isolation && (!verifiedIsolation || planned.unmanagedDeletes.length)) return fail('The native plan must contain only the two reviewed application grant conditions or their verified no-ops.');
       const allowed = new Set([...Object.keys(params.contribution.configuration.resources), ...Object.keys(previous?.resources ?? {})]);
       const destroy = new Set(params.allowDestroyAddresses ?? []);
+      const replace = new Set(params.allowReplaceAddresses ?? []);
       const imports = new Set(params.allowImportAddresses ?? []);
       const observedPresent = new Set(params.existingResourceAddresses ?? []);
       const unexpected = planned.actions.filter((action) => action.type !== 'noop').find((action) => {
@@ -452,7 +456,8 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
               !isolationGrants(isolation.scope).some(grant => grant.address === addresses[0] && isolation.grants[grant.role] === 'broad')) return true;
           return false;
         }
-        return !!isolation || addresses.some((address) => !allowed.has(address)) || action.type === 'replace'
+        return !!isolation || addresses.some((address) => !allowed.has(address))
+          || (action.type === 'replace' && addresses.some((address) => !replace.has(address)))
           || (action.type === 'create' && addresses.some((address) => observedPresent.has(address)))
           || (action.type === 'destroy' && addresses.some((address) => !destroy.has(address)))
           || (action.metadata?.engineAdopt === true && addresses.some((address) => !imports.has(address)));

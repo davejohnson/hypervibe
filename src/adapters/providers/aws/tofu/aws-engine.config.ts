@@ -4,6 +4,7 @@ import type { EngineConfiguration, EngineResourceMapping } from '../../../../dom
 import { addTasks } from './aws-engine.tasks.js';
 import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
 import { addAwsCiConfiguration } from './aws-engine-ci.config.js';
+import { awsControlRoleName, awsRuntimeIdentity, awsTaskRoleArns } from './aws-engine.identity.js';
 
 /**
  * Pure OpenTofu configuration for one AWS environment. Values are non-secret:
@@ -33,6 +34,11 @@ export interface AwsEngineInput {
   jobs?: AwsJobInput[];
   /** Names of the runtime secrets under parameterPath, wired into Fargate tasks by reference. */
   secretKeys?: string[];
+  /**
+   * Runtime secrets limited to named services (secret key to service names). Absent or empty: every workload
+   * receives every secret and one runtime role runs them all. Present: see aws-engine.identity.ts.
+   */
+  secretScopes?: Record<string, string[]>;
   /** Declared, present package token: CodeBuild alone can read it. */
   packageTokenKey?: string;
 }
@@ -174,19 +180,32 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
   resources['aws_iam_role.runtime'] = runtime;
   resources['aws_iam_role_policy.runtime'] = runtime;
   const buckets = input.storage ?? [];
-  const runtimeStatements: unknown[] = [
+  const identity = awsRuntimeIdentity(input, runtimeSecretKeys);
+  const parameterArn = (key: string) => `arn:aws:ssm:${input.region}:${input.accountId}:parameter${input.parameterPath}${key}`;
+  /** What a container's role may do: write logs, read exactly its own secrets, pull the image, use the environment's buckets. */
+  const workloadStatements = (secretKeys: string[]): unknown[] => [
     { Sid: 'Logs', Effect: 'Allow', Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'], Resource: '*' },
-    ...(runtimeSecretKeys.length ? [{ Sid: 'Secrets', Effect: 'Allow', Action: ['ssm:GetParameter', 'ssm:GetParameters'],
-      Resource: runtimeSecretKeys.map((key) => `arn:aws:ssm:${input.region}:${input.accountId}:parameter${input.parameterPath}${key}`) }] : []),
+    ...(secretKeys.length ? [{ Sid: 'Secrets', Effect: 'Allow', Action: ['ssm:GetParameter', 'ssm:GetParameters'], Resource: secretKeys.map(parameterArn) }] : []),
+    // Decryption happens only inside a Parameter Store read, which the statement above limits to the listed parameters.
     { Sid: 'DecryptSecrets', Effect: 'Allow', Action: 'kms:Decrypt', Resource: '*', Condition: { StringEquals: { 'kms:ViaService': `ssm.${input.region}.amazonaws.com` } } },
     { Sid: 'PullImages', Effect: 'Allow', Action: ['ecr:GetAuthorizationToken', 'ecr:BatchGetImage', 'ecr:GetDownloadUrlForLayer', 'ecr:BatchCheckLayerAvailability'], Resource: '*' },
     ...(buckets.length ? [{ Sid: 'Storage', Effect: 'Allow', Action: ['s3:GetObject', 's3:PutObject', 's3:DeleteObject', 's3:ListBucket'],
       Resource: buckets.flatMap((bucket) => [`arn:aws:s3:::${bucket.bucket}`, `arn:aws:s3:::${bucket.bucket}/*`]) }] : []),
   ];
+  const runtimeStatements = workloadStatements(identity.sharedSecretKeys);
   const account = `${input.region}:${input.accountId}`;
   const runtimeRoleArn = `arn:aws:iam::${input.accountId}:role/hypervibe/app/${input.prefix}-runtime`;
-  const onDemand = (input.workers ?? []).some((worker) => worker.pendingWorkQuery);
-  if ((input.jobs ?? []).length || onDemand) {
+  const jobs = input.jobs ?? [];
+  const onDemandWorkers = (input.workers ?? []).filter((worker) => worker.pendingWorkQuery);
+  const onDemand = onDemandWorkers.length > 0;
+  const wakerStatements = [
+    ...(input.database ? [{ Sid: 'WakerCount', Effect: 'Allow', Action: 'rds-data:ExecuteStatement', Resource: input.database.clusterArn }] : []),
+    { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: `arn:aws:secretsmanager:${account}:secret:hypervibe/${input.prefix}/*` },
+    { Sid: 'WakerScale', Effect: 'Allow', Action: ['ecs:UpdateService', 'ecs:DescribeServices'], Resource: `arn:aws:ecs:${account}:service/${input.prefix}/*` },
+    { Sid: 'WakerWebRequests', Effect: 'Allow', Action: 'cloudwatch:GetMetricData', Resource: '*' },
+    { Sid: 'WakerTimer', Effect: 'Allow', Action: 'scheduler:UpdateSchedule', Resource: `arn:aws:scheduler:${account}:schedule/default/${input.prefix}-*` },
+  ];
+  if (!identity.scoped && (jobs.length || onDemand)) {
     // Schedules start this environment's tasks and wakers, handing them only this role.
     runtimeStatements.push(
       { Sid: 'RunTasks', Effect: 'Allow', Action: 'ecs:RunTask', Resource: `arn:aws:ecs:${account}:task-definition/${input.prefix}-*` },
@@ -194,27 +213,60 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       { Sid: 'PassSelf', Effect: 'Allow', Action: 'iam:PassRole', Resource: runtimeRoleArn },
     );
   }
-  if (onDemand) {
-    runtimeStatements.push(
-      ...(input.database ? [{ Sid: 'WakerCount', Effect: 'Allow', Action: 'rds-data:ExecuteStatement', Resource: input.database.clusterArn }] : []),
-      { Sid: 'WakerLogin', Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: `arn:aws:secretsmanager:${account}:secret:hypervibe/${input.prefix}/*` },
-      { Sid: 'WakerScale', Effect: 'Allow', Action: ['ecs:UpdateService', 'ecs:DescribeServices'], Resource: `arn:aws:ecs:${account}:service/${input.prefix}/*` },
-      { Sid: 'WakerWebRequests', Effect: 'Allow', Action: 'cloudwatch:GetMetricData', Resource: '*' },
-      { Sid: 'WakerTimer', Effect: 'Allow', Action: 'scheduler:UpdateSchedule', Resource: `arn:aws:scheduler:${account}:schedule/default/${input.prefix}-*` },
-    );
+  if (!identity.scoped && onDemand) runtimeStatements.push(...wakerStatements);
+  const boundary = `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`;
+  const trust = (services: string[]) => JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Principal: { Service: services } }] });
+  const policy = (statements: unknown[]) => JSON.stringify({ Version: '2012-10-17', Statement: statements });
+  const roles: Record<string, unknown> = { runtime: {
+    name: `${input.prefix}-runtime`, path: '/hypervibe/app/', permissions_boundary: boundary,
+    // Once a secret names services, containers alone use this role; schedules and wakers run as the control role.
+    assume_role_policy: trust(identity.scoped ? ['ecs-tasks.amazonaws.com'] : ['ecs-tasks.amazonaws.com', 'scheduler.amazonaws.com', 'states.amazonaws.com', 'events.amazonaws.com']),
+  } };
+  const policies: Record<string, unknown> = { runtime: { name: 'runtime', role: '${aws_iam_role.runtime.id}', policy: policy(runtimeStatements) } };
+  for (const role of identity.serviceRoles) {
+    roles[role.key] = { name: role.name, path: '/hypervibe/app/', permissions_boundary: boundary, assume_role_policy: trust(['ecs-tasks.amazonaws.com']) };
+    policies[role.key] = { name: 'runtime', role: `\${aws_iam_role.${role.key}.id}`, policy: policy(workloadStatements(role.secretKeys)) };
+    resources[`aws_iam_role.${role.key}`] = runtime;
+    resources[`aws_iam_role_policy.${role.key}`] = runtime;
+  }
+  if (identity.scoped && (jobs.length || onDemand)) {
+    // No container runs as this role. It starts exactly this environment's scheduled jobs and wakers.
+    const controlRoleArn = `arn:aws:iam::${input.accountId}:role/hypervibe/app/${awsControlRoleName(input.prefix)}`;
+    roles.control = { name: awsControlRoleName(input.prefix), path: '/hypervibe/app/', permissions_boundary: boundary,
+      assume_role_policy: trust(['scheduler.amazonaws.com', ...(onDemand ? ['states.amazonaws.com', 'events.amazonaws.com'] : [])]) };
+    policies.control = { name: 'control', role: '${aws_iam_role.control.id}', policy: policy([
+      ...(jobs.length ? [
+        { Sid: 'RunTasks', Effect: 'Allow', Action: 'ecs:RunTask', Resource: jobs.flatMap((job) => [`arn:aws:ecs:${account}:task-definition/${job.resourceName}`, `arn:aws:ecs:${account}:task-definition/${job.resourceName}:*`]) },
+        { Sid: 'PassTaskRoles', Effect: 'Allow', Action: 'iam:PassRole', Resource: awsTaskRoleArns(input, jobs), Condition: { StringEquals: { 'iam:PassedToService': 'ecs-tasks.amazonaws.com' } } },
+      ] : []),
+      ...(onDemand ? [
+        { Sid: 'StartWakers', Effect: 'Allow', Action: 'states:StartExecution', Resource: onDemandWorkers.map((worker) => `arn:aws:states:${account}:stateMachine:${worker.resourceName}-waker`) },
+        // The waker re-arms its own one-time schedule, which runs as this role.
+        { Sid: 'PassSelf', Effect: 'Allow', Action: 'iam:PassRole', Resource: controlRoleArn },
+        ...wakerStatements,
+      ] : []),
+    ]) };
+    resources['aws_iam_role.control'] = runtime;
+    resources['aws_iam_role_policy.control'] = runtime;
+  }
+  // With a limited secret, each role's permissions are exactly what this configuration declares: a managed policy
+  // attached to it, or a second inline policy, from outside Hypervibe would be removed by the next apply instead of
+  // quietly widening who can read the secret. Environments without a limited secret keep their configuration unchanged.
+  const exclusive: Record<string, Record<string, unknown>> = {};
+  if (identity.scoped) {
+    exclusive.aws_iam_role_policy_attachments_exclusive = {};
+    exclusive.aws_iam_role_policies_exclusive = {};
+    for (const key of Object.keys(roles)) {
+      exclusive.aws_iam_role_policy_attachments_exclusive[key] = { role_name: `\${aws_iam_role.${key}.name}`, policy_arns: [] };
+      exclusive.aws_iam_role_policies_exclusive[key] = { role_name: `\${aws_iam_role.${key}.name}`, policy_names: [`\${aws_iam_role_policy.${key}.name}`] };
+      resources[`aws_iam_role_policy_attachments_exclusive.${key}`] = runtime;
+      resources[`aws_iam_role_policies_exclusive.${key}`] = runtime;
+    }
   }
   files['base.tf.json'] = {
     // The default VPC: tasks run in its public subnets (no NAT gateway) and reach the database on its private address.
     data: { aws_vpc: { default: { default: true } }, aws_subnets: { default: { filter: [{ name: 'vpc-id', values: ['${data.aws_vpc.default.id}'] }] } } },
-    resource: {
-      aws_iam_role: { runtime: {
-        name: `${input.prefix}-runtime`, path: '/hypervibe/app/',
-        permissions_boundary: `arn:aws:iam::${input.accountId}:policy/hypervibe/hypervibe-app-boundary`,
-        assume_role_policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole',
-          Principal: { Service: ['ecs-tasks.amazonaws.com', 'scheduler.amazonaws.com', 'states.amazonaws.com', 'events.amazonaws.com'] } }] }),
-      } },
-      aws_iam_role_policy: { runtime: { name: 'runtime', role: '${aws_iam_role.runtime.id}', policy: JSON.stringify({ Version: '2012-10-17', Statement: runtimeStatements }) } },
-    },
+    resource: { aws_iam_role: roles, aws_iam_role_policy: policies, ...exclusive },
   };
 
   // Storage: private buckets, objects encrypted, no public access.
@@ -248,7 +300,7 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     files['storage.tf.json'] = { resource: bucketResources };
   }
 
-  addTasks({ ...input, secretKeys: runtimeSecretKeys }, files, resources);
+  addTasks({ ...input, secretKeys: runtimeSecretKeys }, files, resources, identity);
   if (input.database) {
     files['database-access.tf.json'] = { resource: { aws_secretsmanager_secret: { database_query: {
       name: awsDatabaseQuerySecretName(input.environmentId), recovery_window_in_days: 0,

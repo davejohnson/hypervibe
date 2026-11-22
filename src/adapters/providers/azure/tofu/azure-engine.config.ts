@@ -66,6 +66,13 @@ export interface AzureEngineInput extends AzurePlacement {
   jobs?: AzureJobInput[];
   /** Runtime secrets every workload reads, by environment variable name; each must exist in Key Vault before apply. */
   secretKeys?: string[];
+  /**
+   * Secrets limited to named services: environment variable name → logical service names. A named service runs as its
+   * own identity, and only those identities may read the secret. Omitted: every workload shares the runtime identity.
+   */
+  secretServices?: Record<string, string[]>;
+  /** Services that receive storage variables. Read only for a service with its own identity, which gets the storage role only when listed. */
+  storageServices?: string[];
   /** Declared, present package token; only the build task can read it. */
   packageTokenKey?: string;
   /** Exact applied CI registry retained even when branch CI is disabled. */
@@ -288,9 +295,9 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   const tags = { 'managed-by': 'hypervibe', 'hv-environment': input.environmentId.toLowerCase() };
   const placed = { resource_group_name: input.resourceGroup, location: input.location, tags };
   const resources: Record<string, EngineResourceMapping> = {};
-  const roleAssignment = (scope: string, role: string, description: string) => ({
+  const roleAssignment = (scope: string, role: string, description: string, identity = 'runtime') => ({
     scope, role_definition_id: `/subscriptions/${input.subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${role}`,
-    principal_id: '${azurerm_user_assigned_identity.runtime.principal_id}', principal_type: 'ServicePrincipal', description,
+    principal_id: `\${azurerm_user_assigned_identity.${identity}.principal_id}`, principal_type: 'ServicePrincipal', description,
   });
 
   const workers = input.workers ?? [];
@@ -302,6 +309,18 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     if (seen.has(name)) throw new Error(`Secrets ${seen.get(name)} and ${key} map to the same Key Vault name ${name}.`);
     seen.set(name, key);
   }
+  // A secret limited to named services is an access boundary: each named service runs as its own identity, and the
+  // identity every other workload shares holds no role on that secret.
+  const scopes = new Map(Object.entries(input.secretServices ?? {}));
+  for (const key of scopes.keys()) {
+    if (key === WAKER_SECRET_KEY || ['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key)) throw new Error(`Secret ${key} cannot be limited to named services on Azure.`);
+  }
+  const ownIdentity = new Set([...scopes.values()].flat());
+  const identityOf = (logicalName: string) => ownIdentity.has(logicalName) ? `app_${azureKey(logicalName)}` : 'runtime';
+  /** The secrets one workload may read. The shared identity never reads a limited secret, whoever asks. */
+  const secretsOf = (logicalName: string, scaleRule: boolean) => ownIdentity.has(logicalName)
+    ? secrets.filter(({ key }) => key === WAKER_SECRET_KEY ? scaleRule : (scopes.get(key)?.includes(logicalName) ?? true))
+    : secrets.filter(({ key }) => !scopes.has(key));
 
   // Retired: each environment used to have its own Container Apps environment and logs, outside any network.
   // Mapping them lets the plan remove them from older environments, whose apps move to the shared one.
@@ -321,7 +340,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     resources['azurerm_role_assignment.runtime_ci_pull'] = runtime;
   }
   // One role per secret, so an environment reads only its own secrets in the project vault.
-  for (const secret of secrets) {
+  for (const secret of secrets.filter(({ key }) => !scopes.has(key))) {
     const key = `secret_${azureKey(secret.key)}`;
     assignments[key] = roleAssignment(`${input.vault.id}/secrets/${secret.vaultName}`, ROLE.keyVaultSecretsUser, `Hypervibe: the app reads ${secret.key}`);
     resources[`azurerm_role_assignment.${key}`] = runtime;
@@ -330,6 +349,37 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   if (buckets.length) {
     assignments.runtime_storage = roleAssignment('${azurerm_storage_account.files.id}', ROLE.storageBlobDataContributor, 'Hypervibe: the app reads and writes its files');
     resources['azurerm_role_assignment.runtime_storage'] = runtime;
+  }
+  // One identity for each service a limited secret names, holding what that service needs and nothing else:
+  // image pulls, its own secrets, and storage when it uses storage.
+  const identities: Record<string, unknown> = { runtime: { name: `${input.prefix}-runtime`, ...placed } };
+  const sharedAssignments = Object.keys(assignments);
+  const sleeps: Record<string, unknown> = {};
+  const scaled = new Set(workers.filter((worker) => worker.pendingWorkQuery).map((worker) => worker.logicalName));
+  for (const workload of [...(input.services ?? []), ...workers, ...(input.jobs ?? [])].filter((entry) => ownIdentity.has(entry.logicalName))) {
+    const identity = identityOf(workload.logicalName);
+    if (identity in identities) throw new Error(`Services limited to a secret need distinct names; ${workload.logicalName} repeats another service's.`);
+    const mapping: EngineResourceMapping = { actionId: `identity:service:${workload.logicalName}`, kind: 'service', name: `${workload.logicalName} identity` };
+    const own: string[] = [];
+    const assign = (name: string, assignment: unknown) => {
+      const key = `${identity}_${name}`;
+      if (key in assignments) throw new Error(`Role assignment ${key} is ambiguous; rename service ${workload.logicalName}.`);
+      assignments[key] = assignment; own.push(key);
+      resources[`azurerm_role_assignment.${key}`] = mapping;
+    };
+    identities[identity] = { name: `${workload.resourceName}-id`, ...placed };
+    resources[`azurerm_user_assigned_identity.${identity}`] = mapping;
+    assign('pull', roleAssignment(input.shared.registryId, ROLE.acrPull, `Hypervibe: ${workload.logicalName} pulls its images`, identity));
+    if (buildRegistry.id !== input.shared.registryId) assign('ci_pull', roleAssignment(buildRegistry.id, ROLE.acrPull, `Hypervibe: ${workload.logicalName} pulls images built for this environment`, identity));
+    for (const secret of secretsOf(workload.logicalName, scaled.has(workload.logicalName))) {
+      assign(`secret_${azureKey(secret.key)}`, roleAssignment(`${input.vault.id}/secrets/${secret.vaultName}`, ROLE.keyVaultSecretsUser, `Hypervibe: ${workload.logicalName} reads ${secret.key}`, identity));
+    }
+    if (buckets.length && (input.storageServices ?? []).includes(workload.logicalName)) {
+      assign('storage', roleAssignment('${azurerm_storage_account.files.id}', ROLE.storageBlobDataContributor, `Hypervibe: ${workload.logicalName} reads and writes its files`, identity));
+    }
+    // A changed set of roles waits again, so the revision that first uses a new role starts after it applied.
+    sleeps[`roles_${identity}`] = { create_duration: '90s', triggers: { roles: own.join(',') }, depends_on: own.map((key) => `azurerm_role_assignment.${key}`) };
+    resources[`time_sleep.roles_${identity}`] = mapping;
   }
   for (const address of Object.keys(input.adoptRoleAssignments ?? {})) {
     if (!(address.replace(/^azurerm_role_assignment\./, '') in assignments)) throw new Error(`Only a desired role assignment can be adopted (${address}).`);
@@ -340,10 +390,13 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     'provider.tf.json': providerFile(input),
     'base.tf.json': {
       resource: {
-        azurerm_user_assigned_identity: { runtime: { name: `${input.prefix}-runtime`, ...placed } },
+        azurerm_user_assigned_identity: identities,
         azurerm_role_assignment: assignments,
         // New role assignments take a minute or two to apply; the first revision pulls and reads secrets right away.
-        time_sleep: { roles: { create_duration: '90s', depends_on: Object.keys(assignments).map((key) => `azurerm_role_assignment.${key}`) } },
+        // With a limited secret the shared wait is tied to the shared identity's role set, so it waits again when a
+        // limit is added or removed (removing one gives the shared identity a new role its apps then rely on).
+        time_sleep: { roles: { create_duration: '90s', depends_on: sharedAssignments.map((key) => `azurerm_role_assignment.${key}`),
+          ...(scopes.size ? { triggers: { roles: [...sharedAssignments].sort().join(',') } } : {}) }, ...sleeps },
       },
     },
   };
@@ -374,7 +427,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     };
   }
 
-  const container = (workload: AzureWorkloadInput, extra: Record<string, unknown> = {}) => {
+  const container = (workload: AzureWorkloadInput, extra: Record<string, unknown> = {}, scaleRule = false) => {
     const conflicts = Object.keys(workload.env ?? {}).filter((name) => secretKeys.includes(name) || name === 'AZURE_CLIENT_ID');
     if (conflicts.length) throw new Error(`${conflicts.join(', ')} ${conflicts.length === 1 ? 'is' : 'are'} set by Hypervibe; remove ${conflicts.length === 1 ? 'it' : 'them'} from envVars.`);
     return {
@@ -384,19 +437,24 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
         // Literal values: OpenTofu would otherwise read ${...} and %{...} in them as templates.
         ...Object.entries(workload.env ?? {}).filter(([key]) => !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key)).sort(([a], [b]) => a.localeCompare(b)).map(([name, value]) => ({ name, value: value.replace(/([$%])\{/g, '$1$1{') })),
         // DefaultAzureCredential picks the runtime identity with this; it is an id, not a secret.
-        { name: 'AZURE_CLIENT_ID', value: '${azurerm_user_assigned_identity.runtime.client_id}' },
-        ...secrets.filter(({ key }) => key !== WAKER_SECRET_KEY).map(({ key, name }) => ({ name: key, secret_name: name })),
+        { name: 'AZURE_CLIENT_ID', value: `\${azurerm_user_assigned_identity.${identityOf(workload.logicalName)}.client_id}` },
+        ...secretsOf(workload.logicalName, scaleRule).filter(({ key }) => key !== WAKER_SECRET_KEY).map(({ key, name }) => ({ name: key, secret_name: name })),
       ],
       ...extra,
     };
   };
-  const shared = {
-    resource_group_name: input.resourceGroup, container_app_environment_id: input.shared.appsEnvironmentId, tags,
-    identity: [{ type: 'UserAssigned', identity_ids: ['${azurerm_user_assigned_identity.runtime.id}'] }],
-    registry: [...new Set([input.shared.registryLoginServer, buildRegistry.loginServer])].map((server) => ({ server, identity: '${azurerm_user_assigned_identity.runtime.id}' })),
-    secret: secrets.map(({ name, vaultName }) => ({ name, key_vault_secret_id: `${input.vault.uri}secrets/${vaultName}`, identity: '${azurerm_user_assigned_identity.runtime.id}' })),
-    // The pull and secret roles must have applied before the first revision starts.
-    depends_on: ['time_sleep.roles'],
+  // Exactly one identity is attached to a workload: code inside it can ask for a token of any identity attached to it.
+  const platform = (workload: AzureWorkloadInput, scaleRule = false) => {
+    const identity = identityOf(workload.logicalName);
+    const id = `\${azurerm_user_assigned_identity.${identity}.id}`;
+    return {
+      resource_group_name: input.resourceGroup, container_app_environment_id: input.shared.appsEnvironmentId, tags,
+      identity: [{ type: 'UserAssigned', identity_ids: [id] }],
+      registry: [...new Set([input.shared.registryLoginServer, buildRegistry.loginServer])].map((server) => ({ server, identity: id })),
+      secret: secretsOf(workload.logicalName, scaleRule).map(({ name, vaultName }) => ({ name, key_vault_secret_id: `${input.vault.uri}secrets/${vaultName}`, identity: id })),
+      // The pull and secret roles must have applied before the first revision starts.
+      depends_on: [identity === 'runtime' ? 'time_sleep.roles' : `time_sleep.roles_${identity}`],
+    };
   };
   const checkName = (name: string) => {
     if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(name) || name.includes('--')) throw new Error(`Container App name ${name} is invalid.`);
@@ -411,7 +469,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
       costAttributes: ['template.*.container.*.cpu', 'template.*.container.*.memory', 'template.*.min_replicas', 'template.*.max_replicas'] };
     const probe = service.healthCheckPath ? { path: service.healthCheckPath, port: service.targetPort, transport: 'HTTP' } : undefined;
     apps[key] = {
-      name: service.resourceName, revision_mode: 'Single', ...shared,
+      name: service.resourceName, revision_mode: 'Single', ...platform(service),
       ingress: [{ external_enabled: service.public, target_port: service.targetPort, transport: 'auto', allow_insecure_connections: false,
         traffic_weight: [{ latest_revision: true, percentage: 100 }] }],
       template: [{
@@ -429,7 +487,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     resources[`azurerm_container_app.${key}`] = { actionId: `service:${worker.logicalName}`, kind: 'service', name: worker.logicalName, billable: true,
       costAttributes: ['template.*.container.*.cpu', 'template.*.container.*.memory', 'template.*.min_replicas', 'template.*.max_replicas'] };
     apps[key] = {
-      name: worker.resourceName, revision_mode: 'Single', ...shared,
+      name: worker.resourceName, revision_mode: 'Single', ...platform(worker, Boolean(worker.pendingWorkQuery)),
       template: [{
         // On demand: KEDA counts pending work once a minute and starts one replica while it is above zero.
         // The server never pauses on Azure, so counting keeps nothing awake that would otherwise sleep.
@@ -440,7 +498,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
             metadata: { query: worker.pendingWorkQuery.trim().replace(/;\s*$/, '').replace(/([$%])\{/g, '$1$1{'), targetQueryValue: '1', activationTargetQueryValue: '0' },
             authentication: [{ secret_name: azureSecretName(WAKER_SECRET_KEY), trigger_parameter: 'connection' }] }],
         } : {}),
-        container: [container(worker)],
+        container: [container(worker, {}, Boolean(worker.pendingWorkQuery))],
       }],
       lifecycle: [{ ignore_changes: ['template[0].container[0].image', 'workload_profile_name'] }],
     };
@@ -453,7 +511,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
     const key = azureKey(job.logicalName);
     resources[`azurerm_container_app_job.${key}`] = { actionId: `service:${job.logicalName}`, kind: 'service', name: job.logicalName, billable: true,
       costAttributes: ['template.*.container.*.cpu', 'template.*.container.*.memory'] };
-    const { container_app_environment_id, ...rest } = shared;
+    const { container_app_environment_id, ...rest } = platform(job);
     jobs[key] = {
       name: job.resourceName, location: input.location, container_app_environment_id, ...rest,
       replica_timeout_in_seconds: job.timeoutSeconds ?? 1800, replica_retry_limit: 0,
