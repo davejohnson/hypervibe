@@ -7,22 +7,22 @@ const environments: Array<{ name: string; platformBindings: Record<string, unkno
 const connections: Array<{ id: string; provider: string; scope: string; credentialsEncrypted: string }> = [];
 const policies: { value: Record<string, unknown> } = { value: {} };
 const audits: Array<{ action: string }> = [];
-vi.mock('../../../adapters/db/repositories/environment.repository.js', () => ({ EnvironmentRepository: class { findByProjectId() { return environments; } } }));
-vi.mock('../../../adapters/db/repositories/project.repository.js', () => ({ ProjectRepository: class {
+vi.mock('../../adapters/db/repositories/environment.repository.js', () => ({ EnvironmentRepository: class { findByProjectId() { return environments; } } }));
+vi.mock('../../adapters/db/repositories/project.repository.js', () => ({ ProjectRepository: class {
   findAll() { return [{ id: 'p1', name: 'demo', policies: policies.value }]; }
   updatePolicies(_id: string, change: (project: { policies: Record<string, unknown> }) => Record<string, unknown>) { policies.value = change({ policies: policies.value }); }
 } }));
-vi.mock('../../../adapters/db/repositories/connection.repository.js', () => ({ ConnectionRepository: class {
+vi.mock('../../adapters/db/repositories/connection.repository.js', () => ({ ConnectionRepository: class {
   findAllByProvider(provider: string) { return connections.filter((entry) => entry.provider === provider); }
   delete(id: string) { const index = connections.findIndex((entry) => entry.id === id); if (index < 0) return false; connections.splice(index, 1); return true; }
 } }));
-vi.mock('../../../adapters/db/repositories/audit.repository.js', () => ({ AuditRepository: class { create(entry: { action: string }) { audits.push(entry); } } }));
-vi.mock('../../../adapters/secrets/secret-store.js', () => ({ getSecretStore: () => ({ decryptObject: (value: string) => JSON.parse(value) }) }));
-vi.mock('../cloud-prepare.execute.js', () => ({ buildSourceBucketName: (id: string) => `${id}-hv-build-source`, getDefaultAdminAccessToken: vi.fn() }));
-vi.mock('../gcp-project-setup.service.js', () => ({ readGcpBootstrappedProject: vi.fn() }));
+vi.mock('../../adapters/db/repositories/audit.repository.js', () => ({ AuditRepository: class { create(entry: { action: string }) { audits.push(entry); } } }));
+vi.mock('../../adapters/secrets/secret-store.js', () => ({ getSecretStore: () => ({ decryptObject: (value: string) => JSON.parse(value) }) }));
+vi.mock('../../domain/services/cloud-prepare.execute.js', () => ({ buildSourceBucketName: (id: string) => `${id}-hv-build-source`, getDefaultAdminAccessToken: vi.fn() }));
+vi.mock('../../domain/services/gcp-project-setup.service.js', () => ({ readGcpBootstrappedProject: vi.fn() }));
 
-const { runGcpProjectRemoval } = await import('../gcp-project-removal.service.js');
-const { engineStatePaths } = await import('../../../adapters/engine/opentofu/workspace.js');
+const { runGcpProjectRemoval } = await import('../gcp-project-removal.js');
+const { engineStatePaths } = await import('../../adapters/engine/opentofu/workspace.js');
 
 const GCP = 'hv-demo-12345678';
 const project = { id: 'p1', name: 'demo', policies: {} } as never;

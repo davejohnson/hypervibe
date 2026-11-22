@@ -1,7 +1,7 @@
 import { redactExactValues } from '../utils/redact-exact-values.js';
 import { connectionRoles } from '../domain/services/connection-roles.js';
 import { requiredConnectionChecklist } from '../application/spec-connections.js';
-import { cloudEngineForConnection } from '../application/cloud-engines.js';
+import { cloudEngineForConnection, cloudEngineForProjectRemoval } from '../application/cloud-engines.js';
 import { parseCredentialRef, resolveLocalSecretRef, type ResolvedCredentialSource } from '../application/credential-reference.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { CommandRegistrar } from '../application/commands.js';
@@ -14,7 +14,6 @@ import { secretManagerRegistry } from '../domain/registry/secretmanager.registry
 import { runCloudPrepare } from '../domain/services/cloud-prepare.execute.js';
 import { prepareSecretScopeAccess } from '../application/secret-scope-access.js';
 import { existingRepositoryGcpProjectId, runGcpBootstrap } from '../domain/services/gcp-bootstrap.service.js';
-import { runGcpProjectRemoval } from '../domain/services/gcp-project-removal.service.js';
 import { gcpEnvironmentBindingConflict } from '../domain/services/gcp-environment-target.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { connectCloudflareInBrowser } from '../application/local-connect-page.js';
@@ -251,11 +250,12 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       if (action === 'remove-project' || previewId !== undefined) {
         // Deletes a whole Google project, so it accepts nothing but its own five fields.
         const extra = suppliedOptionNames(input).filter((name) => !['provider', 'action', 'project', 'gcpProjectId', 'adminAuth', 'previewId', 'confirm'].includes(name));
-        if (action !== 'remove-project' || provider !== 'cloudrun' || extra.length || !projectRef?.trim() || !gcpProjectId?.trim() || adminAuth !== 'default') {
+        const remover = provider ? cloudEngineForProjectRemoval(provider)?.removeProject : undefined;
+        if (action !== 'remove-project' || provider !== 'cloudrun' || !remover || extra.length || !projectRef?.trim() || !gcpProjectId?.trim() || adminAuth !== 'default') {
           return commandError('VALIDATION', 'action="remove-project" takes provider="cloudrun", project, the exact gcpProjectId and adminAuth="default"; add previewId and confirm=true only after reviewing its preview.');
         }
         const owner = ctx.resolveProjectOrThrow({ project: projectRef });
-        const removal = await runGcpProjectRemoval({ project: owner, gcpProjectId, previewId, confirm: explicitConfirmation === true });
+        const removal = await remover({ project: owner, cloudProjectId: gcpProjectId, previewId, confirm: explicitConfirmation === true });
         const { success: _success, error, ...data } = removal;
         if (!removal.success) {
           return commandError(removal.status === 'blocked' ? 'VALIDATION' : 'PROVIDER_ERROR', error ?? 'The Google project was not removed.', { details: data, next: ['hv_connections'] });

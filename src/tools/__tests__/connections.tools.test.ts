@@ -30,10 +30,11 @@ vi.mock('../../domain/services/gcp-bootstrap.service.js', async (original) => {
   return { ...actual, runGcpBootstrap: vi.fn() };
 });
 
-vi.mock('../../domain/services/gcp-project-removal.service.js', () => ({ runGcpProjectRemoval: vi.fn() }));
+vi.mock('../../application/gcp-project-removal.js', () => ({ runGcpProjectRemoval: vi.fn() }));
+// The command reaches it only through the per-cloud registry.
 
 import { runGcpBootstrap } from '../../domain/services/gcp-bootstrap.service.js';
-import { runGcpProjectRemoval } from '../../domain/services/gcp-project-removal.service.js';
+import { runGcpProjectRemoval } from '../../application/gcp-project-removal.js';
 import * as cloudPrepare from '../../domain/services/cloud-prepare.execute.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../../application/context.js';
