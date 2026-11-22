@@ -71,6 +71,10 @@ export function createRailwayStorageAdapter(railway: RailwayAdapter): IStorageAd
       if (provider === 'railway') return railwayStorageRuntimeEnv(name, credentials.urlStyle);
       return s3StorageRuntimeEnv(credentials);
     },
+    async getMigrationBucketName(context, externalId) {
+      if (!context.projectId || !context.environmentId) throw new Error('Railway needs the original project and environment to identify the bucket.');
+      return railway.getMigrationBucketName(context.projectId, context.environmentId, externalId);
+    },
     getCredentials: (environment, context, externalId) => railway.getStorageCredentials(virtualEnvironment(environment, context), externalId),
     destroyBucket: (environment, context, externalId) => railway.destroyStorage(virtualEnvironment(environment, context), externalId),
   };

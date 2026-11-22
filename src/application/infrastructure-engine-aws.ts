@@ -20,6 +20,7 @@ import { awsEngineAuthentication, awsEngineBackend } from '../adapters/providers
 import {
   awsKey, awsRegistryUrl, awsSharedClusterArn, buildAwsBuildConfiguration, buildAwsSharedConfiguration, type AwsEngineInput, type AwsSharedInput,
 } from '../adapters/providers/aws/tofu/aws-engine.config.js';
+import { awsSecretScopes } from '../adapters/providers/aws/aws-secret-scope.js';
 import { awsImageTag, awsRequiredDockerfile, usesAwsWebCommand } from '../adapters/providers/aws/aws-release.client.js';
 import { localRepositoryFor } from './local-repository.js';
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
@@ -202,6 +203,9 @@ export function awsEngineProblems(spec: ProjectSpec, environmentName: string): s
   if (environment.database && awsProfileFor(environmentName) === 'production') {
     problems.push(`${environmentName} uses the production profile (RDS db.t4g.micro), which the AWS engine does not build yet. Testing environments (Aurora that pauses when idle) are supported.`);
   }
+  for (const key of Object.keys(awsSecretScopes(spec, environmentName) ?? {}).filter(isBuildTokenKey)) {
+    problems.push(`Secret ${key} is a package token read by the image build, not by a running service, so it cannot be limited to named services. Remove "services" from it.`);
+  }
   if (environment.cache) problems.push('Redis caches are not available on the AWS engine yet.');
   if (Object.keys(environment.queues ?? {}).length) problems.push('Queues are not available on the AWS engine yet.');
   if (environment.domain) problems.push('Custom domains are not available on the AWS engine yet; use the service URL or route traffic with domainTarget.');
@@ -271,6 +275,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
       schedule: service.cronSchedule!, timeZone: service.timeZone ?? 'UTC', ...(service.startCommand ? { command: ['sh', '-c', service.startCommand] } : {}),
     })),
     secretKeys: extra.secretKeys.filter((key) => !isBuildTokenKey(key)),
+    ...(awsSecretScopes(spec, environmentName) ? { secretScopes: awsSecretScopes(spec, environmentName) } : {}),
     ...(extra.secretKeys.find((key) => isBuildTokenKey(key) && engineOutsideKeys(spec, environmentName).includes(key)) ? { packageTokenKey: extra.secretKeys.find((key) => isBuildTokenKey(key) && engineOutsideKeys(spec, environmentName).includes(key))! } : {}),
   };
 }

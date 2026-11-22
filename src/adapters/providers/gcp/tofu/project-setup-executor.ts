@@ -20,6 +20,8 @@ import {
 
 import { assertIsolationReview, assertOriginalIsolationOwners, hasDeposedIsolationGrant, isolationGrants, isolationRecoveryRequired, isIsolationContribution, matchesIsolationState, retainedIsolations,
   verifyIsolationPlan, type TransferIsolationEvidence } from './transfer-isolation.js';
+import { matchesBucketCopyActions, reviewedBucketJob, type TransferBucketJobReview } from './bucket-copy-review.js';
+import { matchesTransferBucketJobState, verifyTransferBucketJobPlan, type TransferBucketJobEvidence } from './transfer-bucket-job.js';
 import type { TransferSlotEvidence } from '../gcp-transfer-slot-evidence.js';
 import { transferSlot, verifyTransferSlotPlan, matchesTransferState, type TransferSlotReview } from './transfer-slot.js';
 
@@ -37,11 +39,15 @@ export interface GcpProjectSetupParams {
   transferSlotReview?: TransferSlotReview;
   /** Re-read the empty secret, its policy and the enabled account after native apply. */
   observeTransferAfterApply?: () => Promise<TransferSlotEvidence>;
+  transferBucketJobReview?: TransferBucketJobReview;
+  observeBucketJobAfterApply?: () => Promise<TransferBucketJobEvidence>;
   transferIsolationReview?: TransferIsolationEvidence;
   observeIsolationAfterApply?: () => Promise<TransferIsolationEvidence>;
   dataDir?: string;
   /** Explicitly reviewed removals/imports; never inferred from engine output. */
   allowDestroyAddresses?: string[];
+  /** Grants whose access condition this contribution owns: a changed condition replaces the grant. */
+  allowReplaceAddresses?: string[];
   allowImportAddresses?: string[];
   /** Fresh provider observations proved these resources exist; creation cannot repair missing state. */
   existingResourceAddresses?: string[];
@@ -73,7 +79,8 @@ interface SetupManifest { contributions: Record<string, EngineConfiguration> }
 interface SetupPreview {
   planId: string; baseline: string; intent: string; planned: EnginePlanResult;
   reviewContributionId?: string;
-  setupPurpose?: 'railway-transfer' | 'railway-transfer-isolation';
+  setupPurpose?: PlanReport['setupPurpose'];
+  bucketCopy?: PlanReport['bucketCopy'];
   manifest: SetupManifest; configuration: EngineConfiguration;
   createdAt?: string; projectName?: string;
   bootstrapConnection?: PlanReport['bootstrapConnection'];
@@ -290,10 +297,12 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
   try {
     const manifestFile = path.join(paths.root, 'setup-manifest.json');
     const existing = readJson<SetupManifest>(manifestFile, { contributions: {} });
+    const bucketReview = params.transferBucketJobReview;
+    const bucketJob = reviewedBucketJob(params, existing.contributions);
     const isolation = params.transferIsolationReview;
     if (!!isolation !== isIsolationContribution(params.contribution.id)) return fail('Use a dedicated transfer isolation review for these runtime grants.');
     if (isolation) {
-      if (params.transferSlotReview || params.allowDestroyAddresses?.length || params.allowImportAddresses?.length ||
+      if (params.transferSlotReview || params.allowDestroyAddresses?.length || params.allowReplaceAddresses?.length || params.allowImportAddresses?.length ||
           params.existingResourceAddresses?.length || recoveryRequested || params.observedUnlinkedProject || params.observedLinkedProject) {
         return fail('Review the two application permission changes separately from other project setup.');
       }
@@ -332,9 +341,11 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
     }
     const intent = digest({ gcpProjectId: params.gcpProjectId, contribution: params.contribution,
       ...(review ? { transferSlotReview: review } : {}),
+      ...(bucketReview ? { transferBucketJobReview: bucketReview } : {}),
       ...(isolation ? { transferIsolationReview: isolation } : {}),
       authenticationScope: params.authenticationScope ?? 'google-project-admin',
-      destroy: params.allowDestroyAddresses ?? [], imports: params.allowImportAddresses ?? [], existing: params.existingResourceAddresses ?? [] });
+      destroy: params.allowDestroyAddresses ?? [], imports: params.allowImportAddresses ?? [], existing: params.existingResourceAddresses ?? [],
+      ...(params.allowReplaceAddresses?.length ? { replace: params.allowReplaceAddresses } : {}) });
     const previewFile = path.join(paths.plans, `setup-${intent}.json`);
     const bootstrap = params.contribution.id === 'bootstrap';
     const observed = bootstrap ? params.observedUnlinkedProject : undefined;
@@ -353,7 +364,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       const preview = readJson<SetupPreview | undefined>(previewFile, undefined);
       if (!preview) return fail('Preview this exact Google Cloud setup before confirming it. No infrastructure was changed.');
       originalReviewDigest = reviewDigest('setup', params.projectId, params.gcpProjectId, preview.planId, preview);
-      if (params.requireBrowserApproval) {
+      if (params.requireBrowserApproval || bucketReview) {
         if (params.contribution.id === 'ci-release' && (!params.ciReleaseAccess?.length || !preview.ciReleaseAccess?.length
           || digest(params.ciReleaseAccess) !== digest(preview.ciReleaseAccess))) {
           return fail('Preview GitHub release access again to review the workflows, branches, environments and triggers before approving.');
@@ -393,6 +404,11 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
     }
     if (isolation) saved.setupPurpose = 'railway-transfer-isolation';
     if (slot) saved.setupPurpose = 'railway-transfer';
+    if (bucketJob && bucketReview) {
+      saved.setupPurpose = 'railway-bucket-copy';
+      const { storageName, sourceBucketName, targetBucket } = bucketReview.scope;
+      saved.bucketCopy = { storageName, sourceBucket: sourceBucketName, targetBucket, copyAccount: bucketJob.accountEmail };
+    }
     let engine = overrides?.engine;
     if (!engine) {
       const binary = await ensureEngineBinary();
@@ -406,6 +422,15 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       if (observed?.ok && observed.present && observed.value === 'deposed') throw new Error(interruptedGrant);
       return observed?.ok && observed.present && observed.value === true;
     };
+    const inspectBucketJob = async (evidence: TransferBucketJobEvidence) => {
+      if (!bucketJob) return false;
+      const observed = await engine.inspectState?.({ backend, configuration, auth: params.auth, state,
+        project: raw => matchesTransferBucketJobState(raw, bucketJob, evidence) });
+      return observed?.ok && observed.present && observed.value === true;
+    };
+    if (bucketReview && !await inspectBucketJob(bucketReview.evidence)) {
+      return fail('The observed copy job and bucket permissions do not match the original private project state.');
+    }
     if (isolation && !await inspectIsolation(isolation)) {
       return fail('The existing transfer slot, build bucket, runtime account or app grants could not be matched to their original private engine state.');
     }
@@ -419,6 +444,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
     }
     if (!params.confirm) {
       let verifiedTransfer = false;
+      let verifiedBucketJob = false;
       let verifiedIsolation = false;
       let interruptedIsolation = false;
       let verifiedBilling = false;
@@ -428,6 +454,11 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
           if (interruptedIsolation) return false;
           verifiedIsolation = verifyIsolationPlan(document, isolation);
           return verifiedIsolation;
+        } } : {}),
+        ...(bucketJob && bucketReview ? { verifyPlannedChanges: (document: unknown) => {
+          const owned = new Set(Object.values(existing.contributions).flatMap(contribution => Object.keys(contribution.resources)));
+          verifiedBucketJob = verifyTransferBucketJobPlan(document, bucketJob, bucketReview.evidence, owned);
+          return verifiedBucketJob;
         } } : {}),
         ...(slot && review ? { verifyPlannedChanges: (document: unknown) => {
           verifiedTransfer = verifyTransferSlotPlan(document, slot, review.evidence);
@@ -466,8 +497,13 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       }
       if (slot && (!verifiedTransfer || planned.unmanagedDeletes.length)) return fail('The native plan did not match the empty transfer resources reviewed.');
       if (isolation && (!verifiedIsolation || planned.unmanagedDeletes.length)) return fail('The native plan must contain only the two reviewed application grant conditions or their verified no-ops.');
+      if (bucketJob && bucketReview && (!verifiedBucketJob || planned.unmanagedDeletes.length ||
+          !matchesBucketCopyActions(planned.actions, bucketJob, bucketReview.evidence))) {
+        return fail('The plan must contain only the reviewed copy job and its two bucket permissions, or their verified no-ops.');
+      }
       const allowed = new Set([...Object.keys(params.contribution.configuration.resources), ...Object.keys(previous?.resources ?? {})]);
       const destroy = new Set(params.allowDestroyAddresses ?? []);
+      const replace = new Set(params.allowReplaceAddresses ?? []);
       const imports = new Set(params.allowImportAddresses ?? []);
       const observedPresent = new Set(params.existingResourceAddresses ?? []);
       const unexpected = planned.actions.filter((action) => action.type !== 'noop').find((action) => {
@@ -477,7 +513,8 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
               !isolationGrants(isolation.scope).some(grant => grant.address === addresses[0] && isolation.grants[grant.role] === 'broad')) return true;
           return false;
         }
-        return !!isolation || addresses.some((address) => !allowed.has(address)) || action.type === 'replace'
+        return !!isolation || addresses.some((address) => !allowed.has(address))
+          || (action.type === 'replace' && addresses.some((address) => !replace.has(address)))
           || (action.type === 'create' && addresses.some((address) => observedPresent.has(address)))
           || (action.type === 'destroy' && addresses.some((address) => !destroy.has(address)))
           || (action.metadata?.engineAdopt === true && addresses.some((address) => !imports.has(address)));
@@ -545,6 +582,15 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
           project: raw => matchesTransferState(raw, slot, after) });
         if (!observed.ok || !observed.present || observed.value !== true) return fail(unverified);
       } catch { return fail(unverified); }
+    }
+    if (bucketJob && bucketReview) {
+      const before = bucketReview.evidence;
+      const after = await params.observeBucketJobAfterApply!();
+      if (!after.jobUid || !after.creator || !after.viewer || (before.jobUid && before.jobUid !== after.jobUid) ||
+          before.projectNumber !== after.projectNumber || before.copyUniqueId !== after.copyUniqueId ||
+          before.bucketTimeCreated !== after.bucketTimeCreated || !await inspectBucketJob(after)) {
+        return fail('Google could not verify the reviewed job, its bucket permissions and their original identities. Preview the setup again.');
+      }
     }
     const finishReview = (outcome: 'applied' | 'failed') => {
       try { recordSetupReviewExecution(dataDir, params.projectId, params.gcpProjectId, saved.planId, executionDigest, outcome); return true; }

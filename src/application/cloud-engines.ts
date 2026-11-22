@@ -15,7 +15,7 @@ export interface EngineReleaseParams {
   services?: string[]; revision?: string; sourceDirectory?: string;
 }
 export type EnginePlanOutcome = InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] };
-export type EngineApplyOutcome = { kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string };
+export type EngineApplyOutcome = { kind: 'executed'; envName: string; result: ConvergeResult; warnings?: string[] } | { kind: 'blocked'; reason: string };
 export type EngineReleaseOutcome =
   | { results: EngineReleaseResult[]; applyRunId: string; source?: { kind: string; revision: string; commitSha?: string; uncommittedChangesExcluded?: boolean } }
   | { blocked: string };

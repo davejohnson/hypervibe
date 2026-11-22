@@ -14,6 +14,7 @@ import { projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-
 import { addAwsCiConfiguration } from '../adapters/providers/aws/tofu/aws-engine-ci.config.js';
 import type { EngineConfiguration } from '../domain/ports/infrastructure-engine.port.js';
 import { awsKey } from '../adapters/providers/aws/tofu/aws-engine.config.js';
+import { awsSecretScopes } from '../adapters/providers/aws/aws-secret-scope.js';
 import { azureKey, azureVaultSecretName } from '../adapters/providers/azure/tofu/azure-engine.config.js';
 import { engineCiIntent, type EngineCiIntent } from '../domain/spec/engine-ci.js';
 import { parseEngineCiBinding, type EngineCiBinding } from '../domain/spec/engine-ci-binding.js';
@@ -92,6 +93,7 @@ function awsEnvironment(state: unknown, params: Extract<Params, { provider: 'aws
     resourceName: service.resourceType === 'ecs-express' ? service.serviceId.split('/').at(-1)! : text(service.taskDefinitionArn).split('/').at(-1)!.split(':')[0]!, initialImageUri: '', public: service.resourceType === 'ecs-express', workloadKind: service.workloadKind }));
   addAwsCiConfiguration({ ci: intent, accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
     environmentId: context.environment.id, parameterPath: context.parameterPath,
+    ...(awsSecretScopes(spec, environmentName) ? { secretScopes: awsSecretScopes(spec, environmentName) } : {}),
     services: workloads.filter(service => service.workloadKind === 'web'), workers: workloads.filter(service => service.workloadKind === 'worker'),
     jobs: workloads.filter(service => service.workloadKind === 'cron').map(service => ({ ...service, schedule: '' })) }, files, {});
   const expected = record(record(record(record(files['ci.tf.json']).resource).aws_iam_role_policy).ci).policy;

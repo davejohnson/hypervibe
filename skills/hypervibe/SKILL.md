@@ -159,6 +159,12 @@ Google may charge for the job, requests and storage. Report whether the app
 read the file, Google denied access, or the read remains unverified. Include
 cleanup and any soft-delete period. This result covers only direct file access.
 
+For a prepared Railway-to-GCP file move, select one declared data bucket via
+`migrationAccess="prepare-bucket-copy"` and `migrationStorage` on the same
+`hv_connections` prepare workflow. Share its browser review. This approval
+prepares the unscheduled job and its bucket permissions. Passing source
+credentials and running a copy require their own reviewed workflow.
+
 `hv_migrate` prepares a separate OpenTofu-managed GCP target. Railway database
 and bucket transfers require a planned private credential handoff that is still
 unavailable. A fresh comparison of private Railway and Cloud SQL databases also

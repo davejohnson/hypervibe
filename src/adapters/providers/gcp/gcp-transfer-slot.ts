@@ -55,6 +55,10 @@ async function prepareMigrationAccess(input: Parameters<MigrationAccessCapabilit
   const slot = transferSlot(scope);
   if ([input.runtimeEmail, input.deployEmail].includes(slot.accountEmail))
     return { success: false, error: 'The copy job must use a separate service account.' };
+  if (input.mode === 'prepare-bucket-copy') {
+    const { prepareTransferBucketJob } = await import('./gcp-transfer-bucket-setup.js');
+    return prepareTransferBucketJob(input, scope);
+  }
   if (isMigrationAccessCheck(input.mode)) {
     const { runGcpTransferAccessProbe } = await import('../../../application/gcp-transfer-access-probe.js');
     return runGcpTransferAccessProbe({

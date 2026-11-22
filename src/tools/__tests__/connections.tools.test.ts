@@ -696,16 +696,16 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it.each(['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access'])('previews %s through MCP and confirms only its reviewed plan through the CLI', async migrationAccess => {
+  it.each(['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access', 'prepare-bucket-copy'])('previews %s through MCP and confirms only its reviewed plan through the CLI', async migrationAccess => {
     const project = new ProjectRepository().create({ name: 'transfer-app', defaultPlatform: 'cloudrun' });
     new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
       destination: { hosting: { provider: 'cloudrun', gcpProjectId: 'transfer-project', region: 'us-central1' }, services: {} },
       source: { hosting: { provider: 'railway' }, services: {} },
     } });
     const input = { provider: 'cloudrun', action: 'prepare', project: project.name, environment: 'destination',
-      migrationAccess, migrationSourceEnvironment: 'source' };
+      migrationAccess, migrationSourceEnvironment: 'source', ...(migrationAccess === 'prepare-bucket-copy' && { migrationStorage: 'documents' }) };
     const isProbe = migrationAccess === 'verify-copy-access' || migrationAccess === 'verify-export-file-access';
-    const planId = isProbe ? 'probe-16a21ebf-67bb-4363-9774-d625a84c5b13' : 'setup-reviewed-slot';
+    const planId = isProbe ? 'probe-16a21ebf-67bb-4363-9774-d625a84c5b13' : 'setup-16a21ebf-67bb-4363-9774-d625a84c5b13';
     const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview', planId, softDeleteSeconds: 604800, htmlPath: '/reports/' + planId + '.html' });
     const client = await makeClient();
     try {
@@ -715,11 +715,16 @@ describe('hv_connections', () => {
         environmentName: input.environment, migrationAccess: input.migrationAccess,
         migrationSourceEnvironment: input.migrationSourceEnvironment, confirm: undefined }));
       expect(preview.confirmation.completeInput).toBe(true);
-      expect(preview.confirmation.retryInput).toEqual({ ...input, confirm: true, gcpSetupPlanId: planId });
+      expect(preview.confirmation.retryInput).toEqual({ ...input, ...(migrationAccess !== 'prepare-bucket-copy' && { confirm: true }), gcpSetupPlanId: planId });
       if (isProbe) {
         expect(preview.confirmation.message).toMatch(/charges/i);
         expect(preview.confirmation.message).toContain('7 days');
         expect(preview.data.htmlPath).toBe('/reports/' + planId + '.html');
+      }
+      if (migrationAccess === 'prepare-bucket-copy') {
+        expect(preview.confirmation.message).toContain('documents');
+        expect(preview.hint).toMatch(/separate approval/i);
+        expect(prepare).toHaveBeenCalledWith(expect.objectContaining({ migrationStorage: 'documents' }));
       }
       if (migrationAccess === 'verify-export-file-access') {
         expect(preview.confirmation.message).toMatch(/one temporary Cloud Run job/i);
@@ -734,7 +739,7 @@ describe('hv_connections', () => {
       } else if (migrationAccess === 'restrict-app-access') {
         expect(preview.confirmation.message).toMatch(/app.*secret.*dump/i);
         expect(preview.hint).toContain('two project');
-      } else {
+      } else if (migrationAccess === 'empty-transfer-slot') {
         expect(preview.confirmation.message).toContain('future data copy from source to destination in transfer-app');
         expect(preview.hint).toContain('the copy job');
       }
@@ -743,7 +748,8 @@ describe('hv_connections', () => {
       const output: string[] = [];
       const cli = await runCli(['connections', '--provider', 'cloudrun', '--action', 'prepare', '--project', project.name,
         '--environment', input.environment, '--migration-access', input.migrationAccess, '--migration-source-environment', input.migrationSourceEnvironment,
-        '--confirm', '--gcp-setup-plan-id', planId, '--json'], {
+        ...(input.migrationStorage ? ['--migration-storage', input.migrationStorage] : []),
+        ...(migrationAccess === 'prepare-bucket-copy' ? [] : ['--confirm']), '--gcp-setup-plan-id', planId, '--json'], {
         initialize: false, io: { stdinIsTTY: false, confirm: async () => false, readStdin: async () => '',
           writeErr: line => output.push(line), writeOut: line => output.push(line) },
       });
@@ -763,7 +769,7 @@ describe('hv_connections', () => {
     } finally { await client.close(); }
   });
 
-  it.each(['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access'])('rejects ambiguous targets, other actions, credentials and extra grants for %s', async migrationAccess => {
+  it.each(['empty-transfer-slot', 'restrict-app-access', 'verify-copy-access', 'verify-export-file-access', 'prepare-bucket-copy'])('rejects ambiguous targets, other actions, credentials and extra grants for %s', async migrationAccess => {
     const project = new ProjectRepository().create({ name: 'transfer-app', defaultPlatform: 'cloudrun' });
     new ProjectSpecRepository().insert(project.id, 1, { version: 1, project: project.name, environments: {
       destination: { hosting: { provider: 'cloudrun', gcpProjectId: 'transfer-project' }, services: {} },
@@ -773,13 +779,14 @@ describe('hv_connections', () => {
     const prepare = vi.spyOn(cloudPrepare, 'runCloudPrepare').mockResolvedValue({ success: true, mode: 'preview', planId: 'some-plan' });
     const client = await makeClient();
     const input = { provider: 'cloudrun', action: 'prepare', project: project.name, environment: 'destination',
-      migrationAccess, migrationSourceEnvironment: 'source' };
+      migrationAccess, migrationSourceEnvironment: 'source', ...(migrationAccess === 'prepare-bucket-copy' && { migrationStorage: 'documents' }) };
     const confirmed = { confirm: true, gcpSetupPlanId: 'some-plan' };
     try {
       for (const override of [
         { action: 'bootstrap' }, { action: 'describe' }, { action: 'add' }, { action: 'connect' }, { provider: 'railway' },
         { provider: 'aws' }, { provider: 'azure' },
         { project: undefined }, { environment: undefined }, { environment: 'source' }, { environment: 'other' },
+        ...(migrationAccess === 'prepare-bucket-copy' ? [{ migrationStorage: undefined }, { migrationStorage: '../documents' }] : [{ migrationStorage: 'documents' }]),
         { migrationSourceEnvironment: undefined }, { migrationSourceEnvironment: 'missing' }, { migrationSourceEnvironment: 'unrelated' },
         { migrationSourceEnvironment: 'destination' }, { migrationAccess: undefined },
         { gcpProjectId: 'wrong-project' }, { gcpSetupPlanId: 'some-plan' }, { confirm: true }, { ...confirmed, gcpSetupPlanId: '   ' },

@@ -1,4 +1,5 @@
 import type { EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
+import type { AwsRuntimeIdentity } from './aws-engine.identity.js';
 import { AWS_WEB_PORT, awsKey, awsWebInfrastructureRoleArn, schedulerCron, type AwsEngineInput, type AwsTaskInput, type AwsWebServiceInput } from './aws-engine.config.js';
 
 /** Escapes `${` so OpenTofu leaves Step Functions/JSONPath text alone, keeping `${aws_...}` references. */
@@ -23,7 +24,7 @@ export function webPort(service: Pick<AwsWebServiceInput, 'env'>): number {
  * containers gradually on release and rolls back a release that fails. A web
  * service that is not public is an ordinary service with no route to it.
  */
-export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, resources: Record<string, EngineResourceMapping>): void {
+export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, resources: Record<string, EngineResourceMapping>, identity: AwsRuntimeIdentity): void {
   const workers = input.workers ?? [];
   const jobs = input.jobs ?? [];
   const web = input.services ?? [];
@@ -33,17 +34,21 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
   const parameterArn = (key: string) => `arn:aws:ssm:${input.region}:${input.accountId}:parameter${input.parameterPath}${key}`;
   const environment = (env: Record<string, string> | undefined) => Object.entries({ ...env, HYPERVIBE_PARAMETER_PATH: input.parameterPath })
     .filter(([key]) => !['NODE_AUTH_TOKEN', 'NPM_TOKEN'].includes(key)).map(([name, value]) => ({ name, value }));
+  // A workload's own role when a limited secret names it, otherwise the shared runtime role.
+  const roleArn = (task: AwsTaskInput) => `\${aws_iam_role.${identity.roleKey(task)}.arn}`;
+  // Schedules, wakers and their events: the shared runtime role, or the control role once a secret names services.
+  const controlRoleArn = `\${aws_iam_role.${identity.controlKey}.arn}`;
   const taskDefinition = (task: AwsTaskInput) => ({
     // Releases register new revisions; tracking the latest keeps them from reading as drift.
     family: task.resourceName, track_latest: true, requires_compatibilities: ['FARGATE'], network_mode: 'awsvpc',
     cpu: String(task.cpu ?? 256), memory: String(task.memory ?? 512),
-    execution_role_arn: '${aws_iam_role.runtime.arn}', task_role_arn: '${aws_iam_role.runtime.arn}',
+    execution_role_arn: roleArn(task), task_role_arn: roleArn(task),
     runtime_platform: [{ operating_system_family: 'LINUX', cpu_architecture: 'X86_64' }],
     container_definitions: JSON.stringify([{
       name: 'app', image: task.initialImageUri, essential: true, ...(task.command ? { command: task.command } : {}),
       environment: environment(task.env),
       // Fargate reads each secret from Parameter Store at start; values never enter engine state.
-      secrets: (input.secretKeys ?? []).map((key) => ({ name: key, valueFrom: parameterArn(key) })),
+      secrets: identity.secretKeys(task).map((key) => ({ name: key, valueFrom: parameterArn(key) })),
       logConfiguration: { logDriver: 'awslogs', options: { 'awslogs-group': `/hypervibe/${input.prefix}/tasks`, 'awslogs-region': input.region, 'awslogs-stream-prefix': task.resourceName } },
     }]),
   });
@@ -74,7 +79,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
     }
     express[key] = {
       service_name: service.resourceName, cluster: '${aws_ecs_cluster.main.name}',
-      execution_role_arn: '${aws_iam_role.runtime.arn}', task_role_arn: '${aws_iam_role.runtime.arn}',
+      execution_role_arn: roleArn(service), task_role_arn: roleArn(service),
       infrastructure_role_arn: awsWebInfrastructureRoleArn(input.accountId),
       cpu: String(service.cpu ?? 256), memory: String(service.memory ?? 1024), health_check_path: service.healthCheckPath ?? '/',
       primary_container: [{
@@ -82,7 +87,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
         aws_logs_configuration: [{ log_group: '${aws_cloudwatch_log_group.tasks.name}', log_stream_prefix: service.resourceName }],
         environment: environment(env),
         // Fargate reads each secret from Parameter Store at start; values never enter engine state.
-        secret: (input.secretKeys ?? []).map((name) => ({ name, value_from: parameterArn(name) })),
+        secret: identity.secretKeys(service).map((name) => ({ name, value_from: parameterArn(name) })),
       }],
       // Two public subnets: the containers get a public address for outbound calls, and the load balancer pays for two
       // public addresses instead of one per zone. The security group admits the web port only from inside the network,
@@ -90,7 +95,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
       network_configuration: [{ subnets: '${slice(sort(data.aws_subnets.default.ids), 0, 2)}', security_groups: ['${aws_security_group.tasks.id}'] }],
       scaling_target: [{ min_task_count: 1, max_task_count: service.maxInstances ?? 3, auto_scaling_metric: 'AVERAGE_CPU', auto_scaling_target_value: 60 }],
       wait_for_steady_state: true,
-      depends_on: ['aws_ecs_cluster_capacity_providers.main', 'aws_iam_role_policy.runtime'],
+      depends_on: ['aws_ecs_cluster_capacity_providers.main', `aws_iam_role_policy.${identity.roleKey(service)}`],
       // The release path (CI or hv_deploy) owns the image after creation.
       lifecycle: [{ ignore_changes: ['primary_container[0].image', 'primary_container[0].command'] }],
     };
@@ -115,25 +120,25 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
     if (!input.database) throw new Error(`Worker ${worker.logicalName} counts pending work in the database, so it needs one.`);
     const wakerName = `${worker.resourceName}-waker`;
     machines[`${key}_waker`] = {
-      name: wakerName, type: 'EXPRESS', role_arn: '${aws_iam_role.runtime.arn}',
+      name: wakerName, type: 'EXPRESS', role_arn: controlRoleArn,
       definition: literal(JSON.stringify(wakerDefinition({
         cluster: '${aws_ecs_cluster.main.arn}', service: worker.resourceName,
         databaseArn: input.database.clusterArn, databaseName: input.database.name, webServices: web.filter((service) => service.public).map((service) => service.resourceName),
         secretArn: `\${aws_secretsmanager_secret.${key}_waker.arn}`, pendingWorkQuery: worker.pendingWorkQuery,
         ...(worker.nextWorkAtQuery ? { nextWorkAtQuery: worker.nextWorkAtQuery,
-          timer: { name: `${wakerName}-next`, roleArn: '${aws_iam_role.runtime.arn}', machineArn: `arn:aws:states:${input.region}:${input.accountId}:stateMachine:${wakerName}` } } : {}),
+          timer: { name: `${wakerName}-next`, roleArn: controlRoleArn, machineArn: `arn:aws:states:${input.region}:${input.accountId}:stateMachine:${wakerName}` } } : {}),
       }))),
     };
     schedules[`${key}_waker`] = {
       name: wakerName, schedule_expression: 'rate(1 minute)', flexible_time_window: [{ mode: 'OFF' }],
-      target: [{ arn: `\${aws_sfn_state_machine.${key}_waker.arn}`, role_arn: '${aws_iam_role.runtime.arn}', input: '{}' }],
+      target: [{ arn: `\${aws_sfn_state_machine.${key}_waker.arn}`, role_arn: controlRoleArn, input: '{}' }],
     };
     if (worker.nextWorkAtQuery) {
       // The waker moves this one-time wake to the next due time; the engine only creates it.
       schedules[`${key}_waker_next`] = {
         name: `${wakerName}-next`, schedule_expression: 'at(2099-01-01T00:00:00)', state: 'DISABLED', flexible_time_window: [{ mode: 'OFF' }],
         action_after_completion: 'NONE',
-        target: [{ arn: `\${aws_sfn_state_machine.${key}_waker.arn}`, role_arn: '${aws_iam_role.runtime.arn}', input: JSON.stringify({ force: true }) }],
+        target: [{ arn: `\${aws_sfn_state_machine.${key}_waker.arn}`, role_arn: controlRoleArn, input: JSON.stringify({ force: true }) }],
         lifecycle: [{ ignore_changes: ['schedule_expression', 'state'] }],
       };
       resources[`aws_scheduler_schedule.${key}_waker_next`] = mapping;
@@ -150,7 +155,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
     definitions[key] = taskDefinition(job);
     schedules[key] = {
       name: job.resourceName, schedule_expression: schedulerCron(job.schedule), schedule_expression_timezone: job.timeZone ?? 'UTC', flexible_time_window: [{ mode: 'OFF' }],
-      target: [{ arn: '${aws_ecs_cluster.main.arn}', role_arn: '${aws_iam_role.runtime.arn}',
+      target: [{ arn: '${aws_ecs_cluster.main.arn}', role_arn: controlRoleArn,
         ecs_parameters: [{ task_definition_arn: `\${aws_ecs_task_definition.${key}.arn_without_revision}`, launch_type: 'FARGATE', network_configuration: network }] }],
     };
     resources[`aws_ecs_task_definition.${key}`] = mapping;
@@ -169,7 +174,7 @@ export function addTasks(input: AwsEngineInput, files: Record<string, unknown>, 
     for (const worker of wakers) {
       const key = awsKey(worker.logicalName);
       targets[`${key}_waker`] = { rule: '${aws_cloudwatch_event_rule.jobs_finished.name}', target_id: `${key}-waker`.slice(0, 64),
-        arn: `\${aws_sfn_state_machine.${key}_waker.arn}`, role_arn: '${aws_iam_role.runtime.arn}', input: JSON.stringify({ force: true }) };
+        arn: `\${aws_sfn_state_machine.${key}_waker.arn}`, role_arn: controlRoleArn, input: JSON.stringify({ force: true }) };
       resources[`aws_cloudwatch_event_target.${key}_waker`] = { actionId: `service:${worker.logicalName}`, kind: 'service', name: worker.logicalName, billable: true };
     }
   }

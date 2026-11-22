@@ -12,6 +12,7 @@ export {
 } from './project-setup-executor.js';
 
 export { isolationGrants, type TransferIsolationScope } from './transfer-isolation.js';
+export { readSecretScopeInput, secretScopePolicyProblems, SECRET_ACCESSOR_ROLE } from './secret-scope-setup.js';
 
 /** Pinned archive and extracted-package hashes from the signed OpenTofu registry release.
  * Provenance: test/provider-contracts/gcp/project-setup/google-beta.lock.hcl. */
