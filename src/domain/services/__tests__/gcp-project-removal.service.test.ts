@@ -37,6 +37,7 @@ beforeEach(() => {
   environments.length = 0; connections.length = 0; audits.length = 0;
   connections.push({ id: 'c1', provider: 'cloudrun', scope: 'o/r', credentialsEncrypted: JSON.stringify({ projectId: GCP }) },
     { id: 'c2', provider: 'cloudsql', scope: 'o/r', credentialsEncrypted: JSON.stringify({ projectId: GCP }) },
+    { id: 'c4', provider: 'cloudrun', scope: 'o/second-app', credentialsEncrypted: JSON.stringify({ projectId: GCP }) },
     { id: 'c3', provider: 'cloudrun', scope: 'o/other', credentialsEncrypted: JSON.stringify({ projectId: 'someone-elses' }) });
   policies.value = { cloudPreparation: { cloudrun: { gcpProjectId: GCP } }, gcpProjectPreparations: { [GCP]: { gcpProjectId: GCP }, 'another-project': { gcpProjectId: 'another-project' } } };
   const root = engineStatePaths({ provider: 'gcp', projectId: 'p1', environmentId: GCP, partition: 'project-shared' }, dataDir).root;
@@ -63,17 +64,18 @@ function run(cloud: Cloud, input: { previewId?: string; confirm?: boolean } = {}
   return runGcpProjectRemoval({ project, gcpProjectId: GCP, ...input }, {
     getDefaultAdminAccessToken: async () => 'token', fetch: fetchImpl as never, readCreatedProject: (async () => created) as never, now: () => now, sleep: async () => { cloud.waits = (cloud.waits ?? 0) + 1; cloud.onWait?.(); }, dataDir });
 }
-const untouched = (cloud: Cloud) => { expect(cloud.calls.filter((call) => call.startsWith('DELETE'))).toEqual([]); expect(connections).toHaveLength(3); };
+const untouched = (cloud: Cloud) => { expect(cloud.calls.filter((call) => call.startsWith('DELETE'))).toEqual([]); expect(connections).toHaveLength(4); };
 
 describe('removing a Google project Hypervibe created', () => {
   it('previews an empty project without changing anything, then deletes it and forgets its access on confirm', async () => {
     const cloud = google({ lists: { 'storage.googleapis.com': json(200, { items: [{ name: `${GCP}-hv-build-source` }] }) } });
     const preview = await run(cloud);
-    expect(preview).toMatchObject({ success: true, mode: 'preview', projectNumber: '4242', previewId: expect.any(String) });
+    expect(preview).toMatchObject({ success: true, mode: 'preview', projectNumber: '4242', previewId: expect.any(String),
+      notChecked: ['Redis caches', 'reCAPTCHA keys', 'API keys'], warnings: expect.arrayContaining([expect.stringContaining('Not checked')]) });
     untouched(cloud);
 
     const done = await run(cloud, { previewId: preview.previewId, confirm: true });
-    expect(done).toMatchObject({ success: true, mode: 'confirm', removedConnections: ['cloudrun (o/r)', 'cloudsql (o/r)'] });
+    expect(done).toMatchObject({ success: true, mode: 'confirm', removedConnections: ['cloudrun (o/r)', 'cloudrun (o/second-app)', 'cloudsql (o/r)'] });
     expect(cloud.calls.filter((call) => call.startsWith('DELETE'))).toEqual(['DELETE cloudresourcemanager.googleapis.com']);
     expect(connections.map((entry) => entry.id)).toEqual(['c3']);
     expect(policies.value).toEqual({ cloudPreparation: {}, gcpProjectPreparations: { 'another-project': { gcpProjectId: 'another-project' } } });
@@ -120,10 +122,42 @@ describe('removing a Google project Hypervibe created', () => {
     ['a server error', json(500)],
     ['regions Google could not reach', json(200, { items: [], unreachable: ['us-east7'] })],
     ['an empty first page with more to come', json(200, { items: [], nextPageToken: 'x' })],
+    ['a list Google marks as partial', json(200, { items: [], warnings: [{ code: 'REGION_UNREACHABLE' }] })],
   ])('treats %s as unknown, never as empty', async (_what, answer) => {
     const cloud = google({ lists: { sqladmin: answer } });
     expect(await run(cloud)).toMatchObject({ success: false, status: 'blocked', error: expect.stringContaining('unknown') });
     untouched(cloud);
+  });
+
+  it.each(['serving.knative.dev', '/jobs', '/workerpools', 'sqladmin', 'storage.googleapis.com', 'secretmanager', 'redis', '/topics', '/subscriptions', 'recaptcha', 'apikeys'])(
+    'blocks when the list from %s fails', async (part) => {
+      const cloud = google({ lists: { [part]: json(500) } });
+      expect(await run(cloud)).toMatchObject({ success: false, status: 'blocked', error: expect.stringContaining('unknown') });
+      untouched(cloud);
+    });
+
+  it('does not take a first page holding only its own build bucket as the whole list', async () => {
+    const cloud = google({ lists: { 'storage.googleapis.com': json(200, { items: [{ name: `${GCP}-hv-build-source` }], nextPageToken: 'more' }) } });
+    expect(await run(cloud)).toMatchObject({ success: false, status: 'blocked', error: expect.stringContaining('incomplete') });
+    untouched(cloud);
+  });
+
+  it('keeps the administrator token out of what it returns', async () => {
+    const cloud = google();
+    const result = await run(cloud, {}, { ok: false, error: 'tofu failed with Bearer token in its output' });
+    expect(JSON.stringify(result)).not.toContain('token in');
+    expect(result).toMatchObject({ success: false, status: 'blocked' });
+  });
+
+  it('needs the reviewed preview even when the project is already being deleted', async () => {
+    const cloud = google({ state: 'DELETE_REQUESTED' });
+    const preview = await run(cloud);
+    expect(preview).toMatchObject({ success: true, warnings: [expect.stringContaining('connections')] });
+    expect(await run(cloud, { previewId: '00000000-0000-4000-8000-000000000000', confirm: true })).toMatchObject({ success: false, status: 'blocked' });
+    expect(connections).toHaveLength(4);
+    const again = await run(cloud);
+    expect(await run(cloud, { previewId: again.previewId, confirm: true })).toMatchObject({ success: true });
+    expect(connections.map((entry) => entry.id)).toEqual(['c3']);
   });
 
   it('checks everything again on confirm and refuses a project that gained a database after the preview', async () => {
@@ -157,14 +191,18 @@ describe('removing a Google project Hypervibe created', () => {
     const cloud = google({ deleteAnswer: () => json(200, {}) });
     const preview = await run(cloud);
     expect(await run(cloud, { previewId: preview.previewId, confirm: true })).toMatchObject({ success: false, status: 'pending' });
-    expect(connections).toHaveLength(3);
+    expect(connections).toHaveLength(4);
   });
 
   it('reports a refused deletion as unchanged and keeps its access', async () => {
     const cloud = google({ deleteAnswer: () => json(403) });
     const preview = await run(cloud);
     expect(await run(cloud, { previewId: preview.previewId, confirm: true })).toMatchObject({ success: false, error: expect.stringContaining('unchanged') });
-    expect(connections).toHaveLength(3);
+    expect(connections).toHaveLength(4);
+    // A preview is used once.
+    cloud.deleteAnswer = undefined;
+    expect(await run(cloud, { previewId: preview.previewId, confirm: true })).toMatchObject({ success: false, status: 'blocked' });
+    untouched({ ...cloud, calls: cloud.calls.slice(cloud.calls.lastIndexOf('DELETE cloudresourcemanager.googleapis.com') + 1) });
   });
 
   it('says the outcome is unknown, and keeps its access, when neither the delete nor the read after it answers', async () => {
@@ -172,7 +210,7 @@ describe('removing a Google project Hypervibe created', () => {
     const preview = await run(cloud);
     cloud.deleteAnswer = () => { cloud.state = 'GONE'; throw new Error('socket hang up'); };
     expect(await run(cloud, { previewId: preview.previewId, confirm: true })).toMatchObject({ success: false, status: 'pending' });
-    expect(connections).toHaveLength(3);
+    expect(connections).toHaveLength(4);
   });
 
   it('after a lost answer, finds the project already deleting and finishes without a second delete', async () => {

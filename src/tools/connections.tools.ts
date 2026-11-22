@@ -255,8 +255,11 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         if (!removal.success) {
           return commandError(removal.status === 'blocked' ? 'VALIDATION' : 'PROVIDER_ERROR', error ?? 'The Google project was not removed.', { details: data, next: ['hv_connections'] });
         }
-        return commandSuccess({ project: { id: owner.id, name: owner.name }, ...data,
-          ...(removal.mode === 'preview' ? { confirmCall: { tool: 'hv_connections', arguments: { provider: 'cloudrun', action: 'remove-project', project: owner.name, gcpProjectId, adminAuth: 'default', previewId: removal.previewId, confirm: true } } } : {}) });
+        // Deleting a Google project is the user's decision: the preview goes to them, and no ready-made confirm call is handed back.
+        return commandSuccess({ project: { id: owner.id, name: owner.name }, ...data }, removal.mode === 'preview' ? {
+          hint: 'To confirm, call this again with the same fields plus previewId and confirm=true. The preview lasts ten minutes.',
+          agentInstruction: { action: 'ask_user', message: `Show the user this preview for Google project ${gcpProjectId}: what was checked, what was not checked and every warning. Ask whether to delete the whole Google project. Confirm only after they say yes to deleting this exact project.` },
+        } : undefined);
       }
       const requireBrowserApproval = gcpSetupPlanId !== undefined && explicitConfirmation === undefined;
       const confirm = requireBrowserApproval || explicitConfirmation;

@@ -8,6 +8,7 @@ import { ProjectRepository } from '../../adapters/db/repositories/project.reposi
 import { engineStatePaths } from '../../adapters/engine/opentofu/workspace.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
 import { getDataDir } from '../../adapters/storage/paths.js';
+import { redactExactValues } from '../../utils/redact-exact-values.js';
 import type { Project } from '../entities/project.entity.js';
 import { buildSourceBucketName, getDefaultAdminAccessToken } from './cloud-prepare.execute.js';
 import { GCP_PROJECT_ID_PATTERN } from './gcp-environment-target.js';
@@ -34,27 +35,34 @@ export interface GcpProjectRemovalResult {
   previewId?: string;
   /** What the check looked for in the project. Anything else in the project is not checked. */
   checked?: string[];
+  /** Kinds that could not be listed because their Google API is switched off in the project. Something may still exist there. */
+  notChecked?: string[];
   /** What still exists in the project and stops the removal. */
   found?: string[];
   warnings?: string[];
   removedConnections?: string[];
 }
 
-type Read = { state: 'known'; names: string[] } | { state: 'unknown'; reason: string };
-interface Kind { label: string; url: (project: string) => string; key: string; name: (entry: Record<string, unknown>) => unknown }
+type Read = { state: 'known'; names: string[] } | { state: 'off' } | { state: 'unknown'; reason: string };
+interface Kind { label: string; url: (project: string) => string; key: string; name: (entry: Record<string, unknown>) => unknown; ignore?: (project: string) => string }
 
 const metadataName = (entry: Record<string, unknown>) => (entry.metadata as { name?: unknown } | undefined)?.name;
 const lastSegment = (entry: Record<string, unknown>) => typeof entry.name === 'string' ? entry.name.split('/').at(-1) : undefined;
-/** Everything an environment can hold, plus keys that websites outside Hypervibe may depend on. */
+/**
+ * What costs money or holds data in an environment, plus keys that websites outside
+ * Hypervibe may depend on. Not listed: schedules, workflows, container images,
+ * regional secrets, Google sign-in clients and anything else Google offers.
+ */
 const KINDS: Kind[] = [
   { label: 'Cloud Run services', url: (p) => `https://run.googleapis.com/apis/serving.knative.dev/v1/namespaces/${p}/services`, key: 'items', name: metadataName },
   { label: 'Cloud Run jobs', url: (p) => `https://run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${p}/jobs`, key: 'items', name: metadataName },
   { label: 'Cloud Run worker pools', url: (p) => `https://run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${p}/workerpools`, key: 'items', name: metadataName },
   { label: 'databases', url: (p) => `https://sqladmin.googleapis.com/v1/projects/${p}/instances`, key: 'items', name: (entry) => entry.name },
-  { label: 'storage buckets', url: (p) => `https://storage.googleapis.com/storage/v1/b?project=${p}`, key: 'items', name: (entry) => entry.name },
+  { label: 'storage buckets', url: (p) => `https://storage.googleapis.com/storage/v1/b?project=${p}`, key: 'items', name: (entry) => entry.name, ignore: buildSourceBucketName },
   { label: 'secrets', url: (p) => `https://secretmanager.googleapis.com/v1/projects/${p}/secrets`, key: 'secrets', name: lastSegment },
   { label: 'Redis caches', url: (p) => `https://redis.googleapis.com/v1/projects/${p}/locations/-/instances`, key: 'instances', name: lastSegment },
   { label: 'queues', url: (p) => `https://pubsub.googleapis.com/v1/projects/${p}/topics`, key: 'topics', name: lastSegment },
+  { label: 'queue subscriptions', url: (p) => `https://pubsub.googleapis.com/v1/projects/${p}/subscriptions`, key: 'subscriptions', name: lastSegment },
   { label: 'reCAPTCHA keys', url: (p) => `https://recaptchaenterprise.googleapis.com/v1/projects/${p}/keys`, key: 'keys', name: (entry) => entry.displayName ?? lastSegment(entry) },
   { label: 'API keys', url: (p) => `https://apikeys.googleapis.com/v2/projects/${p}/locations/global/keys`, key: 'keys', name: (entry) => entry.displayName ?? lastSegment(entry) },
 ];
@@ -62,8 +70,9 @@ export const GCP_PROJECT_REMOVAL_CHECKED = KINDS.map((kind) => kind.label);
 const PREVIEW_MINUTES = 10;
 
 /**
- * One kind of resource in the project. An API that was never switched on holds
- * nothing. Any other failed, partial or oddly shaped answer is unknown, never empty.
+ * One kind of resource in the project. A switched-off API cannot be listed, which
+ * is reported as `off`, not as empty: resources can outlive the API being turned
+ * off. Any other failed, partial or oddly shaped answer is unknown.
  */
 async function readKind(fetchImpl: typeof fetch, token: string, gcpProjectId: string, kind: Kind): Promise<Read> {
   let response: Response;
@@ -73,28 +82,31 @@ async function readKind(fetchImpl: typeof fetch, token: string, gcpProjectId: st
   const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
   if (response.status === 403) {
     const details = ((body?.error as { details?: Array<{ reason?: string }> } | undefined)?.details ?? []);
-    if (details.some((detail) => detail.reason === 'SERVICE_DISABLED')) return { state: 'known', names: [] };
+    if (details.some((detail) => detail.reason === 'SERVICE_DISABLED')) return { state: 'off' };
   }
   if (!response.ok || !body) return { state: 'unknown', reason: `Listing ${kind.label} returned HTTP ${response.status}.` };
   const entries = body[kind.key] ?? [];
-  const unreachable = body.unreachable ?? (body.metadata as { unreachable?: unknown } | undefined)?.unreachable;
-  if (!Array.isArray(entries) || (Array.isArray(unreachable) && unreachable.length)) return { state: 'unknown', reason: `Google's list of ${kind.label} was incomplete.` };
-  const names = entries.map((entry) => kind.name(entry as Record<string, unknown>));
-  if (names.some((name) => typeof name !== 'string' || !name)) return { state: 'unknown', reason: `Google listed ${kind.label} without a name.` };
-  if (!names.length && (body.nextPageToken || (body.metadata as { continue?: unknown } | undefined)?.continue)) return { state: 'unknown', reason: `Google's list of ${kind.label} was incomplete.` };
-  return { state: 'known', names: names as string[] };
+  if (!Array.isArray(entries)) return { state: 'unknown', reason: `Google's list of ${kind.label} was not readable.` };
+  const listed = entries.map((entry) => kind.name(entry as Record<string, unknown>));
+  if (listed.some((name) => typeof name !== 'string' || !name)) return { state: 'unknown', reason: `Google listed ${kind.label} without a name.` };
+  const names = (listed as string[]).filter((name) => name !== kind.ignore?.(gcpProjectId));
+  // One name is enough to refuse. Nothing found counts as empty only when Google says the list is whole.
+  const metadata = body.metadata as { unreachable?: unknown; continue?: unknown } | undefined;
+  const partial = [body.unreachable, metadata?.unreachable, body.warnings].some((value) => Array.isArray(value) && value.length) || body.nextPageToken || metadata?.continue;
+  if (!names.length && partial) return { state: 'unknown', reason: `Google's list of ${kind.label} was incomplete.` };
+  return { state: 'known', names };
 }
 
 /** What is still in the project, by kind. The build bucket Hypervibe's own setup created is not counted. */
-export async function readGcpProjectContents(fetchImpl: typeof fetch, token: string, gcpProjectId: string): Promise<{ state: 'known'; found: string[] } | { state: 'unknown'; reason: string }> {
-  const found: string[] = [];
+export async function readGcpProjectContents(fetchImpl: typeof fetch, token: string, gcpProjectId: string): Promise<{ state: 'known'; found: string[]; notChecked: string[] } | { state: 'unknown'; reason: string }> {
+  const found: string[] = []; const notChecked: string[] = [];
   for (const kind of KINDS) {
     const read = await readKind(fetchImpl, token, gcpProjectId, kind);
     if (read.state === 'unknown') return read;
-    const names = kind.label === 'storage buckets' ? read.names.filter((name) => name !== buildSourceBucketName(gcpProjectId)) : read.names;
-    if (names.length) found.push(`${kind.label}: ${names.slice(0, 10).join(', ')}${names.length > 10 ? ` and ${names.length - 10} more` : ''}`);
+    if (read.state === 'off') { notChecked.push(kind.label); continue; }
+    if (read.names.length) found.push(`${kind.label}: ${read.names.slice(0, 10).join(', ')}${read.names.length > 10 ? ` and ${read.names.length - 10} more` : ''}`);
   }
-  return { state: 'known', found };
+  return { state: 'known', found, notChecked };
 }
 
 type ProjectRead = { state: 'active' | 'deleting'; projectNumber: string } | { state: 'unknown'; reason: string };
@@ -193,7 +205,7 @@ export async function runGcpProjectRemoval(
   try {
     created = await deps.readCreatedProject({ projectId: params.project.id, gcpProjectId, auth: { env: { GOOGLE_OAUTH_ACCESS_TOKEN: token, GOOGLE_PROJECT: gcpProjectId }, redact: [token] }, dataDir });
   } catch { return blocked('Hypervibe could not read its saved setup for this Google project.'); }
-  if (!created.ok) return blocked(`Hypervibe could not read its saved setup for this Google project (${created.error}).`);
+  if (!created.ok) return blocked(`Hypervibe could not read its saved setup for this Google project (${redactExactValues(created.error, [token])}).`);
   if (!created.created) {
     return blocked(`Hypervibe project ${params.project.name} did not create Google project ${gcpProjectId}, so it will not delete it. Hypervibe only removes Google projects it created itself.`);
   }
@@ -208,8 +220,21 @@ export async function runGcpProjectRemoval(
     return { success: true, mode, gcpProjectId, projectNumber, removedConnections,
       message: `Google project ${gcpProjectId} is scheduled for deletion and its resources are shut down. Google keeps it for 30 days, during which it can be restored in the Google Cloud console. Hypervibe removed its saved access to the project.` };
   };
-  // A deletion that Google already accepted (an earlier confirm whose answer was lost) only needs the local records cleared.
-  if (observed.state === 'deleting') return mode === 'confirm' ? finish() : { success: true, mode, gcpProjectId, projectNumber, message: `Google project ${gcpProjectId} is already scheduled for deletion. Confirm to remove Hypervibe's saved access to it.`, ...savePreview() };
+  const stale = 'That preview is missing, expired or for a different project. Preview the removal again.';
+  const reviewed = (): boolean => {
+    const saved = readPreview();
+    const matches = Boolean(saved && saved.previewId === params.previewId && saved.gcpProjectId === gcpProjectId && saved.projectNumber === projectNumber && saved.expiresAt >= deps.now());
+    // A preview is used once, whatever happens next.
+    fs.rmSync(previewFile, { force: true });
+    return matches;
+  };
+  // A deletion that Google already accepted (an earlier confirm whose answer was lost, or one made in the console) only needs the local records cleared.
+  if (observed.state === 'deleting') {
+    if (mode === 'confirm') return reviewed() ? finish() : blocked(stale);
+    return { success: true, mode, gcpProjectId, projectNumber, ...savePreview(),
+      message: `Google project ${gcpProjectId} is already scheduled for deletion. Confirming removes Hypervibe's saved access to it.`,
+      warnings: ['Hypervibe will remove its saved Cloud Run and Cloud SQL connections for this project. If you restore the project in the Google Cloud console later, Hypervibe will no longer be able to manage it.'] };
+  }
 
   const environments = recordedEnvironments(gcpProjectId);
   if (environments.length) return blocked(`These environments still run in ${gcpProjectId}: ${environments.join(', ')}. Tear each one down first (hv_plan scope="teardown").`, { found: environments.map((name) => `environment ${name}`) });
@@ -217,24 +242,21 @@ export async function runGcpProjectRemoval(
   if (contents.state === 'unknown') return blocked(`${contents.reason} Whether the project is empty is unknown, so nothing was deleted.`);
   if (contents.found.length) {
     return blocked(`Google project ${gcpProjectId} still holds resources, so it was not deleted. Remove them first, or delete the project yourself in the Google Cloud console if you are sure nothing depends on them.`,
-      { found: contents.found, checked: GCP_PROJECT_REMOVAL_CHECKED, projectNumber });
+      { found: contents.found, checked: GCP_PROJECT_REMOVAL_CHECKED.filter((label) => !contents.notChecked.includes(label)), notChecked: contents.notChecked, projectNumber });
   }
 
   if (mode === 'preview') {
-    return { success: true, mode, gcpProjectId, projectNumber, checked: GCP_PROJECT_REMOVAL_CHECKED, ...savePreview(),
-      message: `Google project ${gcpProjectId} (${projectNumber}) holds none of the resources Hypervibe checks for. Confirming deletes the whole project and everything in it.`,
+    return { success: true, mode, gcpProjectId, projectNumber, checked: GCP_PROJECT_REMOVAL_CHECKED.filter((label) => !contents.notChecked.includes(label)), notChecked: contents.notChecked, ...savePreview(),
+      message: `Google project ${gcpProjectId} (${projectNumber}) holds none of the resources Hypervibe could check for. Confirming deletes the whole project and everything in it.`,
       warnings: [
+        ...(contents.notChecked.length ? [`Not checked, because their Google API is switched off in this project: ${contents.notChecked.join(', ')}. If any were ever created here they may still exist and will be deleted.`] : []),
         'Everything in the project is deleted, including things Hypervibe did not check for, such as Google sign-in clients and container images.',
         'Google keeps a deleted project for 30 days, during which it can be restored in the Google Cloud console. After that it is gone for good and its id cannot be reused.',
         'Hypervibe will also remove its saved Cloud Run and Cloud SQL connections for this project.',
       ] };
   }
 
-  const saved = readPreview();
-  if (!saved || saved.previewId !== params.previewId || saved.gcpProjectId !== gcpProjectId || saved.projectNumber !== projectNumber || saved.expiresAt < deps.now()) {
-    return blocked('That preview is missing, expired or for a different project. Preview the removal again.');
-  }
-  fs.rmSync(previewFile, { force: true });
+  if (!reviewed()) return blocked(stale);
   let status: number | undefined;
   try {
     status = (await deps.fetch(`https://cloudresourcemanager.googleapis.com/v3/projects/${gcpProjectId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })).status;

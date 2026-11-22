@@ -148,14 +148,21 @@ It refuses, and deletes nothing, when:
   Hypervibe was pointed at is never deleted.
 - Hypervibe still records an environment in the project. Tear each one down first.
 - The project still holds a Cloud Run service, job or worker pool, a database, a
-  bucket other than Hypervibe's build bucket, a secret, a Redis cache, a queue, a
-  reCAPTCHA key or an API key.
-- Any of those could not be read. An API that was never switched on holds
-  nothing; any other failed or partial answer is unknown, not empty.
+  bucket other than Hypervibe's build bucket, a secret, a Redis cache, a queue or
+  queue subscription, a reCAPTCHA key or an API key.
+- Any of those could not be read. A failed or partial answer is unknown, not empty.
+
+Google will not list a kind whose API is switched off in the project, and
+resources can outlive their API being switched off. The preview names those
+kinds as not checked instead of counting them as empty. It does not look for
+schedules, workflows, container images, regional secrets or Google sign-in
+clients at all.
+
+The preview goes to the user to decide; Hypervibe tells the agent to ask, and
+does not hand back a ready-made confirm call. A preview is used once.
 
 Every check is made again on confirm, immediately before the one delete call.
-Everything else in the project goes with it, including things the check does not
-look for, such as Google sign-in clients and container images; the preview says so.
+Everything else in the project goes with it; the preview says so.
 
 Google keeps a deleted project for 30 days, during which it can be restored in
 the Google Cloud console. Hypervibe reports success only once Google shows the

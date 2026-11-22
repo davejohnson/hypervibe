@@ -397,14 +397,15 @@ describe('hv_connections', () => {
     await t.close();
   });
 
-  it('previews a Google project removal and hands back the exact confirm call', async () => {
+  it('previews a Google project removal and sends the decision to the user', async () => {
     const project = new ProjectRepository().create({ name: 'gcp-removal-app', defaultPlatform: 'cloudrun', gitRemoteUrl: 'git@github.com:owner/repo.git' });
     vi.mocked(runGcpProjectRemoval).mockResolvedValue({ success: true, mode: 'preview', gcpProjectId: 'hv-demo-12345678', projectNumber: '4242', previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10' });
     const t = await makeClient();
     const input = { provider: 'cloudrun', action: 'remove-project', project: project.name, gcpProjectId: 'hv-demo-12345678', adminAuth: 'default' };
     const result = await t.call('hv_connections', input);
     expect(result.ok).toBe(true);
-    expect(result.data.confirmCall).toEqual({ tool: 'hv_connections', arguments: { ...input, previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10', confirm: true } });
+    expect(result.data.confirmCall).toBeUndefined();
+    expect(result.agentInstruction).toMatchObject({ action: 'ask_user', message: expect.stringContaining('hv-demo-12345678') });
     expect(runGcpProjectRemoval).toHaveBeenCalledWith({ project, gcpProjectId: 'hv-demo-12345678', previewId: undefined, confirm: false });
 
     vi.mocked(runGcpProjectRemoval).mockResolvedValue({ success: false, mode: 'confirm', status: 'blocked', error: 'still holds resources', found: ['databases: hv-db'] });
