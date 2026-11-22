@@ -106,10 +106,8 @@ function actionRow(action: PlanReportAction, index: number, group: MapGroup, ind
     ${fact('Depends on', dependencies.length ? `<ul>${dependencies.join('')}</ul>` : 'No recorded prerequisites')}</dl></div></details></li>`;
 }
 
-export function renderPlanReportHtml(report: PlanReport, options: { localReview?: boolean } = {}): string {
-  const fileOnly = report.scope === transferFileAccessCheckScope;
-  const accessCheck = fileOnly || report.scope === transferAccessCheckScope;
-  const title = fileOnly ? 'Export file access check' : accessCheck ? 'Transfer access check' : 'Infrastructure plan';
+export function renderPlanReportContent(report: PlanReport, options: { localReview?: boolean } = {}): string {
+  const accessCheck = report.scope === transferFileAccessCheckScope || report.scope === transferAccessCheckScope;
   const map = buildReportMap(report.actions);
   const indexes = new Map<string, number | null>();
   report.actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
@@ -143,16 +141,7 @@ export function renderPlanReportHtml(report: PlanReport, options: { localReview?
     [report.actions.filter(action => action.billable).length, 'May incur charges'],
     [report.actions.filter(action => action.dataBearing).length, 'Handle persistent data'],
   ].filter(([count]) => count).map(([count, label]) => `<span>${label} <b>${count}</b></span>`).join('');
-  return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${planReportPolicy}">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.project)} · ${title} · Hypervibe</title>
-<style>${planReportStyle}</style></head><body>
-<a class="skip" href="#review">Skip to plan actions</a>
-${options.localReview ? '' : `<header class="mast"><div class="mast-inner"><div class="brand">
-<svg class="brand-mark" aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.3"><path d="m3 18 5-12m1 12 5-12m1 12 5-12"/></svg>
-Hypervibe <span class="brand-topic">${title}</span></div><button id="print" class="button" data-interactive hidden>Print report</button></div></header>`}
-<main><div class="title-row"><h1>${escape(report.project)}</h1>${report.environment ? `<span class="environment">Environment · ${escape(report.environment)}</span>` : ''}</div>
-<dl class="meta">${metadata}</dl><div class="counts" aria-label="Action counts">${stats}</div>
+  return `<dl class="meta">${metadata}</dl><div class="counts" aria-label="Action counts">${stats}</div>
 ${flaggedCounts ? `<div class="review-flags" aria-label="Actions to review">${flaggedCounts}</div>` : ''}
 ${notices ? `<section class="notices" aria-label="Plan notices">${notices}</section>` : ''}
 ${mapSection(map, accessCheck)}
@@ -163,5 +152,20 @@ ${rows ? `<div class="review-scope" id="selected-group" hidden><a id="back-map" 
 <button class="button" id="reset" type="button">Clear filters</button></div>
 <p class="result-count" role="status" aria-live="polite" id="result-count"></p>
 <p id="empty-filter" class="empty-filter" hidden>No actions match these filters.</p><ol class="action-list">${rows}</ol>` : '<p>No actions are recorded in this plan.</p>'}
-</section></main><script>${planReportBrowser}</script></body></html>\n`;
+</section>`;
+}
+
+export function renderPlanReportHtml(report: PlanReport, options: { localReview?: boolean } = {}): string {
+  const title = report.scope === transferFileAccessCheckScope ? 'Export file access check'
+    : report.scope === transferAccessCheckScope ? 'Transfer access check' : 'Infrastructure plan';
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${planReportPolicy}">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.project)} · ${title} · Hypervibe</title>
+<style>${planReportStyle}</style></head><body>
+<a class="skip" href="#review">Skip to plan actions</a>
+${options.localReview ? '' : `<header class="mast"><div class="mast-inner"><div class="brand">
+<svg class="brand-mark" aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.3"><path d="m3 18 5-12m1 12 5-12m1 12 5-12"/></svg>
+Hypervibe <span class="brand-topic">${title}</span></div><button id="print" class="button" data-interactive hidden>Print report</button></div></header>`}
+<main><div class="title-row"><h1>${escape(report.project)}</h1>${report.environment ? `<span class="environment">Environment · ${escape(report.environment)}</span>` : ''}</div>
+${renderPlanReportContent(report, options)}</main><script>${planReportBrowser}</script></body></html>\n`;
 }

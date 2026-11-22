@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { ReviewArtifact } from '../adapters/storage/local-review-catalog.js';
+import { renderPlanReportContent } from './plan-report-html.js';
+import { planReportBrowser } from './plan-report-browser.js';
+import { planReportStyle } from './plan-report-style.js';
 import { LOCAL_PAGE_ICON_LINK } from '../utils/local-page-icon.js';
 
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
@@ -12,7 +15,7 @@ body, h1, h2, p, ul, dl, dd { margin: 0 }
 body { overflow-wrap: anywhere }
 header { border-bottom: 1px solid #35444b }
 .bar, main { width: min(1080px, calc(100% - 40px)); margin: auto }
-.bar, nav, .meta, .section-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap }
+.bar, nav, .review-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap }
 .bar { min-height: 58px; justify-content: space-between }
 .brand { display: inline-flex; align-items: center; gap: 9px; font-weight: 650; color: #edf3f4; text-decoration: none }
 .brand svg, a { color: #8ce2bb }
@@ -22,10 +25,10 @@ main { padding: clamp(28px, 5vw, 58px) 0 64px }
 h1 { font-size: clamp(2rem, 4vw, 3rem); line-height: 1.12; letter-spacing: -.045em }
 h2 { font-size: 1.2rem; letter-spacing: -.02em }
 .kind { font-size: .87rem; color: #afc0c7; margin-bottom: 6px }
-section, .decision { margin-top: 28px }
-.meta { margin-top: 12px; color: #bac8cd; font-size: .9rem; gap: 8px 18px }
-.meta div { display: flex; gap: 6px }
-.meta dt { color: #93a6ae }
+main > section { margin-top: 28px }
+.review-meta { margin-top: 12px; color: #bac8cd; font-size: .9rem; gap: 8px 18px }
+.review-meta div { display: flex; gap: 6px }
+.review-meta dt { color: #93a6ae }
 .current-state { margin-top: 14px }
 .state { display: inline-flex; align-items: center; gap: 8px; color: #c6d3d8; font-size: .88rem; font-weight: 600 }
 .state:before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: currentColor; flex: none }
@@ -39,15 +42,19 @@ section, .decision { margin-top: 28px }
 .name { display: block; color: #eaf3ef; font-weight: 600 }
 .sub { display: block; color: #afc0c7; font-size: .85rem; margin-top: 3px }
 .arrow { color: #8ce2bb; font-size: 1.3rem }
-.decision, .evidence { padding: 20px clamp(14px, 3vw, 26px); background: #131b1f; border: 1px solid #35444b; border-radius: 10px }
-.decision p { margin: .4rem 0; color: #c2cfd4 }
-.decision button { margin-top: 8px; font: inherit; font-weight: 650; border: 0; border-radius: 6px; padding: 9px 16px; color: #0c221b; background: #90e4bc; cursor: pointer }
+.evidence { padding: 20px clamp(14px, 3vw, 26px); background: #131b1f; border: 1px solid #35444b; border-radius: 10px }
+.review-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 16px 28px }
+.review-heading > :first-child { flex: 1 1 26rem; min-width: 0 }
+.decision { max-width: 23rem; margin: 0 }
+.decision p { margin-top: 6px; color: #bac8cd; font-size: .9rem }
+.decision p:empty { display: none }
+.decision button { font: inherit; font-weight: 650; border: 0; border-radius: 6px; padding: 10px 20px; color: #0c221b; background: #90e4bc; cursor: pointer }
+.decision button:hover { background: #a7efcd }
 .decision button:disabled { opacity: .65; cursor: wait }
+.evidence { margin-top: 28px }
+.plan-details { padding-top: 12px; border-top: 1px solid #35444b }
 .evidence ul { padding-left: 1.2rem; margin-top: 8px }
 .evidence li+li { margin-top: .4rem }
-.section-head { justify-content: space-between; margin-bottom: 10px }
-.section-head a { font-size: .9rem }
-iframe { display: block; width: 100%; height: min(78vh, 850px); min-height: 360px; border: 1px solid #35444b; border-radius: 9px; background: #0c1114 }
 a:focus-visible, button:focus-visible { outline: 2px solid #8ce2bb; outline-offset: 4px }
 .search { display: grid; gap: 5px; margin: 24px 0 0; max-width: 30rem; font-weight: 600 }
 .search input { width: 100%; padding: 9px 12px; background: #131b1f; border: 1px solid #52636b; border-radius: 6px; color: #edf3f4; font: inherit; font-weight: 400 }
@@ -58,9 +65,9 @@ a:focus-visible, button:focus-visible { outline: 2px solid #8ce2bb; outline-offs
 .record { grid-template-columns: minmax(0, 1fr) auto; gap: 5px 12px }
 .record .state { grid-row: 2 }
 .arrow { grid-column: 2; grid-row: 1/3 }
-.meta { align-items: flex-start; column-gap: 10px }
-.section-head { gap: 6px }
- }
+.review-meta { align-items: flex-start; column-gap: 10px }
+}
+@media print { #approval, nav, #feedback { display: none } }
 `;
 
 // A fetch in CORS mode retains the browser's exact Origin with a no-referrer policy.
@@ -98,15 +105,19 @@ function filter() {
 input.addEventListener('input', filter);
 filter();
 `;
-const hash = (text: string) => createHash('sha256').update(text).digest('base64');
-export const reviewPagePolicy = `default-src 'none'; img-src data:; style-src 'sha256-${hash(style)}'; script-src 'sha256-${hash(approvalScript)}' 'sha256-${hash(filterScript)}'; connect-src 'self'; frame-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'`;
+const hashSource = (text: string) => "'sha256-" + createHash('sha256').update(text).digest('base64') + "'";
+export function reviewPagePolicy(withReport = false) {
+  const styles = withReport ? [style, planReportStyle] : [style];
+  const scripts = withReport ? [approvalScript, filterScript, planReportBrowser] : [approvalScript, filterScript];
+  return `default-src 'none'; img-src data:; style-src ${styles.map(hashSource).join(' ')}; script-src ${scripts.map(hashSource).join(' ')}; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'`;
+}
 
-function page(title: string, home: string, body: string, script?: string) {
+function page(title: string, home: string, body: string, script?: string, withReport = false) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escape(title)} · Hypervibe</title>${LOCAL_PAGE_ICON_LINK}<style>${style}</style></head><body>
-<header><div class="bar"><a class="brand" href="${home}"><svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.3"><path d="m3 18 5-12m1 12 5-12m1 12 5-12"/></svg>Hypervibe</a>
+<title>${escape(title)} · Hypervibe</title>${LOCAL_PAGE_ICON_LINK}${withReport ? `<style>${planReportStyle}</style>` : ''}<style>${style}</style></head><body>
+${withReport ? '<a class="skip" href="#review">Skip to plan actions</a>' : ''}<header><div class="bar"><a class="brand" href="${home}"><svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.3"><path d="m3 18 5-12m1 12 5-12m1 12 5-12"/></svg>Hypervibe</a>
 <nav aria-label="Review navigation"><a href="${home}">Saved reviews</a></nav></div></header>
-<main>${body}</main>${script ? `<script>${script}</script>` : ''}</body></html>`;
+<main>${body}</main>${withReport ? `<script>${planReportBrowser}</script>` : ''}${script ? `<script>${script}</script>` : ''}</body></html>`;
 }
 function state(item: ReviewArtifact) {
   const status = item.status;
@@ -140,12 +151,12 @@ export function reviewDetail(item: ReviewArtifact, home: string, path: string, r
     .filter(([, value]) => value).map(([key, value]) => `<div><dt>${key}</dt><dd>${escape(value!)}</dd></div>`).join('');
   const details = item.details.length ? `<section class="evidence"><h2>${item.kind === 'result' ? 'Recorded outcome' : 'Plan summary'}</h2>
 <ul>${item.details.map(detail => `<li>${escape(detail)}</li>`).join('')}</ul></section>` : '';
-  const report = item.report ? `<section aria-label="Plan details"><div class="section-head"><h2>Plan details</h2><a href="${path}/report" target="_blank" rel="noreferrer">Open full report ↗</a></div>
-<iframe src="${path}/report" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox" referrerpolicy="no-referrer" title="Interactive plan report"></iframe></section>` : '';
-  const approval = csrf && item.approval ? `<section class="decision"><h2>Approve this plan</h2><p>Approval lets your agent run the actions shown in this version of the plan. Your agent runs them in a separate step.</p>
-<form hidden id="approval" method="post" action="${path}/approve"><input type="hidden" name="csrf" value="${csrf}"><input type="hidden" name="digest" value="${escape(item.approval.digest)}"><button type="submit">Approve plan</button></form>
-<p id="feedback" role="status" aria-live="polite"></p><noscript>Enable JavaScript to approve this plan.</noscript></section>`
-    : item.approval?.approvedAt ? `<section class="decision"><h2>Approval recorded</h2><p>Approved ${escape(date(item.approval.approvedAt))}. Your agent can now run this plan.</p></section>` : '';
+  const report = item.report ? `<section class="plan-details" aria-label="Plan details">${renderPlanReportContent(item.report, { localReview: true })}</section>` : '';
+  const approval = csrf && item.approval ? `<div class="decision"><form hidden id="approval" method="post" action="${path}/approve">
+<input type="hidden" name="csrf" value="${csrf}"><input type="hidden" name="digest" value="${escape(item.approval.digest)}"><button type="submit" aria-describedby="approval-note">Approve plan</button></form>
+<p id="approval-note">Your agent can run this saved plan once you approve.</p><p id="feedback" role="status" aria-live="polite"></p><noscript>Enable JavaScript to approve this plan.</noscript></div>`
+    : item.approval?.approvedAt ? `<div class="decision"><h2>Approval recorded</h2><p>Approved ${escape(date(item.approval.approvedAt))}.</p></div>` : '';
   const links = related.length ? `<section><h2>Related reviews</h2>${recordList(related, home)}</section>` : '';
-  return page(item.title, home, `<p class="kind">${kind(item)}</p><h1>${escape(item.title)}</h1><dl class="meta">${meta}</dl><div class="current-state">${state(item)}</div>${details}${links}${report}${approval}`, csrf ? approvalScript : undefined);
+  const heading = `<div class="review-heading"><div><p class="kind">${kind(item)}</p><h1>${escape(item.title)}</h1><dl class="review-meta">${meta}</dl><div class="current-state">${state(item)}</div></div>${approval}</div>`;
+  return page(item.title, home, heading + details + report + links, csrf ? approvalScript : undefined, Boolean(item.report));
 }
