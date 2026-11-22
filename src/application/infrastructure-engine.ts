@@ -8,6 +8,9 @@ import { statSync } from 'node:fs';
 import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
 import { domainServiceFor, environmentDomains, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { secretTargetsService } from '../domain/services/secret-service-scope.js';
+import { gcpSecretScopeGate, gcpSecretScopeNotes, RELEASE_WORKLOAD } from './gcp-secret-scope.js';
+import { recordAppliedWorkloads } from '../adapters/providers/gcp/secret-scope-state.js';
+import type { GcpAppliedWorkload } from '../domain/services/gcp-secret-scope.js';
 import { databaseRemovalBlocker, gcpDatabaseShape } from './gcp-database-shape.js';
 export { engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { createCommandContext } from './context.js';
@@ -17,7 +20,7 @@ import { accessLatestSecretVersion, addSecretVersion, listSecretIds, readSecretC
 import {
   cloudRunGet, latestWakerExecution, releaseImage, releaseJobImage, runCloudRunJobOnce, workloadContainers, type JobRunResult, type PendingJobRun, type WorkloadKind,
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
-import { createStorageHmacKey, deleteBucketObject, listBucketObjects, readBucket, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
+import { createStorageHmacKey, deleteBucketObject, listBucketObjects, readBucket, readPubsubTopic, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan, specWithoutEnvironment } from './engine-shared.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
@@ -311,6 +314,11 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   importedSecrets?: string[];
   /** Exact secret versions to pin; a new version then rolls services through a reviewed update. */
   secretVersions?: Record<string, string>;
+  /**
+   * Services that run as their own identity because a secret is limited to them (service -> email).
+   * Every other service, and the release command unless it borrows one of these, runs as the shared runtime identity.
+   */
+  serviceIdentities?: Record<string, string>;
 }): GcpCloudRunEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   // A package token is for image builds only; running services never receive it.
@@ -334,7 +342,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         resourceName: context.resourceNameFor(name),
         workload,
         initialImage: ENGINE_HOLDING_IMAGE,
-        runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+        runtimeServiceAccountEmail: context.serviceIdentities?.[name] ?? context.runtimeServiceAccountEmail,
         // Queue names follow the shared Pub/Sub contract so apps see the same variables on every path.
         env: { ...buildQueueEnvVars({ environmentSpec, environment: { name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, backend: environmentSpec.queues ? 'pubsub' : undefined, gcpProjectId: context.gcpProjectId }), ...environmentSpec.envVars },
         secretEnv: { ...secretEnvFor(name), ...s3SecretEnvFor(name) },
@@ -814,11 +822,13 @@ function gcpTeardownActions(planned: PlanAction[], context: EngineContext, envir
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'gcp' },
-    reason: `Hypervibe will confirm with Google that ${environmentName}'s recorded services, jobs, workers, database, buckets and secrets are gone from ${context.gcpProjectId}, then remove ${environmentName} from the spec. Schedules, queues and a cache are removed by the steps above and are not read again.`,
+    reason: `Hypervibe will confirm with Google that ${environmentName}'s recorded services, jobs, workers, database, cache, queues, buckets and secrets are gone from ${context.gcpProjectId}, then remove ${environmentName} from the spec. Schedules are removed by the steps above and are not read again.`,
     ...(changing.length ? { dependsOn: changing } : {}),
     metadata: { operation: GCP_TEARDOWN_CLEANUP_OPERATION, gcpProjectId: context.gcpProjectId,
       workloads: [...boundWorkloads(context.environment), ...(binding.releaseJob ? [{ name: 'release-command', kind: 'jobs' as const, resource: binding.releaseJob }] : [])],
-      ...(binding.database?.instanceName ? { instanceName: binding.database.instanceName } : {}), buckets: (binding.storage ?? []).map(bucketOf) },
+      ...(binding.database?.instanceName ? { instanceName: binding.database.instanceName } : {}), buckets: (binding.storage ?? []).map(bucketOf),
+      ...(binding.cache?.instanceName ? { cacheInstanceName: binding.cache.instanceName } : {}),
+      topics: (binding.queues ?? []).map((name) => pubsubQueueResourceIds({ name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, name, context.gcpProjectId).topicId) },
   };
   return [...empties, ...ordered, cleanup];
 }
@@ -853,7 +863,7 @@ export async function emptyGcpBucket(token: string, action: PlanAction): Promise
 /** The last teardown step: every piece the plan removed must be confirmed gone before the environment leaves the spec. */
 export async function finishGcpTeardown(ctx: CommandContext, token: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'environment'>,
   params: { project: Project; spec: ProjectSpec }, environmentName: string, action: PlanAction): Promise<ActionResult> {
-  const meta = action.metadata as { workloads: Array<{ kind: WorkloadKind; resource: string }>; instanceName?: string; buckets: string[] };
+  const meta = action.metadata as { workloads: Array<{ kind: WorkloadKind; resource: string }>; instanceName?: string; buckets: string[]; cacheInstanceName?: string; topics?: string[] };
   const left: string[] = [];
   for (const workload of meta.workloads) {
     const observed = await cloudRunGet(token, context.gcpProjectId, context.region, workload.resource, workload.kind);
@@ -863,6 +873,8 @@ export async function finishGcpTeardown(ctx: CommandContext, token: string, cont
   const reads: Array<[string, Promise<Response>]> = [
     ...(meta.instanceName ? [[meta.instanceName, sqlAdmin(token, context.gcpProjectId, `instances/${meta.instanceName}`)] as [string, Promise<Response>]] : []),
     ...meta.buckets.map((bucket) => [bucket, readBucket(token, bucket)] as [string, Promise<Response>]),
+    ...(meta.cacheInstanceName ? [[meta.cacheInstanceName, readRedisInstance(token, context.gcpProjectId, context.region, meta.cacheInstanceName)] as [string, Promise<Response>]] : []),
+    ...(meta.topics ?? []).map((topic) => [topic, readPubsubTopic(token, context.gcpProjectId, topic)] as [string, Promise<Response>]),
   ];
   for (const [name, pending] of reads) {
     const response = await pending;
@@ -878,7 +890,7 @@ export async function finishGcpTeardown(ctx: CommandContext, token: string, cont
   ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, services: {}, engine: {}, gcp: { tornDownAt: new Date().toISOString() } });
   // The environment is gone; removing it from the spec keeps the next plan from recreating it.
   new SpecStore().merge(params.project, specWithoutEnvironment(params.spec, environmentName));
-  return { success: true, message: `Google confirms ${environmentName}'s services, jobs, workers, database, buckets and secrets are gone from ${context.gcpProjectId}. It was removed from the spec.` };
+  return { success: true, message: `Google confirms ${environmentName}'s services, jobs, workers, database, cache, queues, buckets and secrets are gone from ${context.gcpProjectId}. It was removed from the spec.` };
 }
 
 export const GCP_STORAGE_EMPTY_OPERATION = 'gcpStorageEmpty';
@@ -933,6 +945,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (Object.keys(environmentSpec!.queues ?? {}).length && !isCloudPreparedForQueues(preparation, 'cloudrun', environmentProjectId)) {
     return { blocked: ['Queues need one more Google Cloud permission for Hypervibe. Approve it with hv_launch approveAccess=["queues"], or run hv_connections provider="cloudrun" action="prepare" queueAccess="lifecycle" (preview, then confirm).'] };
   }
+
+  // Secrets limited to named services: each named service needs its own verified identity, or nothing is planned.
+  const secretScope = gcpSecretScopeGate(ctx, project, spec, environmentName, { gcpProjectId: context.gcpProjectId,
+    runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+    runtimeSecretGrantOrigins: (context.environment.platformBindings as { engine?: EngineBinding }).engine?.runtimeSecretGrantOrigins });
+  if (secretScope.blocked) return { blocked: [secretScope.blocked] };
 
   if (environmentSpec!.domainRegistration?.register) {
     const registration = await planRegistrarStage(ctx, project, context.environment, environmentSpec!, params.specRevision);
@@ -1152,6 +1170,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     s3WiredStorage: s3Ready,
     importedSecrets,
     secretVersions,
+    ...(Object.keys(secretScope.identities).length ? { serviceIdentities: secretScope.identities } : {}),
   });
   if (input.gcpRuntimeSecretGrants && input.services.some(service => Object.keys(service.secretEnv ?? {}).some(isBuildTokenKey))) {
     return { blocked: ['A workload references a build-only package token. Its runtime identity cannot receive a grant on that token.'] };
@@ -1183,6 +1202,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     ...(retiredDomains.length ? { retiredDomains } : {}),
     extraDomains: [...desiredDomains.map(item => item.domain), ...retiredDomains].filter(domain => ownerFor(domain) !== 'gcp-domain'),
     runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+    ...(secretScope.active ? { serviceIdentityAddresses: true } : {}),
     storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
       ...(storage.access === 's3' ? { s3: { wired: s3Ready.includes(name) } } : {}),
@@ -1227,6 +1247,10 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   }
   if (planned.blockers.length) return { blocked: planned.blockers };
+  // What each workload runs as and references under this plan. A workload the refreshed plan leaves
+  // unchanged is already in that state; the rest are recorded when their change is applied.
+  const scopeWorkloads = secretScope.active ? plannedScopeWorkloads(input) : undefined;
+  if (scopeWorkloads) recordAppliedWorkloads(project.id, context.environment.id, scopeRecordsAtPlan(scopeWorkloads, planned.actions));
   const grantActions = planned.actions.filter(action => action.id.startsWith('secret-runtime-access:') && action.type !== 'noop');
   if (grantActions.length !== grantChanges.length || !grantActions.every(action =>
     grantChanges.some(grant => action.id === `secret-runtime-access:${grant.secretId}`))) {
@@ -1339,6 +1363,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const actions = options.teardown ? gcpTeardownActions(ordinary, context, environmentName, engineBinding) : ordinary;
   describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
   const warnings = [
+    ...secretScope.warnings,
     gcpInfrastructureNotes.release,
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
@@ -1362,11 +1387,52 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       ...(options.teardown ? { teardown: true } : {}),
       ...(Object.keys(runtimeGrants).length ? { runtimeGrants } : {}),
+      ...(scopeWorkloads ? { scopeWorkloads } : {}),
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
       ...(imageRepository ? { imageRepository } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
       domainClaims, cancelledDomainProofs,
     } });
+}
+
+/** Plan action that changes a workload's identity or secret references. */
+function scopeWorkloadActionId(workload: string): string {
+  return workload === RELEASE_WORKLOAD ? 'release-job:migrations' : `service:${workload}`;
+}
+
+/** Identity and referenced secrets of every workload in the planned configuration. */
+export function plannedScopeWorkloads(input: Pick<GcpCloudRunEngineInput, 'services' | 'releaseJob'>): Record<string, GcpAppliedWorkload> {
+  const entry = (service: GcpCloudRunEngineInput['services'][number]): GcpAppliedWorkload => ({
+    identity: service.runtimeServiceAccountEmail,
+    secretIds: [...new Set(Object.values(service.secretEnv ?? {}).map(reference => reference.secretId))].sort(),
+  });
+  return {
+    ...Object.fromEntries(input.services.map(service => [service.logicalName, entry(service)])),
+    ...(input.releaseJob ? { [RELEASE_WORKLOAD]: entry(input.releaseJob) } : {}),
+  };
+}
+
+/** At plan time only a workload the refreshed plan leaves unchanged is known to be in the planned state. */
+export function scopeRecordsAtPlan(workloads: Record<string, GcpAppliedWorkload>, actions: PlanAction[]): Record<string, GcpAppliedWorkload> {
+  return Object.fromEntries(Object.entries(workloads)
+    .filter(([name]) => actions.some(action => action.id === scopeWorkloadActionId(name) && action.type === 'noop')));
+}
+
+/** After an apply only a workload whose every address succeeded is known to run as reviewed; a deleted one loses its record. */
+export function scopeRecordsAfterApply(workloads: Record<string, GcpAppliedWorkload>, members: PlanAction[], outcomes: Record<string, string>): Record<string, GcpAppliedWorkload | undefined> {
+  const succeeded = (member: PlanAction) => {
+    const addresses = engineSegmentOf(member)?.addresses ?? [];
+    return addresses.length > 0 && addresses.every(address => outcomes[address] === 'succeeded');
+  };
+  const changes: Record<string, GcpAppliedWorkload | undefined> = {};
+  for (const [name, workload] of Object.entries(workloads)) {
+    const member = members.find(entry => entry.id === scopeWorkloadActionId(name) && entry.type !== 'destroy');
+    if (member && succeeded(member)) changes[name] = workload;
+  }
+  for (const member of members.filter(entry => entry.type === 'destroy' && entry.id.startsWith('service:'))) {
+    if (succeeded(member)) changes[member.resource.name] = undefined;
+  }
+  return changes;
 }
 
 // ---------------------------------------------------------------- Apply
@@ -1432,7 +1498,7 @@ export async function applyInfrastructureEngine(ctx: CommandContext, params: {
   specRevision: number;
   planId: string;
   confirmActions: string[];
-}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
+}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult; warnings?: string[] } | { kind: 'blocked'; reason: string }> {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
@@ -1466,12 +1532,13 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   specRevision: number;
   planId: string;
   confirmActions: string[];
-}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult } | { kind: 'blocked'; reason: string }> {
+}): Promise<{ kind: 'executed'; envName: string; result: ConvergeResult; warnings?: string[] } | { kind: 'blocked'; reason: string }> {
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
     runtimeGrants?: Record<string, ReviewedRuntimeSecretGrant>;
+    scopeWorkloads?: Record<string, GcpAppliedWorkload>;
     imageRepository?: { planId: string; state: EngineStateIdentity };
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
@@ -1672,10 +1739,16 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         segment: { ...segment, addresses }, approvedAddresses: addresses,
       });
       await recordServiceBindings(ctx, context, environmentName, members, outcome.outcomes, token, reviewed.database?.instanceName, reviewed.runtimeGrants);
+      if (reviewed.scopeWorkloads) recordAppliedWorkloads(params.project.id, context.environment.id, scopeRecordsAfterApply(reviewed.scopeWorkloads, members, outcome.outcomes));
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
-  return { kind: 'executed', envName: environmentName, result };
+  // Say plainly, in the apply result itself, when a limited secret is still readable by other services.
+  const current = ctx.repos.environments.findById(context.environment.id) ?? context.environment;
+  const warnings = gcpSecretScopeNotes(ctx, params.project, params.spec, environmentName, { gcpProjectId: context.gcpProjectId,
+    runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+    runtimeSecretGrantOrigins: (current.platformBindings as { engine?: EngineBinding }).engine?.runtimeSecretGrantOrigins });
+  return { kind: 'executed', envName: environmentName, result, ...(warnings.length ? { warnings } : {}) };
 }
 
 function sameGrantOrigin(binding: EngineBinding, grant: ReviewedRuntimeSecretGrant): boolean {
@@ -2063,7 +2136,9 @@ export async function engineWorkerStatus(ctx: CommandContext, project: Project, 
   const token = await context.adapter.engineAccessToken();
   const bound = (context.environment.platformBindings as { services?: Record<string, { workerPoolName?: string }> }).services ?? {};
   const workers: EngineWorkerStatus[] = [];
-  const warnings: string[] = [];
+  const warnings: string[] = gcpSecretScopeNotes(ctx, project, spec, environmentName, { gcpProjectId: context.gcpProjectId,
+    runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
+    runtimeSecretGrantOrigins: (context.environment.platformBindings as { engine?: EngineBinding }).engine?.runtimeSecretGrantOrigins });
   for (const [name, service] of Object.entries(environmentSpec.services)) {
     if (service.workloadKind !== 'worker') continue;
     const resource = bound[name]?.workerPoolName;

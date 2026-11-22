@@ -227,6 +227,8 @@ export interface IStorageAdapter {
   ensureBucket(environment: Environment, context: StorageContext, name: string, region: string): Promise<StorageEnsureResult>;
   /** Resolve provider-native runtime configuration. Secret values never enter receipts or bindings. */
   getRuntimeEnv(environment: Environment, context: StorageContext, externalId: string, name: string, target?: StorageRuntimeTarget): Promise<Record<string, string>>;
+  /** Resolve the native data-plane bucket name from a bound resource using metadata only. */
+  getMigrationBucketName?(context: StorageContext, externalId: string): Promise<string>;
   /** S3-compatible data-plane credentials when this provider exposes them. */
   getCredentials?(environment: Environment, context: StorageContext, externalId: string): Promise<StorageCredentials>;
   /**

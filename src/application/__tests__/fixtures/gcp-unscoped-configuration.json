@@ -1,0 +1,1305 @@
+{
+ "files": {
+  "secrets.tf.json": {
+   "resource": {
+    "google_secret_manager_secret": {
+     "secret_7395cfdd04cc5f69e3ddff16": {
+      "project": "demo-project",
+      "secret_id": "hv-staging-source-key",
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-environment": "env-123"
+      },
+      "replication": [
+       {
+        "auto": [
+         {}
+        ]
+       }
+      ],
+      "deletion_protection": false
+     },
+     "secret_1403ab4f6a51d092314f0a55": {
+      "project": "demo-project",
+      "secret_id": "hv-staging-signing-key",
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-environment": "env-123"
+      },
+      "replication": [
+       {
+        "auto": [
+         {}
+        ]
+       }
+      ],
+      "deletion_protection": false
+     },
+     "secret_52a41e6033a74329435f2536": {
+      "project": "demo-project",
+      "secret_id": "hv-staging-database-url",
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-environment": "env-123"
+      },
+      "replication": [
+       {
+        "auto": [
+         {}
+        ]
+       }
+      ],
+      "deletion_protection": false
+     }
+    }
+   }
+  },
+  "provider.tf.json": {
+   "provider": {
+    "google": [
+     {
+      "project": "demo-project",
+      "region": "us-west1"
+     }
+    ]
+   }
+  },
+  "jobs.tf.json": {
+   "resource": {
+    "google_cloud_run_v2_job": {
+     "catchup": {
+      "name": "catchup",
+      "project": "demo-project",
+      "location": "us-west1",
+      "deletion_protection": false,
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-service": "catchup"
+      },
+      "template": [
+       {
+        "template": [
+         {
+          "service_account": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+          "max_retries": 1,
+          "timeout": "3600s",
+          "containers": [
+           {
+            "image": "us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7",
+            "resources": [
+             {
+              "limits": {
+               "cpu": "1",
+               "memory": "512Mi"
+              }
+             }
+            ],
+            "env": [
+             {
+              "name": "QUEUE_BACKEND",
+              "value": "pubsub"
+             },
+             {
+              "name": "QUEUE_NAMES",
+              "value": "events"
+             },
+             {
+              "name": "QUEUE_SUBSCRIPTION_EVENTS",
+              "value": "projects/demo-project/subscriptions/events-58ffe53da2"
+             },
+             {
+              "name": "QUEUE_TOPIC_EVENTS",
+              "value": "projects/demo-project/topics/events-58ffe53da2"
+             },
+             {
+              "name": "DATABASE_URL",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_52a41e6033a74329435f2536.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "SIGNING_KEY",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_1403ab4f6a51d092314f0a55.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "SOURCE_KEY",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_7395cfdd04cc5f69e3ddff16.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "OBJECT_STORAGE_PROVIDER",
+              "value": "gcs"
+             },
+             {
+              "name": "OBJECT_STORAGE_BUCKET",
+              "value": "${google_storage_bucket.storage_media.name}"
+             },
+             {
+              "name": "GOOGLE_CLOUD_PROJECT",
+              "value": "demo-project"
+             },
+             {
+              "name": "GOOGLE_CLOUD_STORAGE_BUCKET",
+              "value": "${google_storage_bucket.storage_media.name}"
+             },
+             {
+              "name": "CLOUD_SQL_CONNECTION_NAME",
+              "value": "${google_sql_database_instance.db.connection_name}"
+             },
+             {
+              "name": "PGHOST",
+              "value": "/cloudsql/${google_sql_database_instance.db.connection_name}"
+             }
+            ],
+            "volume_mounts": [
+             {
+              "name": "cloudsql",
+              "mount_path": "/cloudsql"
+             }
+            ],
+            "command": [
+             "/bin/sh"
+            ],
+            "args": [
+             "-lc",
+             "clone catchup"
+            ]
+           }
+          ],
+          "volumes": [
+           {
+            "name": "cloudsql",
+            "cloud_sql_instance": [
+             {
+              "instances": [
+               "${google_sql_database_instance.db.connection_name}"
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "lifecycle": [
+       {
+        "ignore_changes": [
+         "template[0].template[0].containers[0].image",
+         "client",
+         "client_version"
+        ]
+       }
+      ]
+     },
+     "reports": {
+      "name": "reports",
+      "project": "demo-project",
+      "location": "us-west1",
+      "deletion_protection": false,
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-service": "reports"
+      },
+      "template": [
+       {
+        "template": [
+         {
+          "service_account": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+          "max_retries": 1,
+          "timeout": "3600s",
+          "containers": [
+           {
+            "image": "us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7",
+            "resources": [
+             {
+              "limits": {
+               "cpu": "1",
+               "memory": "512Mi"
+              }
+             }
+            ],
+            "env": [
+             {
+              "name": "QUEUE_BACKEND",
+              "value": "pubsub"
+             },
+             {
+              "name": "QUEUE_NAMES",
+              "value": "events"
+             },
+             {
+              "name": "QUEUE_SUBSCRIPTION_EVENTS",
+              "value": "projects/demo-project/subscriptions/events-58ffe53da2"
+             },
+             {
+              "name": "QUEUE_TOPIC_EVENTS",
+              "value": "projects/demo-project/topics/events-58ffe53da2"
+             },
+             {
+              "name": "DATABASE_URL",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_52a41e6033a74329435f2536.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "SIGNING_KEY",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_1403ab4f6a51d092314f0a55.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "SOURCE_KEY",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_7395cfdd04cc5f69e3ddff16.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "CLOUD_SQL_CONNECTION_NAME",
+              "value": "${google_sql_database_instance.db.connection_name}"
+             },
+             {
+              "name": "PGHOST",
+              "value": "/cloudsql/${google_sql_database_instance.db.connection_name}"
+             }
+            ],
+            "volume_mounts": [
+             {
+              "name": "cloudsql",
+              "mount_path": "/cloudsql"
+             }
+            ],
+            "command": [
+             "/bin/sh"
+            ],
+            "args": [
+             "-lc",
+             "clone reports"
+            ]
+           }
+          ],
+          "volumes": [
+           {
+            "name": "cloudsql",
+            "cloud_sql_instance": [
+             {
+              "instances": [
+               "${google_sql_database_instance.db.connection_name}"
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "lifecycle": [
+       {
+        "ignore_changes": [
+         "template[0].template[0].containers[0].image",
+         "client",
+         "client_version"
+        ]
+       }
+      ]
+     },
+     "release_command": {
+      "name": "release-command",
+      "project": "demo-project",
+      "location": "us-west1",
+      "deletion_protection": false,
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-service": "release"
+      },
+      "template": [
+       {
+        "template": [
+         {
+          "service_account": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+          "max_retries": 0,
+          "timeout": "3600s",
+          "containers": [
+           {
+            "image": "us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7",
+            "resources": [
+             {
+              "limits": {
+               "cpu": "1",
+               "memory": "512Mi"
+              }
+             }
+            ],
+            "env": [
+             {
+              "name": "QUEUE_BACKEND",
+              "value": "pubsub"
+             },
+             {
+              "name": "QUEUE_NAMES",
+              "value": "events"
+             },
+             {
+              "name": "QUEUE_SUBSCRIPTION_EVENTS",
+              "value": "projects/demo-project/subscriptions/events-58ffe53da2"
+             },
+             {
+              "name": "QUEUE_TOPIC_EVENTS",
+              "value": "projects/demo-project/topics/events-58ffe53da2"
+             },
+             {
+              "name": "DATABASE_URL",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_52a41e6033a74329435f2536.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "SIGNING_KEY",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_1403ab4f6a51d092314f0a55.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "SOURCE_KEY",
+              "value_source": [
+               {
+                "secret_key_ref": [
+                 {
+                  "secret": "${google_secret_manager_secret.secret_7395cfdd04cc5f69e3ddff16.secret_id}",
+                  "version": "1"
+                 }
+                ]
+               }
+              ]
+             },
+             {
+              "name": "CLOUD_SQL_CONNECTION_NAME",
+              "value": "${google_sql_database_instance.db.connection_name}"
+             },
+             {
+              "name": "PGHOST",
+              "value": "/cloudsql/${google_sql_database_instance.db.connection_name}"
+             }
+            ],
+            "volume_mounts": [
+             {
+              "name": "cloudsql",
+              "mount_path": "/cloudsql"
+             }
+            ],
+            "command": [
+             "/bin/sh"
+            ],
+            "args": [
+             "-lc",
+             "clone migrate"
+            ]
+           }
+          ],
+          "volumes": [
+           {
+            "name": "cloudsql",
+            "cloud_sql_instance": [
+             {
+              "instances": [
+               "${google_sql_database_instance.db.connection_name}"
+              ]
+             }
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "lifecycle": [
+       {
+        "ignore_changes": [
+         "template[0].template[0].containers[0].image",
+         "client",
+         "client_version"
+        ]
+       }
+      ]
+     }
+    },
+    "google_cloud_scheduler_job": {
+     "catchup_schedule": {
+      "name": "catchup-schedule",
+      "project": "demo-project",
+      "region": "us-west1",
+      "schedule": "0 4 * * *",
+      "time_zone": "UTC",
+      "attempt_deadline": "320s",
+      "http_target": [
+       {
+        "http_method": "POST",
+        "uri": "https://run.googleapis.com/v2/projects/demo-project/locations/us-west1/jobs/${google_cloud_run_v2_job.catchup.name}:run",
+        "headers": {
+         "Content-Type": "application/json"
+        },
+        "body": "e30=",
+        "oauth_token": [
+         {
+          "service_account_email": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+          "scope": "https://www.googleapis.com/auth/cloud-platform"
+         }
+        ]
+       }
+      ]
+     },
+     "reports_schedule": {
+      "name": "reports-schedule",
+      "project": "demo-project",
+      "region": "us-west1",
+      "schedule": "0 5 * * *",
+      "time_zone": "UTC",
+      "attempt_deadline": "320s",
+      "http_target": [
+       {
+        "http_method": "POST",
+        "uri": "https://run.googleapis.com/v2/projects/demo-project/locations/us-west1/jobs/${google_cloud_run_v2_job.reports.name}:run",
+        "headers": {
+         "Content-Type": "application/json"
+        },
+        "body": "e30=",
+        "oauth_token": [
+         {
+          "service_account_email": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+          "scope": "https://www.googleapis.com/auth/cloud-platform"
+         }
+        ]
+       }
+      ]
+     },
+     "worker_waker": {
+      "name": "worker-waker",
+      "project": "demo-project",
+      "region": "us-west1",
+      "schedule": "* * * * *",
+      "time_zone": "Etc/UTC",
+      "attempt_deadline": "60s",
+      "http_target": [
+       {
+        "http_method": "POST",
+        "uri": "https://workflowexecutions.googleapis.com/v1/${google_workflows_workflow.worker_waker.id}/executions",
+        "body": "e30=",
+        "headers": {
+         "Content-Type": "application/json"
+        },
+        "oauth_token": [
+         {
+          "service_account_email": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+          "scope": "https://www.googleapis.com/auth/cloud-platform"
+         }
+        ]
+       }
+      ]
+     }
+    },
+    "google_cloud_run_v2_job_iam_member": {
+     "catchup_invoker": {
+      "project": "demo-project",
+      "location": "us-west1",
+      "name": "${google_cloud_run_v2_job.catchup.name}",
+      "role": "roles/run.invoker",
+      "member": "serviceAccount:hypervibe-runtime@demo-project.iam.gserviceaccount.com"
+     },
+     "reports_invoker": {
+      "project": "demo-project",
+      "location": "us-west1",
+      "name": "${google_cloud_run_v2_job.reports.name}",
+      "role": "roles/run.invoker",
+      "member": "serviceAccount:hypervibe-runtime@demo-project.iam.gserviceaccount.com"
+     }
+    }
+   }
+  },
+  "workerpools.tf.json": {
+   "resource": {
+    "google_cloud_run_v2_worker_pool": {
+     "worker": {
+      "name": "worker",
+      "project": "demo-project",
+      "location": "us-west1",
+      "deletion_protection": false,
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-service": "worker"
+      },
+      "scaling": [
+       {
+        "scaling_mode": "MANUAL",
+        "manual_instance_count": 0
+       }
+      ],
+      "template": [
+       {
+        "service_account": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+        "containers": [
+         {
+          "image": "us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7",
+          "resources": [
+           {
+            "limits": {
+             "cpu": "1",
+             "memory": "512Mi"
+            }
+           }
+          ],
+          "env": [
+           {
+            "name": "QUEUE_BACKEND",
+            "value": "pubsub"
+           },
+           {
+            "name": "QUEUE_NAMES",
+            "value": "events"
+           },
+           {
+            "name": "QUEUE_SUBSCRIPTION_EVENTS",
+            "value": "projects/demo-project/subscriptions/events-58ffe53da2"
+           },
+           {
+            "name": "QUEUE_TOPIC_EVENTS",
+            "value": "projects/demo-project/topics/events-58ffe53da2"
+           },
+           {
+            "name": "DATABASE_URL",
+            "value_source": [
+             {
+              "secret_key_ref": [
+               {
+                "secret": "${google_secret_manager_secret.secret_52a41e6033a74329435f2536.secret_id}",
+                "version": "1"
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "name": "SIGNING_KEY",
+            "value_source": [
+             {
+              "secret_key_ref": [
+               {
+                "secret": "${google_secret_manager_secret.secret_1403ab4f6a51d092314f0a55.secret_id}",
+                "version": "1"
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "name": "SOURCE_KEY",
+            "value_source": [
+             {
+              "secret_key_ref": [
+               {
+                "secret": "${google_secret_manager_secret.secret_7395cfdd04cc5f69e3ddff16.secret_id}",
+                "version": "1"
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "name": "CLOUD_SQL_CONNECTION_NAME",
+            "value": "${google_sql_database_instance.db.connection_name}"
+           },
+           {
+            "name": "PGHOST",
+            "value": "/cloudsql/${google_sql_database_instance.db.connection_name}"
+           }
+          ],
+          "volume_mounts": [
+           {
+            "name": "cloudsql",
+            "mount_path": "/cloudsql"
+           }
+          ]
+         }
+        ],
+        "volumes": [
+         {
+          "name": "cloudsql",
+          "cloud_sql_instance": [
+           {
+            "instances": [
+             "${google_sql_database_instance.db.connection_name}"
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "lifecycle": [
+       {
+        "ignore_changes": [
+         "template[0].containers[0].image",
+         "template[0].containers[0].command",
+         "template[0].containers[0].args",
+         "client",
+         "client_version",
+         "scaling[0].manual_instance_count"
+        ]
+       }
+      ]
+     }
+    },
+    "google_workflows_workflow": {
+     "worker_waker": {
+      "name": "worker-waker",
+      "project": "demo-project",
+      "region": "us-west1",
+      "description": "Scales worker worker between 0 and 1 instance from its pending work.",
+      "service_account": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+      "deletion_protection": false,
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-environment": "env-123"
+      },
+      "source_contents": "{\"main\":{\"steps\":[{\"count\":{\"try\":{\"steps\":[{\"query\":{\"call\":\"http.post\",\"args\":{\"url\":\"https://sqladmin.googleapis.com/v1/projects/demo-project/instances/hv-staging-db/executeSql\",\"auth\":{\"type\":\"OAuth2\"},\"body\":{\"database\":\"app\",\"sqlStatement\":\"SELECT count(*) FROM jobs\",\"autoIamAuthn\":true,\"rowLimit\":\"1\",\"application\":\"hv-waker-worker\"}},\"result\":\"sql\"}},{\"read\":{\"assign\":[{\"pending\":\"$${int(sql.body.results[0].rows[0].values[0].value)}\"},{\"want\":\"$${if(pending > 0, 1, 0)}\"},{\"readError\":\"\"}]}}]},\"except\":{\"as\":\"error\",\"steps\":[{\"fallback\":{\"assign\":[{\"pending\":-1},{\"want\":1},{\"readError\":\"$${default(map.get(error, \\\"message\\\"), \\\"the pending-work query failed\\\")}\"}]}}]}}},{\"current\":{\"call\":\"http.get\",\"args\":{\"url\":\"https://run.googleapis.com/v2/projects/demo-project/locations/us-west1/workerPools/worker\",\"auth\":{\"type\":\"OAuth2\"}},\"result\":\"observed\"}},{\"report\":{\"assign\":[{\"outcome\":{\"instances\":\"$${want}\",\"pendingWork\":\"$${pending}\",\"readError\":\"$${readError}\"}}]}},{\"compare\":{\"switch\":[{\"condition\":\"$${default(map.get(observed.body.scaling, \\\"manualInstanceCount\\\"), 0) == want}\",\"return\":\"$${outcome}\"}]}},{\"scale\":{\"call\":\"http.patch\",\"args\":{\"url\":\"https://run.googleapis.com/v2/projects/demo-project/locations/us-west1/workerPools/worker?updateMask=scaling.manualInstanceCount\",\"auth\":{\"type\":\"OAuth2\"},\"body\":{\"scaling\":{\"scalingMode\":\"MANUAL\",\"manualInstanceCount\":\"$${want}\"}}}}},{\"done\":{\"return\":\"$${outcome}\"}}]}}"
+     }
+    },
+    "google_cloud_run_v2_worker_pool_iam_member": {
+     "worker_waker": {
+      "project": "demo-project",
+      "location": "us-west1",
+      "name": "${google_cloud_run_v2_worker_pool.worker.name}",
+      "role": "roles/run.developer",
+      "member": "serviceAccount:hypervibe-runtime@demo-project.iam.gserviceaccount.com"
+     }
+    }
+   }
+  },
+  "cloudrun.tf.json": {
+   "resource": {
+    "google_cloud_run_v2_service": {
+     "web": {
+      "name": "web",
+      "project": "demo-project",
+      "location": "us-west1",
+      "ingress": "INGRESS_TRAFFIC_ALL",
+      "deletion_protection": false,
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-service": "web"
+      },
+      "template": [
+       {
+        "service_account": "hypervibe-runtime@demo-project.iam.gserviceaccount.com",
+        "containers": [
+         {
+          "image": "us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7",
+          "ports": [
+           {
+            "container_port": 8080
+           }
+          ],
+          "resources": [
+           {
+            "limits": {
+             "cpu": "1",
+             "memory": "512Mi"
+            },
+            "cpu_idle": true
+           }
+          ],
+          "env": [
+           {
+            "name": "QUEUE_BACKEND",
+            "value": "pubsub"
+           },
+           {
+            "name": "QUEUE_NAMES",
+            "value": "events"
+           },
+           {
+            "name": "QUEUE_SUBSCRIPTION_EVENTS",
+            "value": "projects/demo-project/subscriptions/events-58ffe53da2"
+           },
+           {
+            "name": "QUEUE_TOPIC_EVENTS",
+            "value": "projects/demo-project/topics/events-58ffe53da2"
+           },
+           {
+            "name": "DATABASE_URL",
+            "value_source": [
+             {
+              "secret_key_ref": [
+               {
+                "secret": "${google_secret_manager_secret.secret_52a41e6033a74329435f2536.secret_id}",
+                "version": "1"
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "name": "SIGNING_KEY",
+            "value_source": [
+             {
+              "secret_key_ref": [
+               {
+                "secret": "${google_secret_manager_secret.secret_1403ab4f6a51d092314f0a55.secret_id}",
+                "version": "1"
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "name": "SOURCE_KEY",
+            "value_source": [
+             {
+              "secret_key_ref": [
+               {
+                "secret": "${google_secret_manager_secret.secret_7395cfdd04cc5f69e3ddff16.secret_id}",
+                "version": "1"
+               }
+              ]
+             }
+            ]
+           },
+           {
+            "name": "OBJECT_STORAGE_PROVIDER",
+            "value": "gcs"
+           },
+           {
+            "name": "OBJECT_STORAGE_BUCKET",
+            "value": "${google_storage_bucket.storage_media.name}"
+           },
+           {
+            "name": "GOOGLE_CLOUD_PROJECT",
+            "value": "demo-project"
+           },
+           {
+            "name": "GOOGLE_CLOUD_STORAGE_BUCKET",
+            "value": "${google_storage_bucket.storage_media.name}"
+           },
+           {
+            "name": "CLOUD_SQL_CONNECTION_NAME",
+            "value": "${google_sql_database_instance.db.connection_name}"
+           },
+           {
+            "name": "PGHOST",
+            "value": "/cloudsql/${google_sql_database_instance.db.connection_name}"
+           }
+          ],
+          "volume_mounts": [
+           {
+            "name": "cloudsql",
+            "mount_path": "/cloudsql"
+           }
+          ]
+         }
+        ],
+        "volumes": [
+         {
+          "name": "cloudsql",
+          "cloud_sql_instance": [
+           {
+            "instances": [
+             "${google_sql_database_instance.db.connection_name}"
+            ]
+           }
+          ]
+         }
+        ]
+       }
+      ],
+      "lifecycle": [
+       {
+        "ignore_changes": [
+         "template[0].containers[0].image",
+         "template[0].containers[0].command",
+         "template[0].containers[0].args",
+         "client",
+         "client_version"
+        ]
+       }
+      ]
+     }
+    },
+    "google_cloud_run_v2_service_iam_member": {
+     "web_public": {
+      "project": "demo-project",
+      "location": "us-west1",
+      "name": "${google_cloud_run_v2_service.web.name}",
+      "role": "roles/run.invoker",
+      "member": "allUsers"
+     }
+    }
+   }
+  },
+  "cloudsql.tf.json": {
+   "resource": {
+    "google_sql_database_instance": {
+     "db": {
+      "name": "hv-staging-db",
+      "project": "demo-project",
+      "region": "us-west1",
+      "database_version": "POSTGRES_16",
+      "deletion_protection": false,
+      "lifecycle": [
+       {
+        "ignore_changes": [
+         "settings[0].backup_configuration",
+         "settings[0].edition"
+        ],
+        "postcondition": [
+         {
+          "condition": "${self.settings[0].edition != \"ENTERPRISE_PLUS\" || !(startswith(self.settings[0].tier, \"db-custom-\") || contains([\"db-f1-micro\", \"db-g1-small\"], self.settings[0].tier))}",
+          "error_message": "This database uses Cloud SQL Enterprise Plus, but the requested size is only available on Enterprise. Hypervibe cannot apply this size change while preserving the database recovery settings."
+         }
+        ]
+       }
+      ],
+      "settings": [
+       {
+        "deletion_protection_enabled": false,
+        "edition": "ENTERPRISE",
+        "tier": "db-f1-micro",
+        "availability_type": "ZONAL",
+        "ip_configuration": [
+         {
+          "ipv4_enabled": true
+         }
+        ],
+        "data_api_access": "ALLOW_DATA_API",
+        "database_flags": [
+         {
+          "name": "cloudsql.iam_authentication",
+          "value": "on"
+         }
+        ],
+        "backup_configuration": [
+         {
+          "enabled": true,
+          "point_in_time_recovery_enabled": true
+         }
+        ],
+        "user_labels": {
+         "managed-by": "hypervibe",
+         "hv-environment": "env-123"
+        }
+       }
+      ]
+     }
+    },
+    "google_sql_database": {
+     "app": {
+      "name": "app",
+      "project": "demo-project",
+      "instance": "${google_sql_database_instance.db.name}",
+      "deletion_policy": "ABANDON"
+     }
+    },
+    "google_sql_user": {
+     "worker_waker": {
+      "name": "hypervibe-runtime@demo-project.iam",
+      "project": "demo-project",
+      "instance": "${google_sql_database_instance.db.name}",
+      "type": "CLOUD_IAM_SERVICE_ACCOUNT",
+      "deletion_policy": "ABANDON"
+     }
+    }
+   }
+  },
+  "memorystore.tf.json": {},
+  "pubsub.tf.json": {
+   "resource": {
+    "google_pubsub_topic": {
+     "queue_events": {
+      "name": "hv-staging-events",
+      "project": "demo-project",
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-queue": "events",
+       "hv-environment": "env-123"
+      }
+     }
+    },
+    "google_pubsub_subscription": {
+     "queue_events": {
+      "name": "hv-staging-events",
+      "project": "demo-project",
+      "topic": "${google_pubsub_topic.queue_events.id}",
+      "ack_deadline_seconds": 60,
+      "message_retention_duration": "604800s",
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-queue": "events",
+       "hv-environment": "env-123"
+      }
+     }
+    }
+   }
+  },
+  "storage.tf.json": {
+   "resource": {
+    "google_storage_bucket": {
+     "storage_media": {
+      "name": "hv-bucket-media",
+      "project": "demo-project",
+      "location": "US-WEST1",
+      "uniform_bucket_level_access": true,
+      "public_access_prevention": "enforced",
+      "force_destroy": false,
+      "labels": {
+       "managed-by": "hypervibe",
+       "hv-storage": "media",
+       "hv-environment": "env-123"
+      }
+     }
+    },
+    "google_storage_bucket_iam_member": {
+     "storage_media_runtime": {
+      "bucket": "${google_storage_bucket.storage_media.name}",
+      "role": "roles/storage.objectUser",
+      "member": "serviceAccount:hypervibe-runtime@demo-project.iam.gserviceaccount.com"
+     }
+    }
+   }
+  }
+ },
+ "resources": {
+  "google_cloud_run_v2_job.catchup": {
+   "actionId": "service:catchup",
+   "kind": "service",
+   "name": "catchup",
+   "billable": true,
+   "costAttributes": [
+    "template.*.template.*.containers.*.resources.*.limits.cpu",
+    "template.*.template.*.containers.*.resources.*.limits.memory"
+   ]
+  },
+  "google_cloud_scheduler_job.catchup_schedule": {
+   "actionId": "service:catchup",
+   "kind": "service",
+   "name": "catchup",
+   "billable": true,
+   "costAttributes": [
+    "template.*.template.*.containers.*.resources.*.limits.cpu",
+    "template.*.template.*.containers.*.resources.*.limits.memory"
+   ]
+  },
+  "google_cloud_run_v2_job_iam_member.catchup_invoker": {
+   "actionId": "service:catchup",
+   "kind": "service",
+   "name": "catchup",
+   "billable": true,
+   "costAttributes": [
+    "template.*.template.*.containers.*.resources.*.limits.cpu",
+    "template.*.template.*.containers.*.resources.*.limits.memory"
+   ]
+  },
+  "google_cloud_run_v2_job.reports": {
+   "actionId": "service:reports",
+   "kind": "service",
+   "name": "reports",
+   "billable": true,
+   "costAttributes": [
+    "template.*.template.*.containers.*.resources.*.limits.cpu",
+    "template.*.template.*.containers.*.resources.*.limits.memory"
+   ]
+  },
+  "google_cloud_scheduler_job.reports_schedule": {
+   "actionId": "service:reports",
+   "kind": "service",
+   "name": "reports",
+   "billable": true,
+   "costAttributes": [
+    "template.*.template.*.containers.*.resources.*.limits.cpu",
+    "template.*.template.*.containers.*.resources.*.limits.memory"
+   ]
+  },
+  "google_cloud_run_v2_job_iam_member.reports_invoker": {
+   "actionId": "service:reports",
+   "kind": "service",
+   "name": "reports",
+   "billable": true,
+   "costAttributes": [
+    "template.*.template.*.containers.*.resources.*.limits.cpu",
+    "template.*.template.*.containers.*.resources.*.limits.memory"
+   ]
+  },
+  "google_cloud_run_v2_service.web": {
+   "actionId": "service:web",
+   "kind": "service",
+   "name": "web",
+   "billable": true,
+   "costAttributes": [
+    "template.*.containers.*.resources.*.limits.cpu",
+    "template.*.containers.*.resources.*.limits.memory",
+    "template.*.containers.*.resources.*.cpu_idle",
+    "template.*.scaling.*.min_instance_count",
+    "template.*.scaling.*.max_instance_count",
+    "scaling.*.manual_instance_count"
+   ]
+  },
+  "google_cloud_run_v2_service_iam_member.web_public": {
+   "actionId": "service:web",
+   "kind": "service",
+   "name": "web",
+   "billable": true,
+   "costAttributes": [
+    "template.*.containers.*.resources.*.limits.cpu",
+    "template.*.containers.*.resources.*.limits.memory",
+    "template.*.containers.*.resources.*.cpu_idle",
+    "template.*.scaling.*.min_instance_count",
+    "template.*.scaling.*.max_instance_count",
+    "scaling.*.manual_instance_count"
+   ]
+  },
+  "google_cloud_run_v2_worker_pool.worker": {
+   "actionId": "service:worker",
+   "kind": "service",
+   "name": "worker",
+   "billable": true,
+   "costAttributes": [
+    "template.*.containers.*.resources.*.limits.cpu",
+    "template.*.containers.*.resources.*.limits.memory",
+    "template.*.containers.*.resources.*.cpu_idle",
+    "template.*.scaling.*.min_instance_count",
+    "template.*.scaling.*.max_instance_count",
+    "scaling.*.manual_instance_count"
+   ]
+  },
+  "google_workflows_workflow.worker_waker": {
+   "actionId": "service:worker",
+   "kind": "service",
+   "name": "worker",
+   "billable": true,
+   "costAttributes": [
+    "template.*.containers.*.resources.*.limits.cpu",
+    "template.*.containers.*.resources.*.limits.memory",
+    "template.*.containers.*.resources.*.cpu_idle",
+    "template.*.scaling.*.min_instance_count",
+    "template.*.scaling.*.max_instance_count",
+    "scaling.*.manual_instance_count"
+   ]
+  },
+  "google_cloud_scheduler_job.worker_waker": {
+   "actionId": "service:worker",
+   "kind": "service",
+   "name": "worker",
+   "billable": true,
+   "costAttributes": [
+    "template.*.containers.*.resources.*.limits.cpu",
+    "template.*.containers.*.resources.*.limits.memory",
+    "template.*.containers.*.resources.*.cpu_idle",
+    "template.*.scaling.*.min_instance_count",
+    "template.*.scaling.*.max_instance_count",
+    "scaling.*.manual_instance_count"
+   ]
+  },
+  "google_cloud_run_v2_worker_pool_iam_member.worker_waker": {
+   "actionId": "service:worker",
+   "kind": "service",
+   "name": "worker",
+   "billable": true,
+   "costAttributes": [
+    "template.*.containers.*.resources.*.limits.cpu",
+    "template.*.containers.*.resources.*.limits.memory",
+    "template.*.containers.*.resources.*.cpu_idle",
+    "template.*.scaling.*.min_instance_count",
+    "template.*.scaling.*.max_instance_count",
+    "scaling.*.manual_instance_count"
+   ]
+  },
+  "google_sql_database_instance.db": {
+   "actionId": "database:postgres",
+   "kind": "database",
+   "name": "postgres",
+   "dataBearing": true,
+   "billable": true,
+   "costAttributes": [
+    "settings.*.tier",
+    "settings.*.disk_size",
+    "settings.*.disk_type",
+    "settings.*.availability_type",
+    "settings.*.edition"
+   ]
+  },
+  "google_sql_database.app": {
+   "actionId": "database:postgres",
+   "kind": "database",
+   "name": "postgres",
+   "dataBearing": true,
+   "billable": true,
+   "costAttributes": [
+    "settings.*.tier",
+    "settings.*.disk_size",
+    "settings.*.disk_type",
+    "settings.*.availability_type",
+    "settings.*.edition"
+   ]
+  },
+  "google_sql_user.worker_waker": {
+   "actionId": "database:postgres",
+   "kind": "database",
+   "name": "postgres",
+   "dataBearing": true,
+   "billable": true,
+   "costAttributes": [
+    "settings.*.tier",
+    "settings.*.disk_size",
+    "settings.*.disk_type",
+    "settings.*.availability_type",
+    "settings.*.edition"
+   ]
+  },
+  "google_cloud_run_v2_job.release_command": {
+   "actionId": "release-job:migrations",
+   "kind": "service",
+   "name": "release command"
+  },
+  "google_pubsub_topic.queue_events": {
+   "actionId": "queue:events",
+   "kind": "queue",
+   "name": "events",
+   "dataBearing": true,
+   "billable": true
+  },
+  "google_pubsub_subscription.queue_events": {
+   "actionId": "queue:events",
+   "kind": "queue",
+   "name": "events",
+   "dataBearing": true,
+   "billable": true
+  },
+  "google_pubsub_topic_iam_member.queue_events_publisher": {
+   "actionId": "queue:events",
+   "kind": "queue",
+   "name": "events",
+   "dataBearing": true,
+   "billable": true
+  },
+  "google_pubsub_subscription_iam_member.queue_events_subscriber": {
+   "actionId": "queue:events",
+   "kind": "queue",
+   "name": "events",
+   "dataBearing": true,
+   "billable": true
+  },
+  "google_storage_bucket.storage_media": {
+   "actionId": "storage:media",
+   "kind": "storage",
+   "name": "media",
+   "dataBearing": true,
+   "billable": true
+  },
+  "google_storage_bucket_iam_member.storage_media_runtime": {
+   "actionId": "storage:media",
+   "kind": "storage",
+   "name": "media",
+   "dataBearing": true,
+   "billable": true
+  },
+  "google_cloud_run_v2_service.worker": {
+   "actionId": "service:worker",
+   "kind": "service",
+   "name": "worker",
+   "billable": true
+  },
+  "google_secret_manager_secret.secret_7395cfdd04cc5f69e3ddff16": {
+   "actionId": "secret-container:hv-staging-source-key",
+   "kind": "secret",
+   "name": "hv-staging-source-key",
+   "dataBearing": true
+  },
+  "google_secret_manager_secret.secret_1403ab4f6a51d092314f0a55": {
+   "actionId": "secret-container:hv-staging-signing-key",
+   "kind": "secret",
+   "name": "hv-staging-signing-key",
+   "dataBearing": true
+  },
+  "google_secret_manager_secret.secret_52a41e6033a74329435f2536": {
+   "actionId": "secret-container:hv-staging-database-url",
+   "kind": "secret",
+   "name": "hv-staging-database-url",
+   "dataBearing": true
+  },
+  "google_secret_manager_secret_iam_member.secret_7395cfdd04cc5f69e3ddff16": {
+   "actionId": "secret-runtime-access:hv-staging-source-key",
+   "kind": "secret",
+   "name": "hv-staging-source-key",
+   "requiresConfirm": true
+  },
+  "google_secret_manager_secret_iam_member.secret_1403ab4f6a51d092314f0a55": {
+   "actionId": "secret-runtime-access:hv-staging-signing-key",
+   "kind": "secret",
+   "name": "hv-staging-signing-key",
+   "requiresConfirm": true
+  },
+  "google_secret_manager_secret_iam_member.secret_52a41e6033a74329435f2536": {
+   "actionId": "secret-runtime-access:hv-staging-database-url",
+   "kind": "secret",
+   "name": "hv-staging-database-url",
+   "requiresConfirm": true
+  }
+ }
+}

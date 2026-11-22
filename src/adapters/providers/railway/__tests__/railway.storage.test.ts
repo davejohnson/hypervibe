@@ -597,6 +597,25 @@ describe('Railway storage buckets', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 
+  it('resolves the native S3 name through metadata-only GraphQL selections for the exact source bucket', async () => {
+    const identity = { project: { id: 'rp', buckets: { pageInfo: {hasNextPage:false}, edges: [{ node: { id: 'bucket-1', projectId: 'rp' } }] } },
+      environment: { id: 're', projectId: 'rp', deletedAt: null } };
+    const request = vi.fn().mockResolvedValueOnce(identity).mockResolvedValueOnce({ bucketS3Credentials: [{ bucketName: 'native-bucket' }] });
+    const adapter = new RailwayAdapter();
+    (adapter as unknown as { client: { request: typeof request } }).client = { request };
+    const storage = createRailwayStorageAdapter(adapter);
+    await expect(storage.getMigrationBucketName!({ projectId: 'rp' }, 'bucket-1')).rejects.toThrow('original project and environment');
+    expect(request).not.toHaveBeenCalled();
+    await expect(storage.getMigrationBucketName!({ projectId: 'rp', environmentId: 're' }, 'bucket-1')).resolves.toBe('native-bucket');
+    expect(String(request.mock.calls[1]![0])).toMatch(/bucketS3Credentials\([^)]*\)\s*\{\s*bucketName\s*\}/);
+    expect(request.mock.calls[1]![1]).toEqual({projectId:'rp',environmentId:'re',bucketId:'bucket-1'});
+    expect(request.mock.calls.map(call => String(call[0])).join(' ')).not.toMatch(/accessKey|secretAccessKey|variables\s*\(|config\s*\(/i);
+    request.mockResolvedValueOnce({...identity,environment:{...identity.environment,projectId:'another'}});
+    await expect(adapter.getMigrationBucketName('rp', 're', 'bucket-1')).rejects.toThrow('selected source');
+    request.mockResolvedValueOnce(identity).mockResolvedValueOnce({bucketS3Credentials:[]});
+    await expect(adapter.getMigrationBucketName('rp', 're', 'bucket-1')).rejects.toThrow('one native');
+  });
+
   it('retrieves S3 credentials internally without putting them in a receipt', async () => {
     const request = vi.fn().mockResolvedValueOnce({ bucketS3Credentials: [{
       endpoint: 'https://storage.railway.app', accessKeyId: 'key', secretAccessKey: 'secret',

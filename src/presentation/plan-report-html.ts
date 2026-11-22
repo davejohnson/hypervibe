@@ -130,6 +130,11 @@ export function renderPlanReportHtml(report: PlanReport, options: { localReview?
     ...cloudFacts(report).map(({ label, value, href }) => typeof value === 'string' ? fact(label, href
       ? `<a href="${escape(href)}" ${options.localReview ? 'target="_blank" rel="noopener noreferrer"' : 'rel="noreferrer"'} aria-label="${escape(label + ' ' + value)}">${escape(value)}</a>`
       : escape(value)) : ''),
+    ...(report.bucketCopy ? [
+      fact('Railway source bucket', escape(report.bucketCopy.sourceBucket)),
+      fact('Google Cloud destination bucket', `<a href="https://console.cloud.google.com/storage/browser/${encodeURIComponent(report.bucketCopy.targetBucket)}" target="_blank" rel="noopener noreferrer">${escape(report.bucketCopy.targetBucket)}</a>`),
+      fact('Copy job account', escape(report.bucketCopy.copyAccount)),
+    ] : []),
     fact('Plan ID', escape(report.planId)), fact('Created', report.createdAt && escape(report.createdAt)),
     fact('Approval', !options.localReview && report.approval === 'whole-plan' ? 'Approve the whole plan in the chat or terminal where you requested it.' : undefined),
   ].join('');

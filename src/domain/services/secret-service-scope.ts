@@ -5,7 +5,7 @@ import type { ProjectSpec } from '../spec/spec.schema.js';
  * Every other provider gives an environment's secrets to all of its services, so
  * a secret that names services is refused there instead of reaching all of them.
  */
-export const SECRET_SERVICE_SCOPE_PROVIDERS: readonly string[] = ['cloudrun'];
+export const SECRET_SERVICE_SCOPE_PROVIDERS: readonly string[] = ['cloudrun', 'aws', 'azure'];
 
 type ScopeSpec = {
   environments: Record<string, { hosting: { provider: string }; services: Record<string, unknown> } | undefined>;
@@ -35,6 +35,6 @@ export function secretServiceScopeProblems(spec: Pick<ProjectSpec, 'environments
   if (provider === undefined || SECRET_SERVICE_SCOPE_PROVIDERS.includes(provider)) return [];
   return Object.entries(scope.secrets ?? {})
     .filter(([, secret]) => secret?.services && secret.environments.includes(environmentName))
-    .map(([key]) => `Secret ${key} is limited to named services, which hosting provider "${provider}" does not support yet: every service in ${environmentName} would receive it. Remove "services" from the secret or host ${environmentName} on Cloud Run.`)
+    .map(([key]) => `Secret ${key} is limited to named services, which hosting provider "${provider}" does not support yet: every service in ${environmentName} would receive it. Remove "services" from the secret or host ${environmentName} on Google Cloud, AWS or Azure.`)
     .sort();
 }

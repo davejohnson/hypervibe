@@ -6944,6 +6944,52 @@ export class RailwayAdapter implements
     };
   }
 
+  /** Only the provider's bucket name may cross this read-only migration planning boundary. */
+  async getMigrationBucketName(projectId: string, environmentId: string, bucketId: string) {
+    if (!this.client) throw new Error('Railway is not connected.');
+    const inventory = gql`
+      query MigrationBucketScope($projectId: String!, $environmentId: String!, $after: String) {
+        project(id: $projectId) { id buckets(first: 100, after: $after) { edges { node { id projectId } } pageInfo { hasNextPage endCursor } } }
+        environment(id: $environmentId, projectId: $projectId) { id projectId deletedAt }
+      }
+    `;
+    let after: string | null = null;
+    const pages = new Set<string>();
+    for (;;) {
+      const identity: unknown = await this.client.request(inventory, { projectId, environmentId, after });
+      const project = isRecord(identity) && isRecord(identity.project) ? identity.project : undefined;
+      const environment = isRecord(identity) && isRecord(identity.environment) ? identity.environment : undefined;
+      const buckets = isRecord(project?.buckets) ? project.buckets : undefined;
+      const page = isRecord(buckets?.pageInfo) ? buckets.pageInfo : undefined;
+      const edges = buckets?.edges;
+      if (project?.id !== projectId || environment?.id !== environmentId || environment.projectId !== projectId
+        || environment.deletedAt !== null || typeof page?.hasNextPage !== 'boolean' || !Array.isArray(edges) || !edges.every(edge =>
+          isRecord(edge) && isRecord(edge.node) && typeof edge.node.id === 'string' && edge.node.projectId === projectId)) {
+        throw new Error('Railway could not verify the deployed bucket in the selected source environment.');
+      }
+      const matches = edges.filter(edge => edge.node.id === bucketId).length;
+      if (matches === 1) break;
+      if (matches === 0 && page.hasNextPage && typeof page.endCursor === 'string' && page.endCursor && !pages.has(page.endCursor)) {
+        after = page.endCursor;
+        pages.add(after);
+        continue;
+      }
+      throw new Error('Railway could not verify the deployed bucket in the selected source environment.');
+    }
+    const query = gql`
+      query GetBucketName($projectId: String!, $environmentId: String!, $bucketId: String!) {
+        bucketS3Credentials(projectId: $projectId, environmentId: $environmentId, bucketId: $bucketId) { bucketName }
+      }
+    `;
+    const result = await this.client.request<unknown>(query, { projectId, environmentId, bucketId });
+    const rows = isRecord(result) ? result.bucketS3Credentials : undefined;
+    if (!Array.isArray(rows) || rows.length !== 1 || !isRecord(rows[0]) || Object.keys(rows[0]).length !== 1
+      || typeof rows[0].bucketName !== 'string' || !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(rows[0].bucketName)) {
+      throw new Error('Railway did not confirm one native S3 bucket name in the selected source environment.');
+    }
+    return rows[0].bucketName;
+  }
+
   async getStorageCredentials(
     environment: Environment,
     externalId: string

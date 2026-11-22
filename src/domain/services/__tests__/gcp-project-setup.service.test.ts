@@ -6,7 +6,9 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { composeGcpProjectConfiguration, runGcpProjectSetup, type GcpProjectSetupParams } from '../gcp-project-setup.service.js';
-import { buildGcpBootstrapConfiguration, buildGcpPreparationConfiguration } from '../../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { buildGcpBootstrapConfiguration, buildGcpPreparationConfiguration, defaultGcpPreparationInput } from '../../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { transferBucketJob } from '../../../adapters/providers/gcp/tofu/transfer-bucket-job.js';
+import { transferIsolationContribution } from '../../../adapters/providers/gcp/tofu/transfer-isolation.js';
 import { transferSlot } from '../../../adapters/providers/gcp/tofu/transfer-slot.js';
 import { buildCiReleaseConfiguration } from '../../../adapters/providers/gcp/tofu/gcp-ci.backend.js';
 import type { EngineConfiguration } from '../../ports/infrastructure-engine.port.js';
@@ -101,6 +103,78 @@ describe('one saved project setup plan', () => {
     expect(managed.apply).not.toHaveBeenCalled();
     expect(await runGcpProjectSetup(confirm, { engine: managed })).toMatchObject({ success: true, planId: id });
     expect(readReviewHistory(directory).setups).toEqual([expect.objectContaining({ planId: id, status: 'applied', digest })]);
+  });
+  it('requires browser approval for the exact bucket job even when the caller confirms directly', async () => {
+    const target = { projectId: 'example-project', targetRegion: 'us-central1', sourceEnvironmentId: 'source',
+      sourceRailwayEnvironmentId: 'rail-env', sourceRailwayProjectId: 'rail-project', targetEnvironmentId: 'dest' };
+    const scope = { target, storageName: 'documents', sourceBucketId: 'native-source', sourceBucketName: 'source-documents',
+      targetBucket: 'hv-12345678-dest-documents' };
+    const before = { projectNumber: '123', copyUniqueId: '456', bucketTimeCreated: '2026-01-02T00:00:00Z', jobUid: null, viewer: false, creator: false };
+    const after = { ...before, jobUid: '26d6ee00-846b-4a52-b63e-a80f93412a36', viewer: true, creator: true };
+    const job = transferBucketJob(scope);
+    const slot = transferSlot(target);
+    const runtime = 'app-runtime@example-project.iam.gserviceaccount.com';
+    const isolation = transferIsolationContribution({ target, targetEnvironmentName: 'dest', projectNumber: before.projectNumber,
+      runtimeEmail: runtime, runtimeUniqueId: '789', copyUniqueId: before.copyUniqueId,
+      bucket: target.projectId + '-hv-build-source', bucketTimeCreated: '2026-01-01T00:00:00Z', secretCreateTime: '2026-01-01T00:00:00Z' });
+    const input = defaultGcpPreparationInput(target.projectId, 'deploy@example-project.iam.gserviceaccount.com', runtime);
+    input.runtimeGrantRoles.push('roles/storage.objectUser');
+    const params = { ...parameters(job.id), contribution: { id: job.id, configuration: job.configuration },
+      transferBucketJobReview: { scope, evidence: before }, observeBucketJobAfterApply: vi.fn(async () => after) };
+    const paths = engineStatePaths({ provider: 'gcp', projectId: params.projectId, environmentId: params.gcpProjectId,
+      partition: 'project-shared' }, directory);
+    ensureEngineStateDirectories(paths);
+    fs.writeFileSync(path.join(paths.root, 'setup-manifest.json'), JSON.stringify({ contributions: {
+      bootstrap: buildGcpPreparationConfiguration(input), [slot.id]: slot.configuration, [isolation.id]: isolation.configuration,
+    } }), { mode: 0o600 });
+
+    const jobPath = 'projects/example-project/locations/us-central1/jobs/' + job.jobId;
+    const definitions = [{ address: job.addresses.job, values: job.spec, owned: { ...job.spec, uid: after.jobUid, id: jobPath, execution_count: 0 } },
+      ...job.grants.map(grant => ({ address: job.addresses[grant.kind], values: grant.spec, owned: { ...grant.spec,
+        id: 'b/' + scope.targetBucket + '/' + grant.spec.role + '/' + grant.spec.member } }))];
+    const rows = definitions.map(({ address, values, owned }) => ({
+      address, type: address.split('.')[0], mode: 'managed', provider_name: 'registry.opentofu.org/hashicorp/google',
+      change: { actions: ['create'], before: null, after: values }, values: owned,
+    }));
+    const managed = engine();
+    const plan = managed.plan.getMockImplementation()!;
+    managed.plan.mockImplementation(async (input: Parameters<typeof plan>[0] & { verifyPlannedChanges?: (raw: unknown) => boolean }) => {
+      expect(input.verifyPlannedChanges?.({ resource_changes: rows })).toBe(true);
+      return plan({ ...input, configuration: job.configuration });
+    });
+    const deps = { engine: { ...managed, inspectState: async <T>(input: { project: (raw: unknown) => T }) => ({
+      ok: true as const, present: true as const,
+      value: input.project({ values: { root_module: { resources: managed.apply.mock.calls.length ? rows : [] } } }),
+    }) } };
+
+    const preview = await runGcpProjectSetup(params, deps);
+    expect(preview, preview.error).toMatchObject({ success: true, mode: 'preview' });
+    const planId = preview.planId!;
+    // Supplying the ID and explicitly turning off the optional caller gate
+    // cannot authorize the job or grants without the review for this plan.
+    const confirm = { ...params, confirm: true, gcpSetupPlanId: planId, requireBrowserApproval: false };
+    const denied = await runGcpProjectSetup(confirm, deps);
+    expect(denied).toMatchObject({ success: false, error: expect.stringMatching(/open the saved review/i) });
+    expect(managed.apply).not.toHaveBeenCalled();
+    expect(params.observeBucketJobAfterApply).not.toHaveBeenCalled();
+
+    const file = fs.readdirSync(paths.plans).find(name => /^setup-[a-f0-9]{64}\.json$/.test(name))!;
+    const saved = JSON.parse(fs.readFileSync(path.join(paths.plans, file), 'utf8'));
+    const digest = reviewDigest('setup', params.projectId, params.gcpProjectId, planId, saved);
+    recordReviewApproval(directory, planId, digest, digest, () => true);
+    const changed = await runGcpProjectSetup({ ...confirm, transferBucketJobReview: { scope, evidence: {
+      ...before, bucketTimeCreated: '2026-01-03T00:00:00Z',
+    } } }, deps);
+    expect(changed.success).toBe(false);
+    expect(managed.apply).not.toHaveBeenCalled();
+    const approved = await runGcpProjectSetup(confirm, deps);
+    expect(approved, approved.error).toMatchObject({ success: true, planId });
+    expect(managed.apply).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      planId, approvedAddresses: expect.arrayContaining(Object.values(job.addresses)),
+    }));
+    expect(managed.apply.mock.calls[0]![0].approvedAddresses).toHaveLength(3);
+    expect(params.observeBucketJobAfterApply).toHaveBeenCalledOnce();
+    expect(managed.plan).toHaveBeenCalledOnce();
   });
   it('confirms the saved artifact without planning again and consumes its approval', async () => {
     const managed = engine();

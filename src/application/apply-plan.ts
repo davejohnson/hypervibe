@@ -819,7 +819,7 @@ export async function executePlanApply(ctx: CommandContext, params: {
       planId, confirmActions: params.confirmActions });
     return engineOutcome.kind === 'blocked'
       ? { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'gcp', reason: engineOutcome.reason }] }
-      : { ...engineOutcome, actionScopedWarnings: [] };
+      : { kind: engineOutcome.kind, envName: engineOutcome.envName, result: engineOutcome.result, actionScopedWarnings: engineOutcome.warnings ?? [] };
   }
   const secretsOnly = planScope === 'secrets';
   const retainedCleanupOnly = planScope === 'retained-cleanup';

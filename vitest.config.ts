@@ -8,6 +8,7 @@ import { configDefaults, defineConfig } from 'vitest/config';
 // simply runs with the fast group, so nothing can be skipped by mistake.
 const heavyTests = [
   'src/__tests__/backup-runner-image.test.ts',
+  'src/adapters/providers/gcp/__tests__/gcp-transfer-bucket-image.test.ts',
   'src/__tests__/macos-package-smoke.test.ts',
   'src/__tests__/packaged-mcp.test.ts',
   'src/adapters/dns/tofu/__tests__/dns-provider-validation.test.ts',

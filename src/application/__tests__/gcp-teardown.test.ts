@@ -67,7 +67,7 @@ describe('the last Google teardown step', () => {
   const updates: Array<Record<string, unknown>> = [];
   const ctx = { repos: { environments: { findById: () => environment, updatePlatformBindings: (_id: string, value: Record<string, unknown>) => { updates.push(value); } } } } as never;
   const spec = projectSpecSchema.parse({ version: 1, project: 'demo', environments: { test: { hosting: { provider: 'cloudrun' }, services: { web: {} } }, other: { hosting: { provider: 'cloudrun' }, services: { web: {} } } } });
-  const cleanup = action(GCP_TEARDOWN_CLEANUP_OPERATION, { workloads: [{ name: 'web', kind: 'services', resource: 'web-1' }], instanceName: 'hv-test-db-aaaaaa', buckets: ['hv-1-test-files'] });
+  const cleanup = action(GCP_TEARDOWN_CLEANUP_OPERATION, { workloads: [{ name: 'web', kind: 'services', resource: 'web-1' }], instanceName: 'hv-test-db-aaaaaa', buckets: ['hv-1-test-files'], cacheInstanceName: 'hv-test-cache-bbbbbb', topics: ['hv-test-jobs'] });
   const run = () => finishGcpTeardown(ctx, 'token', { gcpProjectId: 'demo', region: 'us-central1', environment } as never, { project: { id: 'p', name: 'demo' } as never, spec }, 'test', cleanup);
   const answers = (statusFor: (url: string) => number, secrets: string[] = []) => vi.stubGlobal('fetch', vi.fn(async (url: string) =>
     url.includes('/secrets?') ? json(200, { secrets: secrets.map((name) => ({ name: `projects/demo/secrets/${name}` })) }) : json(statusFor(url))));
@@ -85,6 +85,8 @@ describe('the last Google teardown step', () => {
     ['the database', (url: string) => url.includes('sqladmin') ? 200 : 404, [] as string[], 'hv-test-db-aaaaaa'],
     ['a bucket', (url: string) => url.includes('storage.googleapis.com') ? 200 : 404, [], 'hv-1-test-files'],
     ['a service', (url: string) => url.includes('run.googleapis.com') ? 200 : 404, [], 'web-1'],
+    ['the cache', (url: string) => url.includes('redis.googleapis.com') ? 200 : 404, [], 'hv-test-cache-bbbbbb'],
+    ['a queue', (url: string) => url.includes('pubsub.googleapis.com') ? 200 : 404, [], 'hv-test-jobs'],
     ['a secret', () => 404, ['hv-test-api-key'], 'hv-test-api-key'],
   ])('keeps the environment in the spec while %s still exists', async (_what, statusFor, secrets, named) => {
     updates.length = 0;
@@ -97,7 +99,7 @@ describe('the last Google teardown step', () => {
   it('treats an unreadable answer as unknown, never as gone', async () => {
     updates.length = 0;
     const merge = vi.spyOn(SpecStore.prototype, 'merge').mockReturnValue(undefined as never);
-    for (const unreadable of ['sqladmin', 'storage.googleapis.com', 'run.googleapis.com', '/secrets?']) {
+    for (const unreadable of ['sqladmin', 'storage.googleapis.com', 'run.googleapis.com', 'redis.googleapis.com', 'pubsub.googleapis.com', '/secrets?']) {
       vi.stubGlobal('fetch', vi.fn(async (url: string) => url.includes(unreadable) ? json(403) : url.includes('/secrets?') ? json(200, { secrets: [] }) : json(404)));
       expect(await run()).toMatchObject({ success: false, status: 'blocked' });
     }
