@@ -43,6 +43,15 @@ export interface EngineConnectStep {
  * selects an engine here and calls it; it does not branch on a cloud's name.
  * A capability a cloud lacks is an absent optional method, never a silent no-op.
  */
+export interface EngineProjectRemoval {
+  success: boolean;
+  mode: 'preview' | 'confirm';
+  /** `blocked`: nothing was deleted. `pending`: a deletion was sent and its outcome is not confirmed. */
+  status?: 'blocked' | 'pending';
+  error?: string;
+  [detail: string]: unknown;
+}
+
 export interface CloudEngine {
   id: 'gcp' | 'aws' | 'azure';
   /** `hosting.provider` value this engine serves. */
@@ -62,6 +71,11 @@ export interface CloudEngine {
   plan(ctx: CommandContext, params: EnginePlanParams): Promise<EnginePlanOutcome>;
   /** Removes a whole environment as one reviewed plan. */
   planTeardown?(ctx: CommandContext, params: EnginePlanParams & { deleteFinalSnapshot?: boolean }): Promise<InfrastructurePlanResult | { blocked: string[] }>;
+  /**
+   * Deletes the cloud project that Hypervibe's own setup created, once nothing is left in it.
+   * A preview until called again with that preview's id and `confirm`.
+   */
+  removeProject?(params: { project: Project; cloudProjectId: string; previewId?: string; confirm?: boolean }): Promise<EngineProjectRemoval>;
   apply(ctx: CommandContext, params: EngineApplyParams): Promise<EngineApplyOutcome>;
   release(ctx: CommandContext, params: EngineReleaseParams): Promise<EngineReleaseOutcome>;
   /** Generates a repository workflow only after the exact applied CI binding exists. */
@@ -77,6 +91,7 @@ const gcp: CloudEngine = {
   id: 'gcp', hostingProvider: 'cloudrun', migration: 'full',
   plan: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpInfrastructureEngine(ctx, params),
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpTeardown(ctx, params),
+  removeProject: async ({ project, cloudProjectId, previewId, confirm }) => ({ ...await (await import('./gcp-project-removal.js')).runGcpProjectRemoval({ project, gcpProjectId: cloudProjectId, previewId, confirm }) }),
   apply: async (ctx, params) => (await import('./infrastructure-engine.js')).applyGcpInfrastructureEngine(ctx, params),
   release: async (ctx, params) => (await import('./infrastructure-engine.js')).releaseGcpEngineServices(ctx, params),
   secretStore: async (ctx, project, spec, environmentName) => (await import('./infrastructure-engine.js')).gcpSecretStore(ctx, project, spec, environmentName),
@@ -129,6 +144,11 @@ export function cloudEngineForPlan(document: { environmentName: string; engine?:
 }
 
 /** The engine whose guided connection serves a connection provider name, if it has one. */
+/** The engine that can delete a cloud project created through this connection provider's setup. */
+export function cloudEngineForProjectRemoval(provider: string): CloudEngine | undefined {
+  return cloudEngines.find((engine) => engine.removeProject && engine.hostingProvider === provider);
+}
+
 export function cloudEngineForConnection(provider: string): CloudEngine | undefined {
   return cloudEngines.find((engine) => engine.connect && engine.hostingProvider === provider);
 }

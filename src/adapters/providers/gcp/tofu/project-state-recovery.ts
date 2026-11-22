@@ -45,6 +45,19 @@ export function matchesProjectInstance(document: unknown, observed: ObservedUnli
     && values.deletion_policy === 'PREVENT' && values.billing_account === '';
 }
 
+/** The project number of the one current `google_project.hypervibe` instance for this project id; undefined for anything else. */
+export function bootstrappedProjectNumber(document: unknown, projectId: string): string | undefined {
+  const rows = record(record(record(document).values).root_module).resources;
+  if (!Array.isArray(rows)) return undefined;
+  const matches = rows.map(record).filter(row => row.address === bootstrapProjectAddress);
+  if (matches.length !== 1) return undefined;
+  const row = matches[0]!;
+  const values = record(row.values);
+  return row.mode === 'managed' && row.type === 'google_project' && row.provider_name === 'registry.opentofu.org/hashicorp/google'
+    && !('index' in row) && !('deposed_key' in row) && row.tainted !== true
+    && values.project_id === projectId && typeof values.number === 'string' && /^[1-9]\d*$/.test(values.number) ? values.number : undefined;
+}
+
 /** This setup owns one project. Its own action must identify exactly that instance. */
 export function soleProjectAction(actions: PlanAction[]): PlanAction | undefined {
   const matching = actions.filter(action => action.id === 'project-setup:' + bootstrapProjectAddress

@@ -130,10 +130,49 @@ reviewed plan; every action needs its own confirmation:
 
 The database is deleted with its backups, and so are the environment's secrets,
 including values imported from another host. An environment with custom domains is refused until the domains
-are removed from the spec and applied, because teardown does not change DNS. The
-project-level setup (the Google project, its identities, the shared image
-repository and the state bucket) stays; removing it is still open in
-[#103](https://github.com/davejohnson/hypervibe/issues/103).
+are removed from the spec and applied, because teardown does not change DNS. Environment
+teardown leaves the project-level setup (the Google project, its identities, the
+shared image repository and the build bucket) in place.
+
+### Removing the Google project
+
+`hv_connections provider="cloudrun" action="remove-project"` with `project`, the
+exact `gcpProjectId` and `adminAuth="default"` deletes a Google project that
+Hypervibe's own setup created. It is a preview until it is called again with the
+preview's `previewId` and `confirm=true`; a preview lasts ten minutes.
+
+It refuses, and deletes nothing, when:
+
+- Hypervibe did not create the project. The evidence is the project in its own
+  saved setup state, with the same project number Google reports now. A project
+  Hypervibe was pointed at is never deleted.
+- Hypervibe still records an environment in the project. Tear each one down first.
+- The project still holds a Cloud Run service, job or worker pool, a database, a
+  bucket other than Hypervibe's build bucket, a secret, a Redis cache, a queue or
+  queue subscription, a reCAPTCHA key or an API key.
+- Any of those could not be read. A failed or partial answer is unknown, not empty.
+
+Google will not list a kind whose API is switched off in the project, and
+resources can outlive their API being switched off. The preview names those
+kinds as not checked instead of counting them as empty. It does not look for
+schedules, workflows, container images, regional secrets or Google sign-in
+clients at all.
+
+The preview goes to the user to decide; Hypervibe tells the agent to ask, and
+does not hand back a ready-made confirm call. A preview is used once.
+
+Every check is made again on confirm, immediately before the one delete call.
+Everything else in the project goes with it; the preview says so.
+
+Google keeps a deleted project for 30 days, during which it can be restored in
+the Google Cloud console. Hypervibe reports success only once Google shows the
+project as scheduled for deletion. It then removes its saved Cloud Run and Cloud
+SQL connections and setup record for that project, and renames the saved setup
+state (`project-shared.removed-<time>`) instead of deleting it. If the result
+could not be confirmed, it says so and changes nothing locally; preview again.
+
+Not built: removing Hypervibe's setup from a project it did not create
+([#103](https://github.com/davejohnson/hypervibe/issues/103)).
 
 ## Release ownership with CI (Cloud Run)
 

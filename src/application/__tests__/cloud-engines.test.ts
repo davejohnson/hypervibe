@@ -26,5 +26,7 @@ describe('cloud engine registry', () => {
 
   it('offers teardown only where an engine implements it', () => {
     expect(cloudEngines.filter((engine) => engine.planTeardown).map((engine) => engine.id)).toEqual(['gcp', 'aws', 'azure']);
+    // Only Google Cloud has a project that Hypervibe itself creates.
+    expect(cloudEngines.filter((engine) => engine.removeProject).map((engine) => engine.id)).toEqual(['gcp']);
   });
 });
