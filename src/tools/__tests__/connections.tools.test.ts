@@ -30,7 +30,10 @@ vi.mock('../../domain/services/gcp-bootstrap.service.js', async (original) => {
   return { ...actual, runGcpBootstrap: vi.fn() };
 });
 
+vi.mock('../../domain/services/gcp-project-removal.service.js', () => ({ runGcpProjectRemoval: vi.fn() }));
+
 import { runGcpBootstrap } from '../../domain/services/gcp-bootstrap.service.js';
+import { runGcpProjectRemoval } from '../../domain/services/gcp-project-removal.service.js';
 import * as cloudPrepare from '../../domain/services/cloud-prepare.execute.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../../application/context.js';
@@ -58,6 +61,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.mocked(runGcpBootstrap).mockReset();
+  vi.mocked(runGcpProjectRemoval).mockReset();
   delete process.env.HV_TEST_RAILWAY_TOKEN;
   for (const name of githubTokenEnvironmentNames) {
     const original = originalGitHubTokenEnvironment[name];
@@ -390,6 +394,40 @@ describe('hv_connections', () => {
       expect(result.error.message).toContain('options for another connection action');
     }
     expect(new ConnectionRepository().findAll()).toEqual([]);
+    await t.close();
+  });
+
+  it('previews a Google project removal and hands back the exact confirm call', async () => {
+    const project = new ProjectRepository().create({ name: 'gcp-removal-app', defaultPlatform: 'cloudrun', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    vi.mocked(runGcpProjectRemoval).mockResolvedValue({ success: true, mode: 'preview', gcpProjectId: 'hv-demo-12345678', projectNumber: '4242', previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10' });
+    const t = await makeClient();
+    const input = { provider: 'cloudrun', action: 'remove-project', project: project.name, gcpProjectId: 'hv-demo-12345678', adminAuth: 'default' };
+    const result = await t.call('hv_connections', input);
+    expect(result.ok).toBe(true);
+    expect(result.data.confirmCall).toEqual({ tool: 'hv_connections', arguments: { ...input, previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10', confirm: true } });
+    expect(runGcpProjectRemoval).toHaveBeenCalledWith({ project, gcpProjectId: 'hv-demo-12345678', previewId: undefined, confirm: false });
+
+    vi.mocked(runGcpProjectRemoval).mockResolvedValue({ success: false, mode: 'confirm', status: 'blocked', error: 'still holds resources', found: ['databases: hv-db'] });
+    const refused = await t.call('hv_connections', { ...input, previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10', confirm: true });
+    expect(refused.ok).toBe(false);
+    expect(refused.error).toMatchObject({ code: 'VALIDATION', message: 'still holds resources', details: { found: ['databases: hv-db'] } });
+    await t.close();
+  });
+
+  it.each([
+    ['another provider', { provider: 'cloudsql' }],
+    ['no Google project id', { gcpProjectId: undefined }],
+    ['no project', { project: undefined }],
+    ['no administrator sign-in', { adminAuth: undefined }],
+    ['an option from another action', { billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' }],
+    ['a preview id on another action', { action: 'bootstrap', previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10' }],
+  ])('never starts a Google project removal with %s', async (_what, change) => {
+    const project = new ProjectRepository().create({ name: 'gcp-removal-guard', defaultPlatform: 'cloudrun', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'cloudrun', action: 'remove-project', project: project.name, gcpProjectId: 'hv-demo-12345678', adminAuth: 'default', ...change });
+    expect(result.ok).toBe(false);
+    expect(runGcpProjectRemoval).not.toHaveBeenCalled();
+    expect(runGcpBootstrap).not.toHaveBeenCalled();
     await t.close();
   });
 

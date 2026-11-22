@@ -253,7 +253,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         const removal = await runGcpProjectRemoval({ project: owner, gcpProjectId, previewId, confirm: explicitConfirmation === true });
         const { success: _success, error, ...data } = removal;
         if (!removal.success) {
-          return commandError(removal.status === 'blocked' ? 'VALIDATION' : 'PROVIDER_ERROR', error ?? 'The Google project was not removed.', { ...data, next: ['hv_connections'] });
+          return commandError(removal.status === 'blocked' ? 'VALIDATION' : 'PROVIDER_ERROR', error ?? 'The Google project was not removed.', { details: data, next: ['hv_connections'] });
         }
         return commandSuccess({ project: { id: owner.id, name: owner.name }, ...data,
           ...(removal.mode === 'preview' ? { confirmCall: { tool: 'hv_connections', arguments: { provider: 'cloudrun', action: 'remove-project', project: owner.name, gcpProjectId, adminAuth: 'default', previewId: removal.previewId, confirm: true } } } : {}) });
