@@ -7,7 +7,7 @@ import { CLOUD_RUN_BUILD_IDENTITY_PROJECT_ROLES, CLOUD_RUN_BUILD_IDENTITY_SELF_R
 
 export {
   composeGcpProjectConfiguration, executeGcpProjectSetup, getGcpProjectSetupContribution, getGcpProjectSetupContributions, getGcpRuntimeIsolation,
-  hasGcpProjectSetup, type GcpProjectSetupContribution, type GcpProjectSetupDependencies,
+  hasGcpProjectSetup, readBootstrappedProject, type GcpProjectSetupContribution, type GcpProjectSetupDependencies,
   type GcpProjectSetupParams, type GcpProjectSetupResult,
 } from './project-setup-executor.js';
 

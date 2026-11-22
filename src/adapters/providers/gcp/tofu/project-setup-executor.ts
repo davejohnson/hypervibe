@@ -14,7 +14,7 @@ import type { EngineAuthentication, EngineConfiguration, EngineStateIdentity, In
 import { engineSegmentOf } from '../../../../domain/ports/infrastructure-engine.port.js';
 import type { PlanAction } from '../../../../domain/plan/plan.types.js';
 import {
-  bootstrapProjectAddress, isInPlaceBillingUpdate, matchesProjectInstance, matchesRecoveryObservation, selectedProjectBilling, soleProjectAction, verifyBootstrapBillingPlan,
+  bootstrapProjectAddress, bootstrappedProjectNumber, isInPlaceBillingUpdate, matchesProjectInstance, matchesRecoveryObservation, selectedProjectBilling, soleProjectAction, verifyBootstrapBillingPlan,
   type GcpProjectRecovery, type ObservedLinkedProject, type ObservedUnlinkedProject, type RecoveryBinding,
 } from './project-state-recovery.js';
 
@@ -201,6 +201,31 @@ function mergeValue(left: unknown, right: unknown, location: string): unknown {
   throw new Error(`Project setup contributions disagree at ${location}; preview an explicit shared configuration change.`);
 }
 /** Compose all retained project ownership before planning any new access. */
+/**
+ * The number of the Google project this setup created, read from its own saved
+ * OpenTofu state. `created: false` means the setup was pointed at a project that
+ * already existed, or never finished creating one.
+ */
+export async function readBootstrappedProject(backend: InfrastructureEngineBackend,
+  params: { projectId: string; gcpProjectId: string; auth: EngineAuthentication; dataDir?: string },
+  overrides?: { engine: Partial<Pick<OpenTofuEngine, 'inspectState'>> },
+): Promise<{ ok: true; created: false } | { ok: true; created: true; projectNumber: string } | { ok: false; error: string }> {
+  const state: EngineStateIdentity = { provider: 'gcp', projectId: params.projectId, environmentId: params.gcpProjectId, partition: 'project-shared' };
+  const paths = engineStatePaths(state, params.dataDir);
+  const manifest = readJson<SetupManifest>(path.join(paths.root, 'setup-manifest.json'), { contributions: {} });
+  if (!manifest.contributions.bootstrap?.resources['google_project.hypervibe'] || !fs.existsSync(paths.statePath)) return { ok: true, created: false };
+  let engine = overrides?.engine;
+  if (!engine) {
+    const binary = await ensureEngineBinary();
+    if (!binary.ok) return { ok: false, error: binary.error };
+    engine = new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), dataDir: params.dataDir });
+  }
+  if (!engine.inspectState) return { ok: false, error: 'The saved setup state cannot be read.' };
+  const read = await engine.inspectState({ backend, configuration: composeGcpProjectConfiguration(manifest.contributions), auth: params.auth, state,
+    project: (document) => bootstrappedProjectNumber(document, params.gcpProjectId) });
+  if (!read.ok) return { ok: false, error: read.error };
+  return read.present && read.value ? { ok: true, created: true, projectNumber: read.value } : { ok: true, created: false };
+}
 export function composeGcpProjectConfiguration(contributions: Record<string, EngineConfiguration>): EngineConfiguration {
   const merged: EngineConfiguration = { files: {}, resources: {}, imports: {} };
   for (const configuration of Object.values(contributions)) {
