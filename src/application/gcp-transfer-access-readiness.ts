@@ -51,7 +51,7 @@ export function originalProbeScope(input: AccessProbeRequest) {
   );
   return scope;
 }
-export async function inspectProbeReadiness(input: AccessProbeRequest, token: string) {
+export async function inspectTransferIsolation(input: AccessProbeRequest, token: string) {
   const scope = originalProbeScope(input),
     target = scope.target,
     slot = transferSlot(target),
@@ -94,10 +94,13 @@ export async function inspectProbeReadiness(input: AccessProbeRequest, token: st
     state.ok && state.present && state.value,
     'The original transfer resources and narrowed app grants could not be matched to their private infrastructure state.',
   );
+  return { scope, evidenceDigest: evidence.evidenceDigest, inventoryDigest: probeDigest(destroyed) };
+}
+export async function inspectProbeReadiness(input: AccessProbeRequest, token: string) {
+  const isolation = await inspectTransferIsolation(input, token);
+  const scope = isolation.scope, project = scope.target.projectId, slot = transferSlot(scope.target);
   const readiness = {
-    scope,
-    evidenceDigest: evidence.evidenceDigest,
-    inventoryDigest: probeDigest(destroyed),
+    ...isolation,
     softDeleteSeconds: await checkProbePermissions(scope, token, input.fileOnly),
   };
   if (input.fileOnly) return { ...readiness, sign: undefined };

@@ -20,6 +20,12 @@ export function groupPlanNotices(report: PlanReport) {
     if (cleanup) next.push(cleanup);
     return { warnings: report.warnings, costs, next };
   }
+  if (report.scope === 'Google Cloud project setup' && report.setupPurpose === 'railway-bucket-copy') {
+    return { warnings: report.warnings, costs, next: [
+      'Hypervibe will prepare an unscheduled copy job and give its account permission to read and add objects in the selected destination bucket. Existing documents are preserved.',
+      'A separate approval is required to pass Railway credentials to the job and start copying documents. Google Cloud charges for the job when it runs.',
+    ] };
+  }
   if (report.scope === 'Google Cloud project setup' && report.setupPurpose === 'railway-transfer-isolation') {
     return { warnings: report.warnings, costs, next: [railwayTransferIsolationNote] };
   }

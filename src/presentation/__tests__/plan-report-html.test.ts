@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import type { PlanReport, PlanReportAction } from '../../domain/plan/plan-report.js';
+import { makePlanReport, type PlanReport, type PlanReportAction } from '../../domain/plan/plan-report.js';
 import { renderPlanReportHtml } from '../plan-report-html.js';
 import { gcpInfrastructureNotes } from '../../domain/plan/gcp-infrastructure-notes.js';
 import { buildReportMap } from '../plan-report-map.js';
@@ -14,6 +14,17 @@ const report = (actions: PlanReportAction[], extra: Partial<PlanReport> = {}): P
 });
 
 describe('standalone infrastructure plan report', () => {
+  it('shows exactly which buckets and account the user is approving and when the files move', () => {
+    const scope = { storageName: 'documents', sourceBucket: 'documents-railway-abc', targetBucket: 'gcp-documents-example',
+      copyAccount: 'copy@example.iam.gserviceaccount.com' };
+    const input = { ...report([]), scope: 'Google Cloud project setup', setupPurpose: 'railway-bucket-copy' as const };
+    const html = renderPlanReportHtml(makePlanReport({ ...input, bucketCopy: scope }), { localReview: true });
+    expect(html).toContain(scope.sourceBucket);
+    expect(html).toContain('href="https://console.cloud.google.com/storage/browser/' + scope.targetBucket + '"');
+    expect(html).toContain(scope.copyAccount);
+    expect(html).toContain('separate approval');
+    expect(makePlanReport({ ...input, bucketCopy: { ...scope, targetBucket: '../secret' } }).bucketCopy).toBeUndefined();
+  });
   it('distinguishes the stored secret and its read permission, including previously saved plans', () => {
     const key = 'hv-example-api-key';
     const stored = action('secret-container:' + key, key, { kind: 'secret', type: 'noop' });
