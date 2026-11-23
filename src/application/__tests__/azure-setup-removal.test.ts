@@ -262,6 +262,7 @@ describe('removing Hypervibe\'s Azure setup for a project', () => {
     ['a "not found" that is not Azure saying the group is gone', (_method: string, target: string) => target === SCOPE ? json(404, { error: { code: 'SubscriptionNotFound' } }) : undefined],
     ['a subscription this sign-in cannot read', (_method: string, target: string) => target === `/subscriptions/${SUB}` ? json(404, { error: { code: 'SubscriptionNotFound' } }) : undefined],
     ['an unreadable app registration', (_method: string, target: string) => target.includes('/applications(appId') ? json(403, { error: { code: 'Authorization_RequestDenied' } }) : undefined],
+    ['a deleted vault with the right name but without Hypervibe\'s tag', (_method: string, target: string) => target.endsWith('/deletedVaults') ? json(200, { value: [{ name: VAULT, properties: { vaultId: VAULT_ID, location: 'westus2', purgeProtectionEnabled: false, tags: {} } }] }) : undefined],
     ['a deleted-vault list without a body', (_method: string, target: string) => target.endsWith('/deletedVaults') ? new Response('<html>', { status: 200 }) : undefined],
     ['no answer at all', (_method: string, target: string) => { if (target.endsWith('/roleAssignments')) throw new Error('socket hang up'); return undefined; }],
   ])('treats %s as unknown and deletes nothing', async (_what, intercept) => {

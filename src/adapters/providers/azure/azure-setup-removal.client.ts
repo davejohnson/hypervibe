@@ -124,7 +124,9 @@ async function readDeletedVault(fetchImpl: Fetch, token: string, target: AzureSe
   // Only the vault that lived in this project's group; the same name deleted from another group is not setup's.
   const entry = listed.entries.find((candidate) => same((candidate.properties as { vaultId?: unknown } | undefined)?.vaultId, vaultId(target)));
   if (!entry) return { is: 'absent' };
-  const properties = entry.properties as { location?: unknown; scheduledPurgeDate?: unknown; purgeProtectionEnabled?: unknown };
+  const properties = entry.properties as { location?: unknown; scheduledPurgeDate?: unknown; purgeProtectionEnabled?: unknown; tags?: Record<string, unknown> };
+  // A deleted vault keeps its tags. One without Hypervibe's tag is not known to be setup's, and a purge cannot be undone.
+  if (properties.tags?.['managed-by'] !== 'hypervibe') return { is: 'unknown', reason: `A deleted Key Vault named ${target.vaultName} does not carry Hypervibe's tag, so Hypervibe will not purge it.` };
   if (typeof properties.location !== 'string' || !/^[a-z0-9]{3,40}$/i.test(properties.location)) return { is: 'unknown', reason: 'Azure listed the deleted Key Vault without its region.' };
   return { is: 'present', vault: { purgeProtected: properties.purgeProtectionEnabled === true, location: properties.location,
     ...(typeof properties.scheduledPurgeDate === 'string' ? { scheduledPurgeDate: properties.scheduledPurgeDate } : {}) } };
