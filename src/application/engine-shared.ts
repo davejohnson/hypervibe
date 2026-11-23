@@ -16,7 +16,10 @@ export function specWithoutEnvironment(spec: ProjectSpec, environmentName: strin
       const remaining = (secret.environments as string[]).filter((name) => name !== environmentName);
       return [key, remaining.length ? { environments: remaining } : null];
     }));
-  return { environments: { [environmentName]: null }, ...(Object.keys(secrets).length ? { secrets } : {}) };
+  // A setting that names the removed environment as the project's main one would fail validation; without it the default applies.
+  const main = (['devops', 'github'] as const).filter((key) => spec[key]?.canonicalEnvironment === environmentName)
+    .map((key) => [key, { canonicalEnvironment: null }]);
+  return { environments: { [environmentName]: null }, ...(Object.keys(secrets).length ? { secrets } : {}), ...Object.fromEntries(main) };
 }
 
 export function describeFixedWorkerCountChanges(actions: PlanAction[], environment: EnvironmentSpec, countField: string): void {

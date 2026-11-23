@@ -56,7 +56,8 @@ describe('DNS generated configuration ownership boundary', () => {
     const retired = record({ authority: { kind: 'managed', nativeId, preserveValues: [] } });
     const removed = buildDnsConfiguration({ zone, records: [], retiredRecords: [retired] });
     expect(Object.keys(removed.resources)).toEqual([dnsRecordAddress(zone, retired)]);
-    expect(body({ zone, records: [], retiredRecords: [retired] })).toEqual({});
+    // No resource block at all: OpenTofu rejects an empty one.
+    expect(buildDnsConfiguration({ zone, records: [], retiredRecords: [retired] }).files['dns.tf.json']).not.toHaveProperty('resource');
     const shared = record({ authority: { kind: 'managed', nativeId, preserveValues: ['192.0.2.9'] } });
     const retained = body({ zone, records: [], retiredRecords: [shared] });
     expect(Object.values(retained.google_dns_record_set!)[0]!.rrdatas).toEqual(['192.0.2.9']);

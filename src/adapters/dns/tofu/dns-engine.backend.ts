@@ -217,7 +217,8 @@ export function buildDnsConfiguration(input: DnsEngineInput): EngineConfiguratio
   }
   return {
     files: {
-      'dns.tf.json': { provider: providerConfiguration(input.zone), resource },
+      // OpenTofu rejects an empty resource block, which is what removing the last record leaves.
+      'dns.tf.json': { provider: providerConfiguration(input.zone), ...(Object.keys(resource).length ? { resource } : {}) },
       ...(Object.keys(imports).length ? { 'imports.tf.json': { import: Object.entries(imports).map(([to, id]) => ({ to, id: literal(id) })) } } : {}),
     },
     resources,
