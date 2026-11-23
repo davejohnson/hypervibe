@@ -54,9 +54,7 @@ export function dedicatedDatabase(params: {
   retired?: boolean;
   /** Set when an on-demand worker counts pending work: the runtime identity that gets a read-only login ('' when unknown). */
   workerLoginEmail?: string;
-  /** An instance Hypervibe itself attempted to create that engine state does not track yet. */
-  adoptInstance?: string;
-}): { resource: Record<string, Record<string, unknown>>; mappings: Record<string, EngineResourceMapping>; imports: Record<string, string> } {
+}): { resource: Record<string, Record<string, unknown>>; mappings: Record<string, EngineResourceMapping> } {
   const onDemand = params.workerLoginEmail !== undefined;
   const sql: Record<string, Record<string, unknown>> = {};
   const databaseMapping: EngineResourceMapping = { actionId: 'database:postgres', kind: 'database', name: 'postgres', dataBearing: true, billable: true,
@@ -130,10 +128,12 @@ export function dedicatedDatabase(params: {
   if (params.database || params.retired) {
     for (const address of DATABASE_ENGINE_ADDRESSES) mappings[address] = databaseMapping;
   }
-  const imports: Record<string, string> = {};
-  if (params.adoptInstance) {
-    if (params.adoptInstance !== params.database?.instanceName) throw new Error('Only the desired database instance can be adopted.');
-    imports['google_sql_database_instance.db'] = `projects/${params.projectId}/instances/${params.adoptInstance}`;
-  }
-  return { resource: sql, mappings, imports };
+  return { resource: sql, mappings };
+}
+
+/** Takes over an instance Hypervibe itself attempted to create that engine state does not track yet. */
+export function dedicatedDatabaseImports(projectId: string, database: GcpCloudSqlInput | undefined, adoptInstance: string | undefined): Record<string, string> {
+  if (!adoptInstance) return {};
+  if (adoptInstance !== database?.instanceName) throw new Error('Only the desired database instance can be adopted.');
+  return { 'google_sql_database_instance.db': `projects/${projectId}/instances/${adoptInstance}` };
 }

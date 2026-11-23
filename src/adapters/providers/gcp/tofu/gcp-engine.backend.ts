@@ -6,7 +6,7 @@ import type {
   InfrastructureEngineBackend,
 } from '../../../../domain/ports/infrastructure-engine.port.js';
 import type { GcpDatabaseConnection } from './gcp-database-connection.js';
-import { dedicatedDatabase, dedicatedDatabaseConnection, type GcpCloudSqlInput } from './gcp-dedicated-database.js';
+import { dedicatedDatabase, dedicatedDatabaseConnection, dedicatedDatabaseImports, type GcpCloudSqlInput } from './gcp-dedicated-database.js';
 
 /**
  * GCP half of the OpenTofu engine integration. Everything Google-specific
@@ -593,7 +593,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   }
   // The database's own resources come from its module; this generator only places them.
   const database = dedicatedDatabase({ projectId: input.projectId, region: input.region, environmentId: input.environmentId, database: input.database,
-    retired: input.retiredDatabase, workerLoginEmail: onDemand ? input.runtimeServiceAccountEmail ?? '' : undefined, adoptInstance: input.adopt?.databaseInstance });
+    retired: input.retiredDatabase, workerLoginEmail: onDemand ? input.runtimeServiceAccountEmail ?? '' : undefined });
   Object.assign(resources, database.mappings);
   if (input.releaseJob) {
     addScheduledJob(input, { ...input.releaseJob, workload: 'worker' }, RELEASE_JOB_KEY, jobs, schedules, jobIam, connection);
@@ -775,7 +775,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     if (!(input.secrets ?? []).some((entry) => entry.secretId === secretId)) throw new Error('Only a desired secret container can be adopted.');
     imports[`google_secret_manager_secret.${secretEngineKey(secretId)}`] = `projects/${input.projectId}/secrets/${secretId}`;
   }
-  Object.assign(imports, database.imports);
+  Object.assign(imports, dedicatedDatabaseImports(input.projectId, input.database, input.adopt?.databaseInstance));
   for (const name of input.adopt?.buckets ?? []) {
     const bucket = (input.storage ?? []).find((entry) => entry.name === name);
     if (!bucket) throw new Error(`Only desired storage can be adopted (${name}).`);
