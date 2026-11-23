@@ -33,8 +33,12 @@ To prepare a job for one file bucket, use `hv_connections` with action
 shows the unscheduled job and the grants allowing its dedicated account to
 read and add objects in that Google Cloud bucket. Approve the review in the
 browser and resume the same request with its `gcpSetupPlanId`. Setup leaves
-the job idle. A separately reviewed private credential handoff and execution
-are still needed to transfer files. PostgreSQL migration has its own prerequisites.
+the job idle. If setup stops during its final check, resume the same approved
+plan ID. Hypervibe can verify the existing job and both permissions against
+the saved plan without repeating the cloud changes. The review keeps the
+original attempt and shows when verification succeeded. Transferring files still needs a
+separately reviewed private credential handoff and job execution. PostgreSQL
+migration has its own prerequisites.
 
 For a prepared Railway source and Cloud Run destination, preview the copy
 account and its empty global Secret Manager container with

@@ -102,7 +102,9 @@ function idleJobUid(raw: unknown, job: ReturnType<typeof transferBucketJob>, pro
     || typeof obj.uid !== 'string' || !z.uuidv4().safeParse(obj.uid).success || obj.deleteTime !== undefined
     || typeof obj.generation !== 'string' || !/^[1-9]\d*$/.test(obj.generation) || obj.observedGeneration !== obj.generation
     || (obj.reconciling !== undefined && obj.reconciling !== false) || ready?.type !== 'Ready' || ready.state !== 'CONDITION_SUCCEEDED'
-    || (obj.executionCount !== undefined && obj.executionCount !== 0) || obj.latestCreatedExecution !== undefined
+    || (obj.executionCount !== undefined && obj.executionCount !== 0)
+    // Cloud Run v2 can return an empty ExecutionReference for a job that has never run.
+    || (obj.latestCreatedExecution !== undefined && !isDeepStrictEqual(obj.latestCreatedExecution, {}))
     || obj.startExecutionToken !== undefined || obj.runExecutionToken !== undefined
     || (obj.launchStage !== undefined && obj.launchStage !== job.spec.launch_stage) || obj.binaryAuthorization !== undefined
     || (obj.annotations !== undefined && !isDeepStrictEqual(obj.annotations, {}))

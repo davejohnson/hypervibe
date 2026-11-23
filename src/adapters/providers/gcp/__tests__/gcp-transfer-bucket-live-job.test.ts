@@ -69,6 +69,20 @@ describe('Google Cloud job readback for the initial preview and after applying i
     expect((await prepareTransferBucketJob(input,target)).success).toBe(false);
     expect(stubs.setup).not.toHaveBeenCalled();
   });
+  it('accepts the empty execution reference returned by Google after creating a ready job with no executions', async () => {
+    stubs.cloudJob.mockImplementationOnce(async () => json(native()))
+      .mockImplementationOnce(async () => json({ ...native(), latestCreatedExecution: {} }));
+    expect((await prepareTransferBucketJob({ ...input, planId: 'saved' }, target)).success).toBe(true);
+    expect(stubs.cloudJob).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    { latestCreatedExecution: null }, { latestCreatedExecution: [] }, { latestCreatedExecution: { name: '' } },
+    { latestCreatedExecution: { completionStatus: 'PENDING' } }, { latestCreatedExecution: {}, executionCount: 1 },
+  ])('rejects a malformed reference or evidence of an execution despite a ready job', async fields => {
+    stubs.cloudJob.mockImplementation(async () => json({ ...native(), ...fields }));
+    expect((await prepareTransferBucketJob(input, target)).success).toBe(false);
+    expect(stubs.setup).not.toHaveBeenCalled();
+  });
   it('does not certify an equivalent UID when the live post-apply task has different resources',async()=>{
     const changed=native(); changed.template.template.containers[0]!.resources.limits.cpu='4';
     stubs.cloudJob.mockImplementationOnce(async()=>json(native())).mockImplementationOnce(async()=>json(changed));

@@ -17,9 +17,9 @@ export function reviewedBucketJob(params: GcpProjectSetupParams, existing: Recor
     if (isTransferBucketJobContribution(params.contribution.id)) throw new Error('Use the dedicated bucket copy setup review for this job.');
     return;
   }
-  if (params.transferSlotReview || params.transferIsolationReview || params.allowDestroyAddresses?.length ||
+  if (params.transferSlotReview || params.transferIsolationReview || params.allowDestroyAddresses?.length || params.allowReplaceAddresses?.length ||
       params.allowImportAddresses?.length || params.existingResourceAddresses?.length || params.recoverProjectState ||
-      params.observedUnlinkedProject || params.observedLinkedProject ||
+      params.observedUnlinkedProject || params.observedLinkedProject || params.reviewAfterVerification ||
       (params.confirm && (!params.gcpSetupPlanId || !params.observeBucketJobAfterApply))) {
     throw new Error('Review the bucket copy job and its bucket permissions together using its own saved plan.');
   }

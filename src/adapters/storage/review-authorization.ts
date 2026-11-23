@@ -32,13 +32,14 @@ export function regularReviewDatabase(file: string): boolean {
 }
 
 type SetupStatus = 'running' | 'applied' | 'failed';
-interface SetupExecution {
+export interface SetupExecution {
   projectId: string;
   targetId: string;
   planId: string;
   digest: string;
   status: SetupStatus;
   updatedAt: string;
+  verification?: { verifiedAt: string; jobUid: string };
 }
 
 function journal(dataDir: string, write: boolean): Database.Database | undefined {
@@ -61,6 +62,11 @@ function journal(dataDir: string, write: boolean): Database.Database | undefined
       CREATE TABLE IF NOT EXISTS setup_history (
         projectId TEXT NOT NULL, targetId TEXT NOT NULL, planId TEXT NOT NULL, digest TEXT NOT NULL,
         status TEXT NOT NULL, updatedAt TEXT NOT NULL, PRIMARY KEY (projectId, targetId, planId, digest)
+      );
+      CREATE TABLE IF NOT EXISTS setup_verifications (
+        projectId TEXT NOT NULL, targetId TEXT NOT NULL, planId TEXT NOT NULL, digest TEXT NOT NULL,
+        attemptStatus TEXT NOT NULL, attemptUpdatedAt TEXT NOT NULL, verifiedAt TEXT NOT NULL, jobUid TEXT NOT NULL,
+        PRIMARY KEY (projectId, targetId, planId, digest)
       );`);
     } catch (error) { db.close(); throw error; }
   }
@@ -78,7 +84,14 @@ export function readReviewHistory(dataDir: string) {
   const db = journal(dataDir, false);
   try {
     const approvals = (db?.prepare('SELECT planId,digest,displayDigest,approvedAt FROM approvals').all() ?? []) as {planId:string; digest:string; displayDigest:string; approvedAt:string}[];
-    const setups = (db?.prepare('SELECT * FROM setup_history').all() ?? []) as SetupExecution[];
+    // Old review journals stay readable without writing a schema migration.
+    const hasReceipts = db?.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='setup_verifications'").get();
+    const rows = (hasReceipts ? db!.prepare(`SELECT h.*, v.verifiedAt, v.jobUid FROM setup_history h
+      LEFT JOIN setup_verifications v ON v.projectId=h.projectId AND v.targetId=h.targetId AND v.planId=h.planId
+        AND v.digest=h.digest AND v.attemptStatus=h.status AND v.attemptUpdatedAt=h.updatedAt`).all()
+      : db?.prepare('SELECT * FROM setup_history').all() ?? []) as (SetupExecution & { verifiedAt?: string; jobUid?: string })[];
+    const setups: SetupExecution[] = rows.map(({ verifiedAt, jobUid, ...row }) =>
+      verifiedAt && jobUid ? { ...row, verification: { verifiedAt, jobUid } } : row);
     return { approvals, setups };
   } finally { db?.close(); }
 }
@@ -102,5 +115,27 @@ export function recordSetupReviewExecution(dataDir: string, projectId: string, t
     db.prepare(`INSERT INTO setup_history (projectId,targetId,planId,digest,status,updatedAt) VALUES (?,?,?,?,?,?)
       ON CONFLICT (projectId,targetId,planId,digest) DO UPDATE SET status=excluded.status, updatedAt=excluded.updatedAt`)
       .run(projectId, targetId, planId, digest, status, new Date().toISOString());
+  } finally { db.close(); }
+}
+
+/** Add a later observation without rewriting the time or outcome of the original apply attempt. */
+export function recordBucketJobVerification(dataDir: string, attempt: SetupExecution, displayDigest: string, jobUid: string): void {
+  const db = journal(dataDir, true)!;
+  const key = [attempt.projectId, attempt.targetId, attempt.planId, attempt.digest];
+  try {
+    db.transaction(() => {
+      const original = db.prepare(`SELECT 1 FROM setup_history h JOIN approvals a USING(planId,digest)
+        WHERE h.projectId=? AND h.targetId=? AND h.planId=? AND h.digest=? AND h.status=? AND h.updatedAt=?
+          AND h.status IN ('failed','running') AND a.displayDigest=? AND a.approvedAt<=h.updatedAt`)
+        .get(...key, attempt.status, attempt.updatedAt, displayDigest);
+      if (!original) throw new Error('The original setup attempt or browser approval changed before verification finished.');
+      db.prepare(`INSERT OR IGNORE INTO setup_verifications
+        (projectId,targetId,planId,digest,attemptStatus,attemptUpdatedAt,verifiedAt,jobUid) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(...key, attempt.status, attempt.updatedAt, new Date().toISOString(), jobUid);
+      if (!db.prepare(`SELECT 1 FROM setup_verifications WHERE projectId=? AND targetId=? AND planId=? AND digest=?
+        AND attemptStatus=? AND attemptUpdatedAt=? AND jobUid=?`).get(...key, attempt.status, attempt.updatedAt, jobUid)) {
+        throw new Error('A different setup or job identity is already recorded for this verification.');
+      }
+    }).immediate();
   } finally { db.close(); }
 }

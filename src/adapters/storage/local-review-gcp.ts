@@ -13,7 +13,7 @@ import { decodeProbe, probeActions } from './transfer-access-probe.js';
 import { evidenceDetails, files, nativeId, unreadableReview, reviewRecord, reviewJson, subdirectories, type NativeReviewArtifact } from './local-review-files.js';
 import { regularReviewDatabase, reviewDigest, setupDataDigest, type readReviewHistory } from './review-authorization.js';
 
-type SetupHistory = ReturnType<typeof readReviewHistory>['setups'];
+type ReviewHistory = ReturnType<typeof readReviewHistory>;
 type Scope = {projectId:string; gcpProjectId:string};
 type SavedSetup = Parameters<typeof setupReport>[1] & {
   intent:string; baseline:string; reviewContributionId?:string; requiresPlanId?:boolean; manifest:unknown;
@@ -139,7 +139,7 @@ function bootstrapNeedsDisclosure(saved: SavedSetup, report: PlanReport): boolea
     action.type !== 'noop' && action.addresses.some(address => Object.hasOwn(resources,address)));
 }
 
-function setupReviews(directory: string, scope: Scope, history: SetupHistory, wanted?: string): NativeReviewArtifact[] {
+function setupReviews(directory: string, scope: Scope, history: ReviewHistory, wanted?: string): NativeReviewArtifact[] {
   const entries = files(directory).filter(entry => entry.isFile());
   const previews = new Map<string,SavedSetup>();
   for (const entry of entries) {
@@ -181,15 +181,28 @@ function setupReviews(directory: string, scope: Scope, history: SetupHistory, wa
       report ??= original;
       if (!report) continue;
       const item = reportArtifact(report,'Historical plan');
-      const record = history.find(row => row.projectId === scope.projectId && row.targetId === scope.gcpProjectId && row.planId === id
+      const record = history.setups.find(row => row.projectId === scope.projectId && row.targetId === scope.gcpProjectId && row.planId === id
         && (!saved || row.digest === reviewDigest('setup',scope.projectId,scope.gcpProjectId,id,saved)));
       item.ownerId = scope.projectId;
       item.originalDigest = saved ? reviewDigest('setup',scope.projectId,scope.gcpProjectId,id,saved) : record?.digest;
       item.archivedSetup = !saved && !record;
+      if (record?.verification) {
+        const approved = history.approvals.find(row => row.planId === id && row.digest === record.digest);
+        if (report.setupPurpose !== 'railway-bucket-copy' || approved?.displayDigest !== setupDataDigest(report)) {
+          result.push(unreadableReview(id));
+          continue;
+        }
+      }
       if (record) {
         item.previouslyApproved = true;
-        item.status = {running:'Running',applied:'Applied',failed:'Failed'}[record.status];
-        item.details.push('Approved for this project setup. Last recorded update '+record.updatedAt+'.');
+        if (record.verification) {
+          item.status = 'Applied';
+          item.details.push('The original setup attempt was recorded as '+record.status+' at '+record.updatedAt+'.',
+            'At '+record.verification.verifiedAt+', Hypervibe verified the idle copy job and both bucket permissions.');
+        } else {
+          item.status = {running:'Running',applied:'Applied',failed:'Failed'}[record.status];
+          item.details.push('Approved for this project setup. Last recorded update '+record.updatedAt+'.');
+        }
       } else if (saved && original && isDeepStrictEqual(original,report) && currentSetup(directory,saved) &&
           !report.blocked.length && (report.bootstrapConnection || report.actions.some(a => a.type !== 'noop')) && report.actions.every(a => a.verified || a.type === 'noop')) {
         item.status = 'Awaiting approval';
@@ -217,7 +230,7 @@ function setupReviews(directory: string, scope: Scope, history: SetupHistory, wa
   return result;
 }
 
-export function gcpReviewPlans(root: string, history: SetupHistory, wanted?: string): NativeReviewArtifact[] {
+export function gcpReviewPlans(root: string, history: ReviewHistory, wanted?: string): NativeReviewArtifact[] {
   if (wanted && !/^(probe|setup)-/.test(wanted)) return [];
   const result: NativeReviewArtifact[] = [];
   const engine = path.join(root,'engine');

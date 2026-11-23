@@ -104,7 +104,7 @@ export class LocalReviewCatalog {
     const items = new Map<string,NativeReviewArtifact>();
     const native = [
       ...(!wanted || !/^(setup|probe)-/.test(wanted) ? runReviews(this.dataDir,wanted) : []),
-      ...gcpReviewPlans(this.dataDir,history.setups,wanted),
+      ...gcpReviewPlans(this.dataDir,history,wanted),
     ];
     for (const item of native) {
       if (items.has(item.id)) {
