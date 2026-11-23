@@ -79,13 +79,15 @@ export interface CloudEngine {
   removeProject?(params: { project: Project; cloudProjectId: string; previewId?: string; confirm?: boolean }): Promise<EngineProjectRemoval>;
   /** How a command reaches `removeProject`: which input names the target, and the words for it. */
   projectRemoval?: {
-    idInput: 'gcpProjectId' | 'awsAccountId';
+    idInput: 'gcpProjectId' | 'awsAccountId' | 'azureSubscriptionId';
+    /** The preview finds the target after sign-in, so the id is given only to confirm. */
+    idFromPreview?: true;
     /** Removal signs in with the administrator's default Google credentials, so the command must say so. */
     adminAuth?: 'default';
     /** One sentence listing the fields the command takes. */
     usage: string;
     /** What the agent shows and asks the person before confirming. */
-    ask: (cloudProjectId: string) => string;
+    ask: (cloudProjectId: string, projectName: string) => string;
     /** Used when a failed removal gives no reason. */
     failure: string;
   };
@@ -145,6 +147,13 @@ const azure: CloudEngine = {
   release: async (ctx, params) => (await import('./infrastructure-engine-azure-release.js')).releaseAzureEngineServices(ctx, params),
   secretStore: async (ctx, project, _spec, environmentName) => (await import('./infrastructure-engine-azure.js')).azureSecretStore(ctx, project, environmentName),
   connect: async (params) => (await import('./azure-connect.js')).connectAzureStep(params),
+  // Azure has no project of its own to delete: this removes what one-time setup created. `cloudProjectId` is the subscription id, empty on a first preview.
+  removeProject: async ({ project, cloudProjectId, previewId, confirm }) => ({ ...await (await import('./azure-setup-removal.js')).runAzureSetupRemoval({ project, subscriptionId: cloudProjectId, previewId, confirm }) }),
+  projectRemoval: {
+    idInput: 'azureSubscriptionId', idFromPreview: true, failure: 'Hypervibe\'s Azure setup was not removed.',
+    usage: 'action="remove-project" with provider="azure" takes project only; to confirm, add the preview\'s subscriptionId as azureSubscriptionId, its previewId and confirm=true.',
+    ask: (_id, name) => `Show the user this preview for ${name}: everything in willDelete, everything in willPurge (permanent), what is left behind and every warning. Ask whether to remove Hypervibe's Azure setup. Confirm only after they say yes to exactly this list.`,
+  },
   ownsPlan: (document) => Boolean(document.engine?.azure),
 };
 

@@ -32,11 +32,13 @@ vi.mock('../../domain/services/gcp-bootstrap.service.js', async (original) => {
 
 vi.mock('../../application/gcp-project-removal.js', () => ({ runGcpProjectRemoval: vi.fn() }));
 vi.mock('../../application/aws-setup-removal.js', () => ({ runAwsSetupRemoval: vi.fn() }));
+vi.mock('../../application/azure-setup-removal.js', () => ({ runAzureSetupRemoval: vi.fn() }));
 // The command reaches it only through the per-cloud registry.
 
 import { runGcpBootstrap } from '../../domain/services/gcp-bootstrap.service.js';
 import { runGcpProjectRemoval } from '../../application/gcp-project-removal.js';
 import { runAwsSetupRemoval } from '../../application/aws-setup-removal.js';
+import { runAzureSetupRemoval } from '../../application/azure-setup-removal.js';
 import * as cloudPrepare from '../../domain/services/cloud-prepare.execute.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../../application/context.js';
@@ -66,6 +68,7 @@ afterEach(() => {
   vi.mocked(runGcpBootstrap).mockReset();
   vi.mocked(runGcpProjectRemoval).mockReset();
   vi.mocked(runAwsSetupRemoval).mockReset();
+  vi.mocked(runAzureSetupRemoval).mockReset();
   delete process.env.HV_TEST_RAILWAY_TOKEN;
   for (const name of githubTokenEnvironmentNames) {
     const original = originalGitHubTokenEnvironment[name];
@@ -424,6 +427,7 @@ describe('hv_connections', () => {
     ['no Google project id', { gcpProjectId: undefined }],
     ['no project', { project: undefined }],
     ['no administrator sign-in', { adminAuth: undefined }],
+    ['an Azure subscription id', { azureSubscriptionId: '22222222-2222-4222-8222-222222222222' }],
     ['an option from another action', { billingAccountName: 'billingAccounts/AAAAAA-BBBBBB-CCCCCC' }],
     ['a preview id on another action', { action: 'bootstrap', previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10' }],
   ])('never starts a Google project removal with %s', async (_what, change) => {
@@ -433,6 +437,29 @@ describe('hv_connections', () => {
     expect(result.ok).toBe(false);
     expect(runGcpProjectRemoval).not.toHaveBeenCalled();
     expect(runGcpBootstrap).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('previews removing a project\'s Azure setup through the same action, then confirms with the preview\'s subscription and id', async () => {
+    const project = new ProjectRepository().create({ name: 'azure-removal-app', defaultPlatform: 'azure', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    const subscriptionId = '22222222-2222-4222-8222-222222222222'; const previewId = '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10';
+    vi.mocked(runAzureSetupRemoval).mockResolvedValue({ success: true, mode: 'preview', subscriptionId, resourceGroup: 'hv-azure-removal-app', previewId,
+      willDelete: ['Resource group hv-azure-removal-app'], willPurge: ['Purge the deleted Key Vault'], leftBehind: [] });
+    const t = await makeClient();
+    const input = { provider: 'azure', action: 'remove-project', project: project.name };
+    const preview = await t.call('hv_connections', input);
+    expect(preview.ok).toBe(true);
+    expect(preview.data).toMatchObject({ subscriptionId, previewId, willDelete: ['Resource group hv-azure-removal-app'], willPurge: ['Purge the deleted Key Vault'] });
+    expect(preview.data.confirmCall).toBeUndefined();
+    expect(preview.hint).toContain('azureSubscriptionId');
+    expect(preview.agentInstruction).toMatchObject({ action: 'ask_user', message: expect.stringContaining('willPurge') });
+    expect(runAzureSetupRemoval).toHaveBeenCalledWith({ project, subscriptionId: '', previewId: undefined, confirm: false });
+
+    vi.mocked(runAzureSetupRemoval).mockResolvedValue({ success: false, mode: 'confirm', status: 'pending', error: 'could not confirm', removed: ['Key Vault'], notRemoved: ['Resource group'] });
+    const stopped = await t.call('hv_connections', { ...input, azureSubscriptionId: subscriptionId, previewId, confirm: true });
+    expect(runAzureSetupRemoval).toHaveBeenLastCalledWith({ project, subscriptionId, previewId, confirm: true });
+    expect(stopped.error).toMatchObject({ code: 'PROVIDER_ERROR', message: 'could not confirm', details: { removed: ['Key Vault'], notRemoved: ['Resource group'] } });
+    expect(runGcpProjectRemoval).not.toHaveBeenCalled();
     await t.close();
   });
 
@@ -454,6 +481,22 @@ describe('hv_connections', () => {
     expect(runAwsSetupRemoval).toHaveBeenLastCalledWith({ project, awsAccountId: '123456789012', previewId, confirm: true });
     expect(stopped.ok).toBe(false);
     expect(stopped.error).toMatchObject({ code: 'PROVIDER_ERROR', message: 'The removal stopped', details: { removed: ['User hypervibe-local'], notRemoved: ['Policy hypervibe-deploy'] } });
+    expect(runGcpProjectRemoval).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([
+    ['a Google project id', { gcpProjectId: 'hv-demo-12345678' }],
+    ['the Google administrator sign-in', { adminAuth: 'default' }],
+    ['no project', { project: undefined }],
+    ['an option from another action', { azureApproved: true }],
+    ['a preview id on another action', { action: 'connect', previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10' }],
+  ])('never starts an Azure setup removal with %s', async (_what, change) => {
+    const project = new ProjectRepository().create({ name: 'azure-removal-guard', defaultPlatform: 'azure', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'azure', action: 'remove-project', project: project.name, ...change });
+    expect(result.ok).toBe(false);
+    expect(runAzureSetupRemoval).not.toHaveBeenCalled();
     expect(runGcpProjectRemoval).not.toHaveBeenCalled();
     await t.close();
   });

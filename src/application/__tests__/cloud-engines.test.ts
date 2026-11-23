@@ -26,8 +26,8 @@ describe('cloud engine registry', () => {
 
   it('offers teardown only where an engine implements it', () => {
     expect(cloudEngines.filter((engine) => engine.planTeardown).map((engine) => engine.id)).toEqual(['gcp', 'aws', 'azure']);
-    // Google Cloud removes the project Hypervibe created; AWS removes Hypervibe's access from an account it did not create.
-    expect(cloudEngines.filter((engine) => engine.removeProject).map((engine) => engine.id)).toEqual(['gcp', 'aws']);
-    expect(cloudEngines.filter((engine) => engine.removeProject).map((engine) => [engine.projectRemoval?.idInput, engine.projectRemoval?.adminAuth])).toEqual([['gcpProjectId', 'default'], ['awsAccountId', undefined]]);
+    // Google Cloud removes the project Hypervibe created; AWS and Azure remove what Hypervibe's setup created.
+    expect(cloudEngines.filter((engine) => engine.removeProject).map((engine) => engine.id)).toEqual(['gcp', 'aws', 'azure']);
+    expect(cloudEngines.filter((engine) => engine.removeProject).map((engine) => [engine.projectRemoval?.idInput, engine.projectRemoval?.adminAuth, engine.projectRemoval?.idFromPreview])).toEqual([['gcpProjectId', 'default', undefined], ['awsAccountId', undefined, undefined], ['azureSubscriptionId', undefined, true]]);
   });
 });

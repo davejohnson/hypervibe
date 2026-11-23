@@ -65,6 +65,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Email, webhooks, iOS releases | blocked (#626) | blocked (#626) | blocked (#626) |
 | Database resilience, seed command, credential aliases | blocked | blocked | blocked |
 | Spend alerts | not built (#629) | not built (#629) | not built (#629) |
+| Remove Hypervibe's setup after every environment is torn down (`hv_connections action="remove-project"`) | deletes the Google project that setup created; offline verification | removes Hypervibe's user, roles, policies and GitHub sign-in from the account, keeps database snapshots; offline verification, not yet run live ([#827](https://github.com/davejohnson/hypervibe/issues/827)) | removes the project's resource group, Key Vault (purged), deploy app and roles; offline verification, not yet run live ([#828](https://github.com/davejohnson/hypervibe/issues/828)) |
 
 ## Read-only workload diagnostics
 
