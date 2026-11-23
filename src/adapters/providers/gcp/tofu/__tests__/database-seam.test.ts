@@ -53,6 +53,13 @@ describe('Google configuration is unchanged by the database seam', () => {
     expect(rendered[name]).toBe(baseline[name]);
   });
 
+  it('reports the same problem first when several inputs are wrong', () => {
+    expect(render({ ...base, services: [web], adopt: { databaseInstance: 'other', secrets: ['not-desired'] } })).toBe('threw: Only a desired secret container can be adopted.');
+    expect(render({ ...base, services: [web], database: { ...database, wireServices: false }, adopt: { databaseInstance: 'other' },
+      releaseJob: { ...web, logicalName: 'release', resourceName: 'release-prod', public: false, jobCommand: '' } })).toBe('threw: Scheduled job release needs an explicit command (startCommand).');
+    expect(render({ ...base, services: [web], adopt: { databaseInstance: 'other' } })).toBe('threw: Only the desired database instance can be adopted.');
+  });
+
   it('covers every recorded case and none of them failed to render', () => {
     expect(Object.keys(baseline).sort()).toEqual(Object.keys(cases).sort());
     expect(Object.values(baseline).filter((value) => value.startsWith('threw:'))).toEqual([]);
@@ -69,7 +76,7 @@ describe('the workload generator cannot tell where a database comes from', () =>
   it('reads the database input only to hand it to the database module', () => {
     const readers = source.split('\n').filter((line) => /input\.(database|retiredDatabase)\b|adopt\?\.databaseInstance/.test(line));
     expect(readers.length).toBeGreaterThan(0);
-    expect(readers.filter((line) => !/dedicatedDatabase(Connection)?\(|retired: input\.retiredDatabase/.test(line))).toEqual([]);
+    expect(readers.filter((line) => !/dedicatedDatabase(Connection|Imports)?\(|retired: input\.retiredDatabase/.test(line))).toEqual([]);
   });
 
   it('gives services a database through the connection alone', () => {
