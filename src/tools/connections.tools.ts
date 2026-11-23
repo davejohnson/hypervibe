@@ -172,7 +172,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       view: z.enum(['catalog', 'requirements']).optional().describe('Read-only list view. The default catalog includes saved connections and available providers. Use requirements with a selected project or initialized repository and an optional environment filter.'),
       role: z.union([z.string(), z.array(z.string()).min(1)]).optional().describe('action="describe": select one or more connection credential fields, such as GitHub packageReadToken.'),
       provider: z.string().optional().describe(`Omit to list. Otherwise select a provider (available: ${providerNames.join(', ')}). action="remove" also accepts unregistered providers so stale connections can be deleted.`),
-      action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap', 'connect', 'remove-project']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup. For Cloudflare, "connect" with scope=<domain> is the recommended setup: it opens a local page in the user\'s browser that links to a pre-filled Cloudflare token form and receives the token directly, never through chat. For GCP, "remove-project" deletes a Google project that bootstrap created, once every environment in it is torn down and nothing else is left in it: preview first, then confirm with the previewId.'),
+      action: z.enum(['add', 'describe', 'verify', 'remove', 'prepare', 'bootstrap', 'connect', 'remove-project']).optional().describe('With provider: operation to perform (default: "add"). "describe" returns contextual forms without resolving credentials, observing providers, or writing state. For GCP, "bootstrap" is the recommended one-time setup. For Cloudflare, "connect" with scope=<domain> is the recommended setup: it opens a local page in the user\'s browser that links to a pre-filled Cloudflare token form and receives the token directly, never through chat. For GCP, "remove-project" deletes a Google project that bootstrap created, once every environment in it is torn down and nothing else is left in it: preview first, then confirm with the previewId. For Azure, "remove-project" with project removes what one-time setup created (resource group, Key Vault, deploy app and its roles) once every environment is torn down: it opens a browser sign-in, previews, then confirms with azureSubscriptionId and the previewId.'),
       credentials: z.record(z.string(), z.unknown()).optional().describe('action="add": provider-specific credentials object. Omit for providers supporting native CLI/default authentication. credentialsRef is recommended for explicit credentials, but raw credentials are accepted when intentional.'),
       credentialsRef: z.string().optional().describe('action="add": recommended credential reference resolved by Hypervibe. Supports env:NAME, dotenv:/absolute/path/.env#KEY, file:/absolute/path for token/JSON files, secret-manager refs like aws-secrets://name#key, or an already-pulled active Stripe Projects environment with stripe-projects://<environment>/<provider>/<service>. The resolved value may be a JSON credentials object or a scalar.'),
       credentialsKey: z.string().optional().describe('action="add": wraps a scalar credentialsRef value under this provider credential key, e.g. apiToken or accessToken. GitHub packageReadToken alone updates an existing verified exact-scope connection while preserving its primary API credential. Optional for common single-token providers.'),
@@ -195,7 +195,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
       purpose: z.string().max(160).optional().describe('action="connect": what Hypervibe will do with this access, as a short phrase that follows "so it can", for example "move staging.example.com to Google Cloud". Shown on the connect page.'),
       environment: z.string().optional().describe('Filter view="requirements" by environment or select the environment for setup guidance. For GCP bootstrap and prepare, this selects the declared hosting.gcpProjectId and default region. For connect, the environment appears on the connect page.'),
       awsAccountId: z.string().regex(/^\d{12}$/).optional().describe('provider="aws" action="connect": the exact accountId from the preview, passed only after the user approves its changes.'),
-      azureSubscriptionId: z.string().uuid().optional().describe('provider="azure" action="connect": the subscription the user chose (when they have several), or the subscriptionId from the preview.'),
+      azureSubscriptionId: z.string().uuid().optional().describe('provider="azure" action="connect": the subscription the user chose (when they have several), or the subscriptionId from the preview. action="remove-project": the subscriptionId from the removal preview, required to confirm.'),
       azureApproved: z.literal(true).optional().describe('provider="azure" action="connect": set only after the user approves the preview\'s changes, together with its azureSubscriptionId.'),
       workerAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun: explicitly grant on-demand worker access: Google Workflows for the deployment identity, plus permission for the app runtime to run the worker waker and read pending work through the Cloud SQL Data API.'),
       secretScopeAccess: z.enum(['lifecycle']).optional().describe('action="prepare" for cloudrun, with environment: make secrets limited to named services (secret "services" in the spec) an access boundary. Creates one Google service identity per named service and narrows Secret Manager access so other identities cannot read those secrets. Needs a Google Cloud administrator sign-in (adminAuth="default" or adminAccessTokenRef). Preview, then confirm; hv_plan says when to run it again.'),
@@ -248,22 +248,30 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
         confirm: explicitConfirmation,
       } = input;
       if (action === 'remove-project' || previewId !== undefined) {
-        // Deletes a whole Google project, so it accepts nothing but its own five fields.
-        const extra = suppliedOptionNames(input).filter((name) => !['provider', 'action', 'project', 'gcpProjectId', 'adminAuth', 'previewId', 'confirm'].includes(name));
+        // Deletes a whole Google project or a project's Azure setup, so it accepts nothing but its own fields.
+        const extra = suppliedOptionNames(input).filter((name) => !['provider', 'action', 'project', 'gcpProjectId', 'adminAuth', 'azureSubscriptionId', 'previewId', 'confirm'].includes(name));
         const remover = provider ? cloudEngineForProjectRemoval(provider)?.removeProject : undefined;
-        if (action !== 'remove-project' || provider !== 'cloudrun' || !remover || extra.length || !projectRef?.trim() || !gcpProjectId?.trim() || adminAuth !== 'default') {
-          return commandError('VALIDATION', 'action="remove-project" takes provider="cloudrun", project, the exact gcpProjectId and adminAuth="default"; add previewId and confirm=true only after reviewing its preview.');
+        // Google names the project and uses the administrator's default sign-in. Azure signs in through the browser and learns the subscription from the preview.
+        const azureRemoval = provider === 'azure';
+        const fieldsFit = azureRemoval ? gcpProjectId === undefined && adminAuth === undefined
+          : provider === 'cloudrun' && azureSubscriptionId === undefined && Boolean(gcpProjectId?.trim()) && adminAuth === 'default';
+        if (action !== 'remove-project' || !remover || extra.length || !projectRef?.trim() || !fieldsFit) {
+          return commandError('VALIDATION', azureRemoval
+            ? 'action="remove-project" with provider="azure" takes project only; to confirm, add the preview\'s subscriptionId as azureSubscriptionId, its previewId and confirm=true.'
+            : 'action="remove-project" takes provider="cloudrun", project, the exact gcpProjectId and adminAuth="default"; add previewId and confirm=true only after reviewing its preview.');
         }
         const owner = ctx.resolveProjectOrThrow({ project: projectRef });
-        const removal = await remover({ project: owner, cloudProjectId: gcpProjectId, previewId, confirm: explicitConfirmation === true });
+        const removal = await remover({ project: owner, cloudProjectId: (azureRemoval ? azureSubscriptionId : gcpProjectId) ?? '', previewId, confirm: explicitConfirmation === true });
         const { success: _success, error, ...data } = removal;
         if (!removal.success) {
-          return commandError(removal.status === 'blocked' ? 'VALIDATION' : 'PROVIDER_ERROR', error ?? 'The Google project was not removed.', { details: data, next: ['hv_connections'] });
+          return commandError(removal.status === 'blocked' ? 'VALIDATION' : 'PROVIDER_ERROR', error ?? (azureRemoval ? 'Hypervibe\'s Azure setup was not removed.' : 'The Google project was not removed.'), { details: data, next: ['hv_connections'] });
         }
-        // Deleting a Google project is the user's decision: the preview goes to them, and no ready-made confirm call is handed back.
+        // Deleting is the user's decision: the preview goes to them, and no ready-made confirm call is handed back.
         return commandSuccess({ project: { id: owner.id, name: owner.name }, ...data }, removal.mode === 'preview' ? {
-          hint: 'To confirm, call this again with the same fields plus previewId and confirm=true. The preview lasts ten minutes.',
-          agentInstruction: { action: 'ask_user', message: `Show the user this preview for Google project ${gcpProjectId}: what was checked, what was not checked and every warning. Ask whether to delete the whole Google project. Confirm only after they say yes to deleting this exact project.` },
+          hint: `To confirm, call this again with the same fields plus ${azureRemoval ? 'azureSubscriptionId (the preview\'s subscriptionId), ' : ''}previewId and confirm=true. The preview lasts ten minutes.`,
+          agentInstruction: { action: 'ask_user', message: azureRemoval
+            ? `Show the user this preview for ${owner.name}: everything in willDelete, everything in willPurge (permanent), what is left behind and every warning. Ask whether to remove Hypervibe's Azure setup. Confirm only after they say yes to exactly this list.`
+            : `Show the user this preview for Google project ${gcpProjectId}: what was checked, what was not checked and every warning. Ask whether to delete the whole Google project. Confirm only after they say yes to deleting this exact project.` },
         } : undefined);
       }
       const requireBrowserApproval = gcpSetupPlanId !== undefined && (explicitConfirmation === undefined || (explicitConfirmation && migrationAccess === 'prepare-bucket-copy'));

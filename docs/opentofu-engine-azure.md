@@ -34,6 +34,7 @@ testing environments, production profiles or subsequent revisions.
 | Shared private network and Container Apps environment; database behind a private endpoint with public access off; login created by a job inside the network | Built 2026-11-17; verified live 2026-11-18 (West US 2) by the `azure-engine` [live profile](provider-conformance.md): web service, worker and database created in one apply, both workloads writing to the database, the server refusing a connection from outside, a release, an update and a teardown that left the resource group as it was. A second run the same day added storage, a scheduled job and an on-demand worker |
 | First image built inside the infrastructure apply (no second plan round) | Built; verified live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live: only the project Key Vault remains afterwards |
+| Removing the project's setup (`hv_connections provider="azure" action="remove-project"`) | Built 2026-11-22; offline tests against Microsoft's documented responses only. No call has been made to Azure or Microsoft Graph, so no live result exists. See [Removing the setup](#removing-the-setup) |
 | `hv_launch` for testing environments (sign-in, subscription choice, one reviewed plan, health check) | Built; verified live: from no environment to a healthy app in one approval and one plan round, existing access reused without a sign-in, database, secret, storage and worker (jobs done 1.5 s and 1.7 s after due) working, empty plan after, then torn down cleanly |
 | CI releases | Implemented with a dedicated environment registry; offline verification, live unverified; see [branch releases](engine-ci-releases.md) |
 | Production profile (staging, production), `hv_migrate`, custom domains | Not built |
@@ -372,6 +373,70 @@ dropped database is gone, and the server's automatic backups (7 days) cover it o
 while the server exists. `deleteFinalSnapshot` is therefore refused on Azure, and the
 plan warns to export data first. The resource group, Key Vault and deploy identity
 stay for the project's other environments.
+
+### Removing the setup
+
+Teardown removes an environment; the one-time setup stays. To remove that too,
+call `hv_connections provider="azure" action="remove-project"` with `project`.
+It opens the same browser sign-in setup uses (an Owner of the subscription; the
+deploy identity cannot delete its own roles or app registration) and keeps the
+tokens in memory only. It is a preview until it is called again with the
+preview's `subscriptionId` as `azureSubscriptionId`, its `previewId` and
+`confirm=true`. A preview lasts ten minutes, is used once, and stops matching if
+what Azure holds changes.
+
+What it deletes, in this order, each read back until Azure confirms it is gone:
+
+1. The deploy identity's role assignments on `hv-<project>`.
+2. The two fixed CI roles (custom role definitions scoped to the group).
+3. The project Key Vault, with every secret still in it.
+4. The soft-deleted vault, by purging it. Setup creates the vault without purge
+   protection, so a purge is allowed. It is permanent, so the preview lists it
+   apart from the rest (`willPurge`).
+5. The resource group, after reading once more that it is empty. This is
+   long-running and is polled for up to ten minutes.
+6. The deploy identity's service principal, then the app registration with its
+   client secret and GitHub credentials. Each is also removed from Microsoft's
+   30-day deleted items.
+7. The `azure` connection saved on this computer.
+
+It stops at the first delete that fails or cannot be confirmed, and reports what
+was and was not removed. The saved connection is kept until everything is gone,
+so previewing again shows what is left and confirming finishes it.
+
+It refuses, and deletes nothing, when:
+
+- Hypervibe has no saved `azure` connection for the project. That record (the
+  subscription, the app's id and the service principal's id) is how it knows
+  what setup created.
+- Hypervibe still records an Azure environment for the project.
+- The group holds anything other than the project vault, or the vault lacks the
+  `managed-by=hypervibe` tag. What was found is listed.
+- The group with the expected name lacks the `managed-by=hypervibe` tag.
+- The app registration with the saved id is no longer named
+  `hypervibe-deploy-<project>` and tagged `hypervibe`, or the service principal
+  with the saved id belongs to another app, or a CI role no longer has the name
+  and scope setup gave it.
+- Anyone other than the deploy identity holds a role on the group itself, or the
+  deploy identity holds a role outside the group. Setup grants neither.
+- Any read fails, is partial, or returns a "not found" that is not Azure's own
+  code for that resource. Only a `200` is present and only that code is absent.
+
+What it leaves, and says so in the preview (`leftBehind`):
+
+- The resource providers setup registered. They are subscription-wide and free,
+  and other apps may use them.
+- A vault with purge protection (turned on after setup, or by a subscription
+  policy). Azure refuses to purge it, so it stays soft-deleted until its
+  retention ends, and its name cannot be reused until then. The preview gives
+  the retention, the scheduled date once it is deleted, and a portal link.
+- An app registration that has the expected name but is not the one setup saved.
+- The app or service principal in deleted items, if Microsoft did not confirm
+  the permanent delete. Microsoft removes them after 30 days.
+
+Not covered: GitHub. Environment secrets, variables and workflow files in the
+repository are untouched. Secrets in the vault are not counted or listed; the
+preview warns that all of them go with it.
 
 ## Provider pins
 

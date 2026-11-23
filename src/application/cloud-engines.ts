@@ -121,6 +121,8 @@ const azure: CloudEngine = {
   release: async (ctx, params) => (await import('./infrastructure-engine-azure-release.js')).releaseAzureEngineServices(ctx, params),
   secretStore: async (ctx, project, _spec, environmentName) => (await import('./infrastructure-engine-azure.js')).azureSecretStore(ctx, project, environmentName),
   connect: async (params) => (await import('./azure-connect.js')).connectAzureStep(params),
+  // Azure has no project of its own to delete: this removes what one-time setup created. `cloudProjectId` is the subscription id, empty on a first preview.
+  removeProject: async ({ project, cloudProjectId, previewId, confirm }) => ({ ...await (await import('./azure-setup-removal.js')).runAzureSetupRemoval({ project, subscriptionId: cloudProjectId, previewId, confirm }) }),
   ownsPlan: (document) => Boolean(document.engine?.azure),
 };
 
