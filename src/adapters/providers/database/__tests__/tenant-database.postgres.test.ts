@@ -4,7 +4,7 @@ import path from 'node:path';
 import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
-  TENANT_WRITER_LOCK, TenantRefusedError, TenantServerUnsupportedError, dropTenant, ensureTenant, listTenants, observeTenant, retireTenantLogin,
+  TENANT_WRITER_LOCK, TenantBusyError, TenantLockNotReleasedError, TenantRefusedError, TenantServerUnsupportedError, dropTenant, ensureTenant, listTenants, observeTenant, retireTenantLogin,
   setTenantLoginPassword, tenantNames, type TenantServer, type TenantSession,
 } from '../tenant-database.js';
 
@@ -85,6 +85,8 @@ const roleNames = async (target: Tenant) => (await boot.query('SELECT rolname FR
 /** The server's own inventory, as `database:state`. */
 const inventory = async () => (await listTenants(server)).map((entry) => `${entry.names.database}:${entry.state}`);
 const refusal = async (work: Promise<unknown>) => work.then(() => 'not refused', (error: unknown) => error instanceof TenantRefusedError ? error.standing : `threw ${String(error)}`);
+/** A login that has been switched off is turned away for its password or for the role itself, whichever the server checks first. */
+const DENIED = ['28P01', '28000'];
 const databaseExists = async (name: string) => (await boot.query('SELECT 1 FROM pg_database WHERE datname = $1', [name])).rows.length === 1;
 
 beforeAll(async () => {
@@ -168,6 +170,11 @@ describe('tenant names and input checks', () => {
       await expect(retireTenantLogin(recording, { ...identity(good), login })).rejects.toThrow(/does not belong/);
     }
     await expect(setTenantLoginPassword(recording, { ...identity(good), login: good.names.logins[0], password: 'short' })).rejects.toThrow(/at least 16/);
+    // 5. Only a real boolean says whether a database may be created; "false" as text would otherwise count as yes.
+    for (const allocate of ['false', 'true', 1, 0, null, undefined, {}]) {
+      await expect(ensureTenant(recording, { ...identity(good), connectionLimit: 5, allocate: allocate as unknown as boolean })).rejects.toThrow(/allocate/);
+    }
+    await expect(ensureTenant({ ...recording, lockWaitMs: -1 }, { ...identity(good), connectionLimit: 5, allocate: true })).rejects.toThrow(/lock wait/);
     expect(statements).toEqual([]);
     expect(await databaseExists(good.names.database)).toBe(false);
   });
@@ -302,6 +309,8 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     expect(await scalar(check, 'SELECT body FROM notes')).toBe('two');
     expect(await scalar(check, `SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'public'`)).toBe(two.names.owner);
     expect(await scalar(boot, `SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = $1`, [two.names.database])).toBe(ADMIN);
+    // The schema's privileges moved with it: "the database owner" (the administrator) holds nothing on it by that title.
+    expect(await scalar(check, `SELECT nspacl::text FROM pg_namespace WHERE nspname = 'public'`)).toBe(`{${two.names.owner}=UC/${two.names.owner},=U/${two.names.owner}}`);
   }, 120_000);
 
   it('2. lets either login of a tenant use tables the other created', async () => {
@@ -441,6 +450,12 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     }), client);
     return { server: faultyServer, log, fired: () => fired, end: () => close(client) };
   }
+  /** An interrupted call fails with the interruption, or, when the lock's own statements were hit, by saying the session must be closed. */
+  const expectInterrupted = (outcome: string, log: string[], failAt: number) => {
+    if (outcome === `injected interruption at statement ${failAt}`) return;
+    expect(outcome).toMatch(/lock could not be released/);
+    expect(log[failAt]).toMatch(/advisory_unlock/);
+  };
   const changes = (log: string[]) => log.filter((text) => !/^\s*SELECT\b/.test(text) || /pg_terminate_backend/.test(text));
   /** Every privileged session, the administrator's and each one opened inside a database, starts by pinning its search path. */
   const PIN = `SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', false)`;
@@ -453,6 +468,40 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     // The inventory shows exactly what is there, finished or not.
     expect(await inventory(), label).toEqual(await exists(target) ? ['app_two:ready', `${target.names.database}:${seen.state}`].sort() : ONLY_TWO);
     return seen;
+  };
+
+  /**
+   * 2. Whatever state creation was left in, a tenant login cannot change the database's comment, owner, limit or
+   * grants, even if it had a working password (given here by the superuser, since the module never gives one this early).
+   */
+  const cannotTamper = async (target: Tenant, label: string) => {
+    const [login] = target.names.logins;
+    if (!await databaseExists(target.names.database) || !(await roleNames(target)).includes(login)) return false;
+    const row = async () => (await boot.query(`SELECT COALESCE(datacl, acldefault('d', datdba))::text AS acl, datconnlimit, datdba, shobj_description(oid, 'pg_database') AS comment FROM pg_database WHERE datname = $1`, [target.names.database])).rows;
+    // A refused grant can still make PostgreSQL write the default privileges out in full; what they say must not change.
+    const before = await row();
+    await boot.query(`ALTER ROLE ${login} LOGIN PASSWORD '${PASSWORD('tamper')}'`);
+    // Statements about a database can be sent from any database, so `postgres` will do.
+    const client = await connect(login, PASSWORD('tamper'), 'postgres');
+    for (const acting of [`SET ROLE NONE`, `SET ROLE ${target.names.owner}`]) {
+      await client.query(acting).catch(() => {});
+      for (const statement of [
+        `COMMENT ON DATABASE ${target.names.database} IS 'hypervibe-tenant:${target.tenantId}'`,
+        `COMMENT ON DATABASE ${target.names.database} IS 'hypervibe-tenant-dropping:${target.tenantId}'`,
+        `ALTER DATABASE ${target.names.database} OWNER TO ${login}`,
+        `ALTER DATABASE ${target.names.database} CONNECTION LIMIT 99`,
+        `ALTER DATABASE ${target.names.database} SET search_path = 'public'`,
+        `DROP DATABASE ${target.names.database}`,
+      ]) expect(await sqlState(client.query(statement)), `${label}: ${statement} after ${acting}`).toBe('42501');
+      // A grant or revoke it has no right to make is an error or a warning, depending on what it holds; either way nothing changes.
+      await client.query(`GRANT ALL ON DATABASE ${target.names.database} TO PUBLIC`).catch(() => {});
+      await client.query(`REVOKE ALL ON DATABASE ${target.names.database} FROM ${ADMIN}`).catch(() => {});
+    }
+    await close(client);
+    await boot.query(`ALTER ROLE ${login} PASSWORD NULL`);
+    expect(await row(), label).toEqual(before);
+    expect(before[0]!.datdba, label).toBe(await scalar(boot, `SELECT oid FROM pg_roles WHERE rolname = $1`, [ADMIN]));
+    return true;
   };
 
   it('5a. re-running ensure on a ready tenant only reads, and keeps data', async () => {
@@ -517,10 +566,9 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
         await dropTenant(server, identity(target));
         break;
       }
-      // Only the final unlock may fail without failing the call: the session that held the lock is gone with it.
-      if (outcome === 'finished') expect(interrupted.log[failAt]).toMatch(/pg_advisory_unlock/);
-      else expect(outcome).toBe(`injected interruption at statement ${failAt}`);
+      expectInterrupted(outcome, interrupted.log, failAt);
       interruptions++;
+      await cannotTamper(target, label);
       const seen = await passwordOnlyWhenReady(target, label);
       stages.add(`${seen.state}/${seen.database}`);
 
@@ -558,15 +606,14 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
       await interrupted.end();
       await close(holder);
       if (interrupted.fired()) {
-        if (outcome === 'finished') expect(interrupted.log[failAt]).toMatch(/pg_advisory_unlock/);
-        else expect(outcome).toBe(`injected interruption at statement ${failAt}`);
+        expectInterrupted(outcome, interrupted.log, failAt);
         interruptions++;
         const seen = await observeTenant(server, identity(target));
         stages.add(`${seen.state}/${seen.database}`);
         expect(await inventory(), label).toEqual(await exists(target) ? ['app_two:ready', `${target.names.database}:${seen.state}`].sort() : ONLY_TWO);
         // Once the database is gone, the old password must already be dead everywhere.
         if (!await databaseExists(target.names.database) && (await roleNames(target)).includes(target.names.logins[0])) {
-          expect(await attempt(target.names.logins[0], PASSWORD(`${target.key}-a`), 'postgres'), label).toBe('28P01');
+          expect(DENIED, label).toContain(await attempt(target.names.logins[0], PASSWORD(`${target.key}-a`), 'postgres'));
         }
         // A half-removed tenant is not brought back to life by a maintenance run.
         if (seen.state === 'partial') expect(await refusal(ensureTenant(server, { ...identity(target), connectionLimit: 10, allocate: false })), label).toBe('partial');
@@ -594,6 +641,21 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     expect(await refusal(retireTenantLogin(server, { ...identity(target), login: target.names.logins[0] }))).toBe('partial');
     expect(await databaseExists(target.names.database)).toBe(false);
     expect(await attempt(target.names.logins[0], PASSWORD('half-a'), 'postgres')).toBe('ok');
+
+    // 3. While a session of the old logins will not end, even an explicit allocation is refused and nothing is created.
+    // (Sessions that will not end cannot be produced on demand, so the session's answers are replaced for this check.)
+    const stuck = adminServer((session) => ({
+      query: async (text, values) => {
+        if (/count\(\*\)::int AS remaining/.test(text)) return { rows: [{ remaining: 1 }] };
+        if (/pg_sleep/.test(text)) return { rows: [] };
+        return session.query(text, values);
+      },
+    }));
+    expect(await refusal(ensureTenant(stuck, { ...identity(target), connectionLimit: 10, allocate: true }))).toBe('partial');
+    expect(await refusal(dropTenant(stuck, identity(target)))).toBe('partial');
+    expect(await databaseExists(target.names.database)).toBe(false);
+    expect(await roleNames(target)).toHaveLength(3);
+    await boot.query(`ALTER ROLE ${target.names.logins[0]} LOGIN PASSWORD '${PASSWORD('half-a')}'`);
 
     // An explicit fresh allocation makes a new database, and the old password does not open it or anything else.
     const lingering = await loginA(target, 'postgres');
@@ -630,11 +692,13 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     const inStray = await connect(ADMIN, ADMIN_PASSWORD, stray.names.database);
     await inStray.query(`CREATE TABLE sentinel (value text); INSERT INTO sentinel VALUES ('must survive')`);
     await close(inStray);
+    // Even with no connections allowed, as a database is born: without this tenant's marked roles it is not an interrupted creation.
+    await adminClient.query(`ALTER DATABASE ${stray.names.database} CONNECTION LIMIT 0`);
     const strayBefore = await snapshot(stray.names.database);
     await every(stray, stray.tenantId);
     expect(await snapshot(stray.names.database)).toEqual(strayBefore);
     expect(await roleNames(stray)).toEqual([]);
-    const strayCheck = await connect(ADMIN, ADMIN_PASSWORD, stray.names.database);
+    const strayCheck = await connect('boot', undefined, stray.names.database);
     expect(await scalar(strayCheck, 'SELECT value FROM sentinel')).toBe('must survive');
     await close(strayCheck);
     expect(await inventory()).toEqual(ONLY_TWO);
@@ -646,7 +710,6 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     await adminClient.query(`CREATE ROLE ${stray.names.owner} NOLOGIN`);
     await adminClient.query(`GRANT ${stray.names.owner} TO CURRENT_USER`);
     await adminClient.query(`ALTER DATABASE ${stray.names.database} OWNER TO ${stray.names.owner}`);
-    await adminClient.query(`ALTER DATABASE ${stray.names.database} CONNECTION LIMIT 0`);
     const forgedBefore = await snapshot(stray.names.database);
     await every(stray, stray.tenantId);
     expect(await snapshot(stray.names.database)).toEqual(forgedBefore);
@@ -699,6 +762,13 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     expect(await snapshot(claimed.names.database)).toEqual(restoredBefore);
     // Its roles are still this tenant's, so the inventory shows the conflict rather than hiding it.
     expect(await inventory()).toEqual(['app_claimed:foreign', 'app_two:ready']);
+    await boot.query(`DROP DATABASE ${claimed.names.database}`);
+    // The same restore made with the administrator's own login: its marked roles exist, but it is not in the state a database is born in.
+    await adminClient.query(`CREATE DATABASE ${claimed.names.database}`);
+    await every(claimed, claimed.tenantId);
+    await adminClient.query(`ALTER DATABASE ${claimed.names.database} CONNECTION LIMIT 0`);
+    await adminClient.query(`REVOKE TEMPORARY ON DATABASE ${claimed.names.database} FROM PUBLIC`);
+    await every(claimed, claimed.tenantId);
     await boot.query(`DROP DATABASE ${claimed.names.database}`);
     expect(await dropTenant(server, identity(claimed))).toEqual({ database: 'absent', remainingRoles: [] });
 
@@ -861,27 +931,42 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
       await ensureTenant(server, { ...identity(target), connectionLimit: 5, allocate: true });
     }
 
-    // While another session holds the documented lock, every writer waits; readers do not.
+    // While another session holds the documented lock, every writer waits, and a bounded wait ends with a clear refusal.
     const holder = sessions[2]!;
     const [key1, key2] = TENANT_WRITER_LOCK;
     expect([key1, key2]).toEqual([1752593508, 830]);
-    const writers: Array<[string, () => Promise<unknown>]> = [
-      ['ensure', () => ensureTenant(first!, { ...identity(target), connectionLimit: 5, allocate: false })],
-      ['password', () => setTenantLoginPassword(first!, { ...identity(target), login: target.names.logins[0], password: PASSWORD('race-a') })],
-      ['retire', () => retireTenantLogin(first!, { ...identity(target), login: target.names.logins[1] })],
-      ['drop', () => dropTenant(first!, identity(target))],
+    const impatient: TenantServer = { ...second!, lockWaitMs: 250 };
+    const busy = async (work: Promise<unknown>) => work.then(() => 'not refused', (error: unknown) => error instanceof TenantBusyError ? error.message : `threw ${String(error)}`);
+    const writers = (via: TenantServer): Array<[string, () => Promise<unknown>]> => [
+      ['ensure', () => ensureTenant(via, { ...identity(target), connectionLimit: 5, allocate: false })],
+      ['password', () => setTenantLoginPassword(via, { ...identity(target), login: target.names.logins[0], password: PASSWORD('race-a') })],
+      ['retire', () => retireTenantLogin(via, { ...identity(target), login: target.names.logins[1] })],
+      ['drop', () => dropTenant(via, identity(target))],
     ];
-    for (const [name, writer] of writers) {
+    const patient = writers(first!);
+    for (const [index, [name, refusedWriter]] of writers(impatient).entries()) {
       await holder.query(`SELECT pg_advisory_lock(${key1}, ${key2})`);
       let settled = false;
-      const running = writer().finally(() => { settled = true; });
-      await new Promise((done) => setTimeout(done, 300));
+      const running = patient[index]![1]().finally(() => { settled = true; });
+      const started = Date.now();
+      expect(await busy(refusedWriter()), name).toMatch(/Another change is in progress/);
+      expect(Date.now() - started, name).toBeLessThan(3000);
+      // 4. Readers wait for a writer too, so they never see a change half made.
+      expect(await busy(observeTenant({ ...second!, lockWaitMs: 0 }, identity(target))), name).toMatch(/Another change is in progress/);
+      expect(await busy(listTenants({ ...second!, lockWaitMs: 0 })), name).toMatch(/Another change is in progress/);
       expect(settled, `${name} did not wait for the lock`).toBe(false);
-      expect((await observeTenant(second!, identity(target))).state, name).toBe('ready');
-      expect(await listTenants(second!)).toHaveLength(2);
       await holder.query(`SELECT pg_advisory_unlock(${key1}, ${key2})`);
       await running;
     }
+    // Readers share the lock with each other and keep writers out.
+    await ensureTenant(server, { ...identity(target), connectionLimit: 5, allocate: true });
+    await holder.query(`SELECT pg_advisory_lock_shared(${key1}, ${key2})`);
+    expect((await observeTenant(second!, identity(target))).state).toBe('ready');
+    expect(await listTenants(second!)).toHaveLength(2);
+    expect(await busy(dropTenant(impatient, identity(target)))).toMatch(/Another change is in progress/);
+    expect((await observeTenant(second!, identity(target))).state).toBe('ready');
+    await holder.query(`SELECT pg_advisory_unlock_shared(${key1}, ${key2})`);
+    await dropTenant(server, identity(target));
     // Nothing is left holding the lock.
     expect(await scalar(boot, `SELECT count(*)::int FROM pg_locks WHERE locktype = 'advisory'`)).toBe(0);
     expect(await inventory()).toEqual(ONLY_TWO);
@@ -898,7 +983,7 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     expect(await dropTenant(server, identity(pinned))).toEqual({ database: 'dropped', remainingRoles: [login] });
     expect(await roleNames(pinned)).toEqual([login]);
     // What is left cannot log in anywhere, and the server's inventory still shows it.
-    expect(await attempt(login, PASSWORD('lob-a'), 'postgres')).toBe('28P01');
+    expect(DENIED).toContain(await attempt(login, PASSWORD('lob-a'), 'postgres'));
     expect(await listTenants(server)).toContainEqual({ ...identity(pinned), state: 'partial', database: 'absent', roles: [login], foreignRoles: [] });
     expect(await dropTenant(server, identity(pinned))).toEqual({ database: 'absent', remainingRoles: [login] });
     const cleaner = await connect('boot', undefined, 'postgres');
@@ -920,13 +1005,115 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     const stuck = await ready('stuck');
     const failing = adminServer((session) => ({ query: async (text, values) => { if (/^DROP DATABASE/.test(text)) throw new Error('could not drop'); return session.query(text, values); } }));
     await expect(dropTenant(failing, identity(stuck))).rejects.toThrow('could not drop');
-    expect(await attempt(stuck.names.logins[0], PASSWORD('stuck-a'), stuck.names.database)).toBe('28P01');
+    expect(DENIED).toContain(await attempt(stuck.names.logins[0], PASSWORD('stuck-a'), stuck.names.database));
     expect(await observeTenant(server, identity(stuck))).toMatchObject({ state: 'partial', database: 'dropping' });
     for (const allocate of [false, true]) expect(await refusal(ensureTenant(server, { ...identity(stuck), connectionLimit: 10, allocate }))).toBe('partial');
     expect(await refusal(setTenantLoginPassword(server, { ...identity(stuck), login: stuck.names.logins[0], password: PASSWORD('stuck-a') }))).toBe('partial');
     expect(await dropTenant(server, identity(stuck))).toEqual({ database: 'dropped', remainingRoles: [] });
     expect(await inventory()).toEqual(ONLY_TWO);
   }, 60_000);
+
+  it('1. a lock that could not be released is reported, on a session that lives on', async () => {
+    const client = await connect(ADMIN, ADMIN_PASSWORD, 'postgres');
+    const unlocks = { fail: true };
+    const leaky = adminServer((session) => ({
+      query: async (text, values) => {
+        if (unlocks.fail && /advisory_unlock/.test(text)) throw new Error('the answer was lost');
+        return session.query(text, values);
+      },
+    }), client);
+    const elsewhere: TenantServer = { ...adminServer(undefined, await connect(ADMIN, ADMIN_PASSWORD, 'postgres')), lockWaitMs: 250 };
+    const busy = (work: Promise<unknown>) => work.then(() => 'not refused', (error: unknown) => error instanceof TenantBusyError ? 'busy' : `threw ${String(error)}`);
+
+    // The work finished, the unlock did not: the caller is told both, and told to close the session.
+    const failure = await ensureTenant(leaky, { ...identity(two), connectionLimit: 10, allocate: false }).then(() => undefined, (error: unknown) => error);
+    expect(failure).toBeInstanceOf(TenantLockNotReleasedError);
+    expect((failure as TenantLockNotReleasedError).completed).toBe(true);
+    expect((failure as Error).message).toMatch(/Close this database session/);
+    // The session is alive and really does still hold the lock: nobody else can change or read anything.
+    expect(await scalar(client, 'SELECT 1')).toBe(1);
+    expect(await busy(ensureTenant(elsewhere, { ...identity(two), connectionLimit: 10, allocate: false }))).toBe('busy');
+    expect(await busy(listTenants(elsewhere))).toBe('busy');
+    // Closing it, as told, frees everyone.
+    await close(client);
+    expect(await ensureTenant({ ...elsewhere, lockWaitMs: 10_000 }, { ...identity(two), connectionLimit: 10, allocate: false })).toEqual({ database: 'existing' });
+
+    // The work failed and the unlock failed too: the unlock problem is what is reported, with the work's failure as its cause.
+    const second = await connect(ADMIN, ADMIN_PASSWORD, 'postgres');
+    const both = adminServer((session) => ({
+      query: async (text, values) => {
+        if (/advisory_unlock/.test(text) || /^ALTER ROLE/.test(text)) throw new Error(/advisory_unlock/.test(text) ? 'the answer was lost' : 'refused');
+        return session.query(text, values);
+      },
+    }), second);
+    const double = await setTenantLoginPassword(both, { ...identity(two), login: two.names.logins[1], password: PASSWORD('never-set') }).then(() => undefined, (error: unknown) => error);
+    expect(double).toBeInstanceOf(TenantLockNotReleasedError);
+    expect((double as TenantLockNotReleasedError).completed).toBe(false);
+    expect(String((double as Error).cause)).toMatch(/could not be set/);
+    await close(second);
+    expect((await observeTenant({ ...elsewhere, lockWaitMs: 10_000 }, identity(two))).state).toBe('ready');
+  });
+
+  it('3. leaves no usable session or credential by the time anything is deleted', async () => {
+    const target = await ready('quiet');
+    await setTenantLoginPassword(server, { ...identity(target), login: target.names.logins[1], password: PASSWORD('quiet-b') });
+    const open = [await loginA(target), await loginA(target, 'postgres'), await connect(target.names.logins[1], PASSWORD('quiet-b'), 'template1')];
+
+    // An interruption straight after the "being removed" marker: the logins still work, and the server says the tenant is not ready.
+    const cut = adminServer((session) => ({ query: async (text, values) => { if (/^ALTER ROLE/.test(text)) throw new Error('cut'); return session.query(text, values); } }));
+    await expect(dropTenant(cut, identity(target))).rejects.toThrow('cut');
+    expect(await observeTenant(server, identity(target))).toMatchObject({ state: 'partial', database: 'dropping' });
+    expect(await scalar(open[0]!, 'SELECT 1')).toBe(1);
+    expect(await attempt(target.names.logins[0], PASSWORD('quiet-a'), 'postgres')).toBe('ok');
+
+    // The next run deals with that before it deletes anything: at the moment the database is dropped, both logins are
+    // switched off, have no session in any database, and cannot open a new one.
+    const atDrop: Record<string, unknown> = {};
+    const watching = adminServer((session) => ({
+      query: async (text, values) => {
+        if (/^DROP DATABASE/.test(text)) {
+          atDrop.canLogin = await scalar(boot, 'SELECT bool_or(rolcanlogin) FROM pg_roles WHERE rolname = ANY($1)', [[...target.names.logins]]);
+          atDrop.sessions = await scalar(boot, 'SELECT count(*)::int FROM pg_stat_activity WHERE usename = ANY($1)', [[...target.names.logins]]);
+          atDrop.databaseStillThere = await databaseExists(target.names.database);
+          atDrop.logins = [
+            await attempt(target.names.logins[0], PASSWORD('quiet-a'), 'postgres'), await attempt(target.names.logins[1], PASSWORD('quiet-b'), 'postgres'),
+            await attempt(target.names.logins[0], PASSWORD('quiet-a'), target.names.database),
+          ].every((outcome) => DENIED.includes(outcome));
+        }
+        return session.query(text, values);
+      },
+    }));
+    expect(await dropTenant(watching, identity(target))).toEqual({ database: 'dropped', remainingRoles: [] });
+    expect(atDrop).toEqual({ canLogin: false, sessions: 0, databaseStillThere: true, logins: true });
+    for (const client of open) await expect(client.query('SELECT 1')).rejects.toThrow();
+    expect(await inventory()).toEqual(ONLY_TWO);
+  });
+
+  it('4. the inventory never misses a tenant that existed throughout, while others come and go', async () => {
+    const steady = await ready('steady');
+    const writer: TenantServer = { ...adminServer(undefined, await connect(ADMIN, ADMIN_PASSWORD, 'postgres')), lockWaitMs: 250 };
+    const attempts: string[] = [];
+    let interfered = false;
+    // Between the inventory's scan and its per-tenant checks, another session tries to add one tenant and remove another.
+    const reader = adminServer((session) => ({
+      query: async (text, values) => {
+        const result = await session.query(text, values);
+        if (/UNION ALL/.test(text) && !interfered) {
+          interfered = true;
+          for (const change of [
+            () => ensureTenant(writer, { ...identity(tenant('arriving')), connectionLimit: 5, allocate: true }),
+            () => dropTenant(writer, identity(steady)),
+            () => dropTenant(writer, identity(two)),
+          ]) attempts.push(await change().then(() => 'changed', (error: unknown) => error instanceof TenantBusyError ? 'busy' : String(error)));
+        }
+        return result;
+      },
+    }), await connect(ADMIN, ADMIN_PASSWORD, 'postgres'));
+    expect((await listTenants(reader)).map((entry) => `${entry.names.database}:${entry.state}`)).toEqual(['app_steady:ready', 'app_two:ready']);
+    expect(attempts).toEqual(['busy', 'busy', 'busy']);
+    expect(await inventory()).toEqual(['app_steady:ready', 'app_two:ready']);
+    await dropTenant(server, identity(steady));
+  });
 
   it('leaves the surviving tenant intact after everything above', async () => {
     const session = await loginA(two);

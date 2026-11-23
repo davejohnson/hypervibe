@@ -18,15 +18,16 @@ import { scramVerifier } from '../../../utils/scram.js';
  * superuser), and must be the same login every time: on PostgreSQL 16 and later
  * only the role that created a role may manage it.
  *
- * In the finished state the administrator owns the database and the tenant's
- * owner role owns its `public` schema. The tenant can therefore create tables
+ * The administrator owns the database from the moment it is created; the tenant
+ * never does. The tenant's owner role is given the `public` schema inside it. The tenant can therefore create tables
  * and schemas, but cannot drop the database, lift its connection limit, reopen
  * it to other roles or change its marker.
  *
  * Every privileged session is pinned to `pg_catalog` before anything else runs,
  * so nothing a tenant creates can be picked up by the administrator's queries.
  * Every function that changes something holds one server-wide advisory lock
- * while it works; see `TenantServer.admin`.
+ * while it works, and every function that only reads holds it in shared mode,
+ * so a read never sees a change half made; see `TenantServer.admin`.
  */
 
 export interface TenantNames {
@@ -44,13 +45,15 @@ export interface TenantSession {
 export interface TenantServer {
   /**
    * A privileged session on the server's maintenance database (never a tenant's).
-   * Its `search_path` is changed to `pg_catalog`. Writers are serialized by an
+   * Its `search_path` is changed to `pg_catalog`. Calls are serialized by an
    * advisory lock, and such locks are per database and per session: every caller
    * must use the same maintenance database, and one session must not be shared
-   * by calls running at the same time. A lock wait is bounded only by the
-   * session's own `lock_timeout`.
+   * by calls running at the same time. After a `TenantLockNotReleasedError` the
+   * session must be closed.
    */
   admin: TenantSession;
+  /** How long to wait for another call's lock before giving up with `TenantBusyError`. Default 30 seconds. */
+  lockWaitMs?: number;
   /** Runs `work` in a privileged session connected to the named database, then closes it. Used only while a database is being created. */
   inDatabase<T>(database: string, work: (session: TenantSession) => Promise<T>): Promise<T>;
 }
@@ -86,6 +89,27 @@ export class TenantRefusedError extends Error {
   }
 }
 
+/** Another change is in progress on this server and did not finish within the wait. Nothing was changed. */
+export class TenantBusyError extends Error {
+  constructor() {
+    super('Another change is in progress on this database server. Nothing was changed; try again.');
+    this.name = 'TenantBusyError';
+  }
+}
+
+/**
+ * The lock could not be confirmed released, so this session may still hold it
+ * and block every other call. The caller must close the session; that releases
+ * it. `completed` says whether the requested work itself had finished; when it
+ * had not, `cause` is why.
+ */
+export class TenantLockNotReleasedError extends Error {
+  constructor(readonly completed: boolean, cause?: unknown) {
+    super(`The tenant lock could not be released (the requested work ${completed ? 'finished' : 'did not finish'}). Close this database session before doing anything else.`, { cause });
+    this.name = 'TenantLockNotReleasedError';
+  }
+}
+
 /** The server is older than PostgreSQL 15. Nothing was changed. */
 export class TenantServerUnsupportedError extends Error {
   constructor() {
@@ -101,9 +125,10 @@ const KEY_MAX = 40;
 const TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const VERIFIER = /^SCRAM-SHA-256\$[0-9]+:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/;
 export const TENANT_CONNECTION_LIMIT_MAX = 10_000;
-/** The advisory lock every writer holds, as `pg_advisory_lock(key1, key2)` on the maintenance database: "hvtd", and the plan's issue number. */
+/** The advisory lock every call holds (writers exclusively, readers shared), as `pg_try_advisory_lock(key1, key2)` on the maintenance database: "hvtd", and the plan's issue number. */
 export const TENANT_WRITER_LOCK = [0x68767464, 830] as const;
 const PIN = `SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', false)`;
+const LOCK_RETRY_SECONDS = 0.2;
 /** How long a login's sessions are given to end: 50 checks, a tenth of a second apart. */
 const SESSION_END_CHECKS = 50;
 
@@ -157,6 +182,7 @@ interface RoleState {
   actsAsOwner: boolean;
   /** This role switches to the owner role on every connection. */
   defaultsToOwner: boolean;
+  canLogin: boolean;
   connectionLimit: number;
 }
 
@@ -164,7 +190,6 @@ interface DatabaseState {
   stage: TenantObservation['database'];
   /** False only for a database interrupted between its creation and its first comment. */
   commented: boolean;
-  adminOwned: boolean;
   publicAccess: boolean;
   ownerAccess: boolean;
   connectionLimit: number;
@@ -172,7 +197,7 @@ interface DatabaseState {
 
 interface TenantState { v16: boolean; roles: RoleState[]; database: DatabaseState }
 
-const ABSENT_DATABASE: DatabaseState = { stage: 'absent', commented: false, adminOwned: false, publicAccess: false, ownerAccess: false, connectionLimit: -1 };
+const ABSENT_DATABASE: DatabaseState = { stage: 'absent', commented: false, publicAccess: false, ownerAccess: false, connectionLimit: -1 };
 
 /** Refuses a server older than PostgreSQL 15; true on 16 and later, where role membership has separate options. */
 async function supportedServer(admin: TenantSession): Promise<boolean> {
@@ -198,46 +223,46 @@ async function observe(admin: TenantSession, names: TenantNames, tenantId: strin
      FROM pg_catalog.pg_roles r WHERE r.rolname IN ($1::text, $2::text, $3::text)`, roleNames);
   const roles = roleNames.map((name): RoleState => {
     const row = found.rows.find((candidate) => candidate.name === name);
-    if (!row) return { name, standing: 'absent', held: false, actsAsOwner: false, defaultsToOwner: false, connectionLimit: -1 };
-    // A role of ours that gained server-wide powers, or whose login attribute changed, is no longer the role this module made.
-    const plain = row.elevated === false && row.can_login === (name !== names.owner);
+    if (!row) return { name, standing: 'absent', held: false, actsAsOwner: false, defaultsToOwner: false, canLogin: false, connectionLimit: -1 };
+    // A role of ours that gained server-wide powers, or an owner role that can log in, is no longer the role this module made.
+    // A login that cannot log in is still ours: removal and re-allocation switch logins off.
+    const plain = row.elevated === false && !(name === names.owner && row.can_login !== false);
     return {
-      name, standing: row.comment === roleMarker && plain ? 'ours' : 'foreign', held: row.held === true,
-      actsAsOwner: row.acts_as_owner === true, defaultsToOwner: row.defaults_to_owner === true, connectionLimit: Number(row.connection_limit),
+      name, standing: row.comment === roleMarker && plain ? 'ours' : 'foreign', held: row.held === true, actsAsOwner: row.acts_as_owner === true,
+      defaultsToOwner: row.defaults_to_owner === true, canLogin: row.can_login === true, connectionLimit: Number(row.connection_limit),
     };
   });
   const acl = `pg_catalog.aclexplode(COALESCE(d.datacl, pg_catalog.acldefault('d', d.datdba)))`;
   const databases = await admin.query(
-    `SELECT pg_catalog.shobj_description(d.oid, 'pg_database') AS comment, o.rolname AS owner, o.rolname = current_user AS admin_owned,
-       d.datconnlimit AS connection_limit,
+    `SELECT pg_catalog.shobj_description(d.oid, 'pg_database') AS comment, o.rolname = current_user AS admin_owned,
+       d.datconnlimit AS connection_limit, COALESCE(d.datacl::text = pg_catalog.acldefault('d', d.datdba)::text, true) AS untouched,
        EXISTS (SELECT 1 FROM ${acl} a WHERE a.grantee = 0::oid) AS public_access,
        (SELECT count(DISTINCT a.privilege_type) FROM ${acl} a JOIN pg_catalog.pg_roles g ON g.oid = a.grantee
          WHERE g.rolname = $2::text AND a.privilege_type IN ('CONNECT', 'TEMPORARY', 'CREATE')) = 3::bigint AS owner_access
      FROM pg_catalog.pg_database d JOIN pg_catalog.pg_roles o ON o.oid = d.datdba WHERE d.datname = $1::text`, [names.database, names.owner]);
   const row = databases.rows[0];
   if (!row) return { v16, roles, database: ABSENT_DATABASE };
-  const adminOwned = row.admin_owned === true;
   const connectionLimit = Number(row.connection_limit);
-  // Only the administrator, or this tenant's own marked owner role, may own a database that counts as this tenant's.
-  const ownerRoleOwned = row.owner === names.owner && roles[0]!.standing === 'ours';
   let stage: DatabaseState['stage'] = 'foreign';
-  if (adminOwned || ownerRoleOwned) {
+  // The tenant never owns its database, so only one the administrator owns can be this tenant's.
+  if (row.admin_owned === true) {
     for (const [name, prefix] of Object.entries(DATABASE_MARKERS)) if (row.comment === `${prefix}${tenantId}`) stage = name as keyof typeof DATABASE_MARKERS;
+    // CREATE DATABASE cannot be made atomic with its comment. Exactly the state a database is born in is accepted as
+    // that interruption: no comment, owned by this administrator, no connections allowed, privileges still the defaults,
+    // and all three of this tenant's marked roles present. A database restored or made by hand does not look like that
+    // unless someone using this administrator's login deliberately made it so.
+    if (row.comment === null && connectionLimit === 0 && row.untouched === true && roles.every((role) => role.standing === 'ours')) stage = 'creating';
   }
-  // CREATE DATABASE cannot be made atomic with its comment. Only the exact state a database is born in (owned by the
-  // tenant's marked owner role, no connections allowed, no comment) is accepted as that interruption; a database
-  // restored or made by hand with the same name is not.
-  if (row.comment === null && ownerRoleOwned && connectionLimit === 0) stage = 'creating';
   return {
     v16, roles,
-    database: { stage, commented: row.comment !== null, adminOwned, publicAccess: row.public_access !== false, ownerAccess: row.owner_access === true, connectionLimit },
+    database: { stage, commented: row.comment !== null, publicAccess: row.public_access !== false, ownerAccess: row.owner_access === true, connectionLimit },
   };
 }
 
 function isReady(state: TenantState, names: TenantNames): boolean {
   const { database } = state;
-  return database.stage === 'finished' && database.adminOwned && !database.publicAccess && database.ownerAccess
-    && state.roles.every((role) => role.standing === 'ours' && role.held && (role.name === names.owner || (role.actsAsOwner && role.defaultsToOwner)));
+  return database.stage === 'finished' && !database.publicAccess && database.ownerAccess
+    && state.roles.every((role) => role.standing === 'ours' && role.held && (role.name === names.owner || (role.actsAsOwner && role.defaultsToOwner && role.canLogin)));
 }
 
 function describe(identity: { names: TenantNames; tenantId: string }, state: TenantState): TenantObservation {
@@ -266,26 +291,54 @@ function requireReady(state: TenantState, names: TenantNames): void {
   throw new TenantRefusedError(nothing ? 'absent' : 'partial', nothing ? `Tenant ${names.database} does not exist on this server.` : `Tenant ${names.database} is not finished. Finish creating or removing it first.`);
 }
 
-/** Pins the session, then runs `work` while holding the writers' lock. The state must be read inside `work`. */
-async function exclusively<T>(admin: TenantSession, work: () => Promise<T>): Promise<T> {
-  const [key1, key2] = TENANT_WRITER_LOCK;
+/**
+ * Pins the session, then runs `work` while holding the lock: exclusively for a change, shared for a read. The state
+ * must be read inside `work`. Waiting for the lock is bounded, and a lock that cannot be confirmed released is reported.
+ */
+async function locked<T>(server: TenantServer, mode: 'exclusive' | 'shared', work: () => Promise<T>): Promise<T> {
+  const { admin } = server;
+  const waitMs = server.lockWaitMs ?? 30_000;
+  if (typeof waitMs !== 'number' || !Number.isFinite(waitMs) || waitMs < 0) throw new Error('The lock wait must be a number of milliseconds, zero or more.');
+  const call = (name: string) => `SELECT pg_catalog.pg_${name}${mode === 'shared' ? '_shared' : ''}(${TENANT_WRITER_LOCK[0]}, ${TENANT_WRITER_LOCK[1]}) AS answer`;
+  const release = async (completed: boolean, cause?: unknown) => {
+    const released = await admin.query(call('advisory_unlock')).then((result) => result.rows[0]?.answer === true, () => false);
+    if (!released) throw new TenantLockNotReleasedError(completed, cause);
+  };
+  await admin.query(PIN);
+  let held = false;
   try {
-    await admin.query(PIN);
-    await admin.query(`SELECT pg_catalog.pg_advisory_lock(${key1}, ${key2})`);
-    return await work();
-  } finally {
-    // If this fails the session is gone, and the lock went with it.
-    await admin.query(`SELECT pg_catalog.pg_advisory_unlock(${key1}, ${key2})`).catch(() => {});
+    for (let waited = 0; !held; waited += LOCK_RETRY_SECONDS * 1000) {
+      held = (await admin.query(call('try_advisory_lock'))).rows[0]?.answer === true;
+      if (held || waited >= waitMs) break;
+      await admin.query(`SELECT pg_catalog.pg_sleep(${LOCK_RETRY_SECONDS})`);
+    }
+  } catch (error) {
+    // The lock may have been taken even though the answer was lost. Give it back; if that cannot be confirmed either, say so.
+    await admin.query(call('advisory_unlock')).catch(() => { throw new TenantLockNotReleasedError(false, error); });
+    throw error;
   }
+  if (!held) throw new TenantBusyError();
+  let result: T;
+  try {
+    result = await work();
+  } catch (error) {
+    await release(false, error);
+    throw error;
+  }
+  await release(true);
+  return result;
 }
 
 const grantRole = (v16: boolean, role: string, member: string) => `GRANT ${ident(role)} TO ${member}${v16 ? ' WITH INHERIT TRUE, SET TRUE' : ''}`;
 
-/** Takes a login's password away and ends its sessions, waiting a bounded time; returns how many sessions are still there. */
-async function disableLogin(admin: TenantSession, v16: boolean, role: RoleState): Promise<number> {
+/**
+ * Takes a login's password away, optionally switches the login off altogether, and ends its sessions in every
+ * database on the server, waiting a bounded time; returns how many sessions are still there.
+ */
+async function disableLogin(admin: TenantSession, v16: boolean, role: RoleState, switchOff: boolean): Promise<number> {
   // Ending another role's sessions needs that role's privileges.
   if (!role.held) await admin.query(grantRole(v16, role.name, 'CURRENT_USER'));
-  await admin.query(`ALTER ROLE ${ident(role.name)} PASSWORD NULL`);
+  await admin.query(`ALTER ROLE ${ident(role.name)} ${switchOff ? 'NOLOGIN ' : ''}PASSWORD NULL`);
   await admin.query(`SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity WHERE usename = $1::name AND pid <> pg_catalog.pg_backend_pid()`, [role.name]);
   for (let check = 1; ; check++) {
     const sessions = await admin.query(`SELECT count(*)::int AS remaining FROM pg_catalog.pg_stat_activity WHERE usename = $1::name`, [role.name]);
@@ -295,21 +348,28 @@ async function disableLogin(admin: TenantSession, v16: boolean, role: RoleState)
   }
 }
 
-/** Read-only: what exists for this tenant and whether it is finished. Takes no lock. */
+/** Switches off every existing login of the tenant; refuses, with nothing deleted or created, while any of their sessions is still open. */
+async function switchOffLogins(admin: TenantSession, state: TenantState, names: TenantNames): Promise<void> {
+  let remaining = 0;
+  for (const role of state.roles) if (role.standing === 'ours' && role.name !== names.owner) remaining += await disableLogin(admin, state.v16, role, true);
+  if (remaining > 0) throw new TenantRefusedError('partial', `Sessions of tenant ${names.database} are still open. Its logins are switched off; run this again once the sessions have ended.`);
+}
+
+/** Read-only: what exists for this tenant and whether it is finished. Never sees a change half made. */
 export async function observeTenant(server: TenantServer, params: TenantIdentity): Promise<TenantObservation> {
   const identity = checked(params);
-  await server.admin.query(PIN);
-  return describe(identity, await observe(server.admin, identity.names, identity.tenantId));
+  return locked(server, 'shared', async () => describe(identity, await observe(server.admin, identity.names, identity.tenantId)));
 }
 
 /**
  * Finishes or repairs the tenant, and creates it when `allocate` is true. Safe
  * to repeat after an interruption at any point; on a ready tenant it only reads.
  *
- * Without `allocate` it never creates a database: a missing database is
- * refused, so a lost database is not quietly replaced by an empty one. With
- * `allocate`, roles left over from an earlier database first lose their
- * passwords and sessions, so no existing credential opens the new database.
+ * Unless `allocate` is exactly `true` it never creates a database: a missing
+ * database is refused, so a lost database is not quietly replaced by an empty
+ * one. When allocating, logins left over from an earlier database are first
+ * switched off and their sessions ended everywhere; while any session remains
+ * the allocation is refused. No existing credential opens the new database.
  *
  * It never sets a password: new logins have none until `setTenantLoginPassword`.
  * `connectionLimit` caps the tenant's database and, separately, each login
@@ -318,8 +378,9 @@ export async function observeTenant(server: TenantServer, params: TenantIdentity
 export async function ensureTenant(server: TenantServer, params: TenantIdentity & { connectionLimit: number; allocate: boolean }): Promise<{ database: 'created' | 'existing' }> {
   const { names, tenantId } = checked(params);
   const limit = checkedLimit(params.connectionLimit);
+  if (typeof params.allocate !== 'boolean') throw new Error('Say whether a new database may be created: `allocate` must be true or false.');
   const { admin } = server;
-  return exclusively(admin, async () => {
+  return locked(server, 'exclusive', async () => {
     let state = await observe(admin, names, tenantId);
     refuseForeign(state, names);
     if (state.database.stage === 'dropping') throw new TenantRefusedError('partial', `Tenant ${names.database} is being removed. Finish removing it before creating it again.`);
@@ -330,7 +391,7 @@ export async function ensureTenant(server: TenantServer, params: TenantIdentity 
         ? `Tenant ${names.database} has roles but no database. A new, empty database is created only when allocating.`
         : `Tenant ${names.database} does not exist on this server.`);
     }
-    if (create) for (const role of leftover) if (role.name !== names.owner) await disableLogin(admin, state.v16, role);
+    if (create) await switchOffLogins(admin, state, names);
 
     // A role and its marker are created in one statement, so a role with this name is never half ours.
     const roleMarker = literal(`${ROLE_MARKER}${tenantId}`);
@@ -339,7 +400,7 @@ export async function ensureTenant(server: TenantServer, params: TenantIdentity 
       const attributes = role.name === names.owner ? 'NOLOGIN NOCREATEDB NOCREATEROLE INHERIT' : `LOGIN NOCREATEDB NOCREATEROLE INHERIT CONNECTION LIMIT ${limit}`;
       await admin.query(`DO $tenant$ BEGIN CREATE ROLE ${ident(role.name)} ${attributes}; COMMENT ON ROLE ${ident(role.name)} IS ${roleMarker}; END $tenant$`);
     }
-    if (missing.length) state = await observe(admin, names, tenantId);
+    if (missing.length || create) state = await observe(admin, names, tenantId);
     for (const role of state.roles) {
       // The administrator acts as the owner role to hand objects over, and must hold a login to end its sessions.
       if (!role.held) await admin.query(grantRole(state.v16, role.name, 'CURRENT_USER'));
@@ -348,31 +409,32 @@ export async function ensureTenant(server: TenantServer, params: TenantIdentity 
       if (!role.defaultsToOwner) await admin.query(`ALTER ROLE ${ident(role.name)} SET role = ${literal(names.owner)}`);
       // A database's own limit does not count sessions the login opens elsewhere on the server; this one does.
       if (role.connectionLimit !== limit) await admin.query(`ALTER ROLE ${ident(role.name)} CONNECTION LIMIT ${limit}`);
+      // A login switched off by an earlier removal or allocation has no password, so switching it back on opens nothing.
+      if (!role.canLogin) await admin.query(`ALTER ROLE ${ident(role.name)} LOGIN`);
     }
 
     const database = ident(names.database);
     // Copied from template0, which nobody can connect to or change: nothing left in template1 comes along, and a
-    // session on template1 cannot block the copy. Born with no connections allowed and owned by the owner role.
-    if (create) await admin.query(`CREATE DATABASE ${database} OWNER ${ident(names.owner)} TEMPLATE template0 CONNECTION LIMIT 0`);
-    const now: DatabaseState = create ? { stage: 'creating', commented: false, adminOwned: false, publicAccess: true, ownerAccess: false, connectionLimit: 0 } : state.database;
+    // session on template1 cannot block the copy. Born owned by the administrator, with no connections allowed.
+    if (create) await admin.query(`CREATE DATABASE ${database} TEMPLATE template0 CONNECTION LIMIT 0`);
+    const now: DatabaseState = create ? { stage: 'creating', commented: false, publicAccess: true, ownerAccess: false, connectionLimit: 0 } : state.database;
     const finished = now.stage === 'finished';
     // Marked as being created before anything else changes, so from here on it is recognised by its comment alone.
     if (!now.commented) await admin.query(`COMMENT ON DATABASE ${database} IS ${literal(`${DATABASE_MARKERS.creating}${tenantId}`)}`);
     if (now.publicAccess) await admin.query(`REVOKE ALL ON DATABASE ${database} FROM PUBLIC`);
-    // From here the administrator can connect. Nobody else can: PUBLIC is revoked and the logins have no password yet.
+    // CREATE on the database is also what lets the owner role be given the `public` schema below.
+    if (!now.ownerAccess) await admin.query(`GRANT CONNECT, TEMPORARY, CREATE ON DATABASE ${database} TO ${ident(names.owner)}`);
     if (now.connectionLimit !== limit) await admin.query(`ALTER DATABASE ${database} CONNECTION LIMIT ${limit}`);
     if (!finished) {
       await server.inDatabase(names.database, async (session) => {
         await session.query(PIN);
         const found = await session.query(`SELECT pg_catalog.pg_get_userbyid(n.nspowner) AS owner FROM pg_catalog.pg_namespace n WHERE n.nspname = 'public'`);
         if (!found.rows[0]) throw new Error(`Database ${names.database} has no public schema to give to its tenant.`);
-        // `public` belongs to "the database owner", which is about to become the administrator; name the tenant's owner role instead.
+        // `public` arrives owned by pg_database_owner, which means whoever owns the database: here the administrator.
+        // Naming the tenant's owner role instead gives the tenant the schema and nothing else of the database.
         if (found.rows[0].owner !== names.owner) await session.query(`ALTER SCHEMA public OWNER TO ${ident(names.owner)}`);
       });
     }
-    if (!now.adminOwned) await admin.query(`ALTER DATABASE ${database} OWNER TO CURRENT_USER`);
-    // Changing the owner removes the previous owner's privileges, so they are granted afterwards.
-    if (!now.adminOwned || !now.ownerAccess) await admin.query(`GRANT CONNECT, TEMPORARY, CREATE ON DATABASE ${database} TO ${ident(names.owner)}`);
     // The finished marker comes last: it is what lets passwords be set.
     if (!finished) await admin.query(`COMMENT ON DATABASE ${database} IS ${literal(`${DATABASE_MARKERS.finished}${tenantId}`)}`);
     return { database: create ? 'created' : 'existing' };
@@ -390,7 +452,7 @@ export async function setTenantLoginPassword(server: TenantServer, params: Tenan
   if (typeof params.password !== 'string' || params.password.length < 16) throw new Error('A tenant login password must be at least 16 characters.');
   const verifier = scramVerifier(params.password);
   if (!VERIFIER.test(verifier)) throw new Error('Unexpected SCRAM verifier format.');
-  await exclusively(server.admin, async () => {
+  await locked(server, 'exclusive', async () => {
     requireReady(await observe(server.admin, names, tenantId), names);
     try {
       await server.admin.query(`ALTER ROLE ${ident(login)} PASSWORD ${literal(verifier)}`);
@@ -411,41 +473,40 @@ export async function setTenantLoginPassword(server: TenantServer, params: Tenan
 export async function retireTenantLogin(server: TenantServer, params: TenantIdentity & { login: string }): Promise<{ remainingSessions: number }> {
   const { names, tenantId } = checked(params);
   const login = checkedLogin(names, params.login);
-  return exclusively(server.admin, async () => {
+  return locked(server, 'exclusive', async () => {
     const state = await observe(server.admin, names, tenantId);
     requireReady(state, names);
-    return { remainingSessions: await disableLogin(server.admin, state.v16, state.roles.find((role) => role.name === login)!) };
+    return { remainingSessions: await disableLogin(server.admin, state.v16, state.roles.find((role) => role.name === login)!, false) };
   });
 }
 
 /**
- * Removes the tenant: marks its database as being removed, disables its logins
- * (no password, sessions ended), drops the database, then drops the roles. Only
- * a tenant whose markers match is touched. Safe to repeat.
+ * Removes the tenant, in this order: marks its database as being removed;
+ * switches both logins off (cannot log in, no password); ends their sessions in
+ * every database on the server and confirms they are gone; only then drops the
+ * database, then the roles. Only a tenant whose markers match is touched. Safe
+ * to repeat: every run switches the logins off again before anything else.
  *
- * A role that something elsewhere on the server still depends on (an object it
- * owns in another database, a grant another tenant gave it) cannot be dropped.
- * That is reported in `remainingRoles`, not thrown: those roles are disabled,
- * stay in the inventory, and a repeat removes them once the dependency is gone.
+ * While a session of the tenant will not end, nothing is deleted and the call
+ * is refused (`partial`). A role that something elsewhere on the server still
+ * depends on (an object it owns in another database, a grant another tenant
+ * gave it) cannot be dropped: that is reported in `remainingRoles`, not thrown.
+ * Those roles are switched off, stay in the inventory, and a repeat removes
+ * them once the dependency is gone.
  */
 export async function dropTenant(server: TenantServer, params: TenantIdentity): Promise<{ database: 'dropped' | 'absent'; remainingRoles: string[] }> {
   const { names, tenantId } = checked(params);
   const { admin } = server;
-  return exclusively(admin, async () => {
+  return locked(server, 'exclusive', async () => {
     const state = await observe(admin, names, tenantId);
     refuseForeign(state, names);
     const present = state.database.stage !== 'absent';
-    const ours = state.roles.filter((role) => role.standing === 'ours');
-    // Dropping a database not yet handed to the administrator needs the owner role's privileges.
-    for (const role of ours) if (!role.held) await admin.query(grantRole(state.v16, role.name, 'CURRENT_USER'));
     if (present && state.database.stage !== 'dropping') await admin.query(`COMMENT ON DATABASE ${ident(names.database)} IS ${literal(`${DATABASE_MARKERS.dropping}${tenantId}`)}`);
-    // Credentials go first, so no later failure leaves a working login behind.
-    const busy = new Set<string>();
-    for (const role of ours) if (role.name !== names.owner && await disableLogin(admin, state.v16, { ...role, held: true }) > 0) busy.add(role.name);
+    await switchOffLogins(admin, state, names);
     if (present) await admin.query(`DROP DATABASE ${ident(names.database)} WITH (FORCE)`);
-    const remainingRoles = [...busy];
+    const remainingRoles: string[] = [];
     for (const name of [...names.logins, names.owner]) {
-      if (busy.has(name) || !ours.some((role) => role.name === name)) continue;
+      if (state.roles.find((role) => role.name === name)!.standing !== 'ours') continue;
       try {
         await admin.query(`DROP ROLE ${ident(name)}`);
       } catch (error) {
@@ -466,28 +527,30 @@ export async function dropTenant(server: TenantServer, params: TenantIdentity): 
  */
 export async function listTenants(server: TenantServer): Promise<TenantObservation[]> {
   const { admin } = server;
-  await admin.query(PIN);
-  await supportedServer(admin);
-  const found = await admin.query(
-    `SELECT 'database' AS kind, d.datname::text AS name, pg_catalog.shobj_description(d.oid, 'pg_database') AS comment FROM pg_catalog.pg_database d
-     UNION ALL SELECT 'role', r.rolname::text, pg_catalog.shobj_description(r.oid, 'pg_authid') FROM pg_catalog.pg_roles r`);
-  const claims = new Map<string, TenantIdentity>();
-  for (const row of found.rows) {
-    const name = String(row.name);
-    const comment = typeof row.comment === 'string' ? row.comment : '';
-    const prefix = (row.kind === 'database' ? Object.values(DATABASE_MARKERS) : [ROLE_MARKER]).find((candidate) => comment.startsWith(candidate));
-    const key = row.kind === 'database' ? name.slice(4) : name.slice(4).replace(/_(?:owner|a|b)$/, '');
-    if (prefix === undefined || !name.startsWith('app_') || key.length > KEY_MAX || !KEY.test(key)) continue;
-    const names = tenantNames(key);
-    const tenantId = comment.slice(prefix.length);
-    if (!TENANT_ID.test(tenantId) || ![names.database, names.owner, ...names.logins].includes(name)) continue;
-    claims.set(`${names.database} ${tenantId}`, { names, tenantId });
-  }
-  const tenants: TenantObservation[] = [];
-  for (const key of [...claims.keys()].sort()) {
-    const identity = claims.get(key)!;
-    const seen = describe(identity, await observe(admin, identity.names, identity.tenantId));
-    if (seen.state !== 'absent') tenants.push(seen);
-  }
-  return tenants;
+  return locked(server, 'shared', async () => {
+    await supportedServer(admin);
+    const found = await admin.query(
+      `SELECT 'database' AS kind, d.datname::text AS name, pg_catalog.shobj_description(d.oid, 'pg_database') AS comment FROM pg_catalog.pg_database d
+       UNION ALL SELECT 'role', r.rolname::text, pg_catalog.shobj_description(r.oid, 'pg_authid') FROM pg_catalog.pg_roles r`);
+    const claims = new Map<string, TenantIdentity>();
+    for (const row of found.rows) {
+      const name = String(row.name);
+      const comment = typeof row.comment === 'string' ? row.comment : '';
+      const prefix = (row.kind === 'database' ? Object.values(DATABASE_MARKERS) : [ROLE_MARKER]).find((candidate) => comment.startsWith(candidate));
+      const key = row.kind === 'database' ? name.slice(4) : name.slice(4).replace(/_(?:owner|a|b)$/, '');
+      if (prefix === undefined || !name.startsWith('app_') || key.length > KEY_MAX || !KEY.test(key)) continue;
+      const names = tenantNames(key);
+      const tenantId = comment.slice(prefix.length);
+      if (!TENANT_ID.test(tenantId) || ![names.database, names.owner, ...names.logins].includes(name)) continue;
+      claims.set(`${names.database} ${tenantId}`, { names, tenantId });
+    }
+    // The shared lock keeps every writer out between the scan above and the checks below.
+    const tenants: TenantObservation[] = [];
+    for (const key of [...claims.keys()].sort()) {
+      const identity = claims.get(key)!;
+      const seen = describe(identity, await observe(admin, identity.names, identity.tenantId));
+      if (seen.state !== 'absent') tenants.push(seen);
+    }
+    return tenants;
+  });
 }
