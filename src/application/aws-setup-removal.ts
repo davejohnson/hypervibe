@@ -61,9 +61,11 @@ function localRecords(accountId: string) {
   for (const project of projectRepo.findAll()) {
     for (const environment of environmentRepo.findByProjectId(project.id)) {
       const bindings = asRecord(environment.platformBindings);
+      // Teardown stamps the environment and empties its engine record; a later deploy fills the engine record again.
+      const tornDown = typeof asRecord(bindings.aws).tornDownAt === 'string' && !Object.keys(asRecord(bindings.engine)).length;
       // An AWS environment whose account is not readable counts: unknown is not "somewhere else".
-      if (bindings.provider === 'aws' && (bindings.projectId === accountId || typeof bindings.projectId !== 'string')) environments.push(`${project.name}/${environment.name}`);
-      // A torn-down environment keeps only where its final snapshot is; the account is not recorded, so the region is searched.
+      if (bindings.provider === 'aws' && !tornDown && (bindings.projectId === accountId || typeof bindings.projectId !== 'string')) environments.push(`${project.name}/${environment.name}`);
+      // A torn-down environment's final snapshot region is searched whichever account it was in.
       const snapshotRegion = asRecord(asRecord(bindings.aws).finalSnapshot).region;
       if (typeof snapshotRegion === 'string' && /^[a-z]{2}(?:-gov)?-[a-z]+-\d$/.test(snapshotRegion)) regions.add(snapshotRegion);
     }

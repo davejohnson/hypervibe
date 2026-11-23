@@ -1,8 +1,8 @@
 import {
   DeleteAccessKeyCommand, DeleteOpenIDConnectProviderCommand, DeletePolicyCommand, DeletePolicyVersionCommand, DeleteRoleCommand, DeleteUserCommand, DeleteUserPolicyCommand,
-  DetachRolePolicyCommand, GetOpenIDConnectProviderCommand, GetPolicyCommand, GetRoleCommand, GetUserCommand, IAMClient, ListAccessKeysCommand, ListAttachedRolePoliciesCommand,
-  ListAttachedUserPoliciesCommand, ListEntitiesForPolicyCommand, ListGroupsForUserCommand, ListOpenIDConnectProvidersCommand, ListPolicyVersionsCommand, ListRolePoliciesCommand,
-  ListRolesCommand, ListUserPoliciesCommand, NoSuchEntityException,
+  DetachRolePolicyCommand, GetLoginProfileCommand, GetOpenIDConnectProviderCommand, GetPolicyCommand, GetRoleCommand, GetUserCommand, IAMClient, ListAccessKeysCommand, ListAttachedRolePoliciesCommand,
+  ListAttachedUserPoliciesCommand, ListEntitiesForPolicyCommand, ListGroupsForUserCommand, ListInstanceProfilesForRoleCommand, ListMFADevicesCommand, ListOpenIDConnectProvidersCommand,
+  ListPolicyVersionsCommand, ListRolePoliciesCommand, ListRolesCommand, ListServiceSpecificCredentialsCommand, ListSigningCertificatesCommand, ListSSHPublicKeysCommand, ListUserPoliciesCommand, NoSuchEntityException,
 } from '@aws-sdk/client-iam';
 import { DescribeDBClusterSnapshotsCommand, DescribeDBClustersCommand, RDSClient } from '@aws-sdk/client-rds';
 import type { AwsSignInSession } from './aws-signin.client.js';
@@ -84,14 +84,23 @@ async function pages(client: AwsSender, command: (marker?: string) => object, pi
 async function orAbsent<T>(read: () => Promise<T>): Promise<T | undefined> {
   try { return await read(); } catch (error) { if (isMissing(error)) return undefined; throw error; }
 }
+/** One named thing, or undefined only when AWS says it does not exist. An answer without the thing in it is unreadable, not absent. */
+async function one(client: AwsSender, command: object, key: string): Promise<any> {
+  const answer = await orAbsent(() => client.send(command));
+  if (answer === undefined) return undefined;
+  if (!answer?.[key] || typeof answer[key] !== 'object') throw new Unreadable();
+  return answer[key];
+}
 
 async function readRole(iam: AwsSender, name: string) {
-  const role = (await orAbsent(() => iam.send(new GetRoleCommand({ RoleName: name }))))?.Role;
+  const role = await one(iam, new GetRoleCommand({ RoleName: name }), 'Role');
   if (!role) return undefined;
   if (role.RoleName !== name || typeof role.Path !== 'string') throw new Unreadable();
   const attached = strings(await pages(iam, (Marker) => new ListAttachedRolePoliciesCommand({ RoleName: name, Marker }), (page) => page.AttachedPolicies), 'PolicyArn');
   const inline = await pages(iam, (Marker) => new ListRolePoliciesCommand({ RoleName: name, Marker }), (page) => page.PolicyNames);
-  return { role, attached, inline };
+  // AWS refuses to delete a role that is still in an instance profile.
+  const profiles = await pages(iam, (Marker) => new ListInstanceProfilesForRoleCommand({ RoleName: name, Marker }), (page) => page.InstanceProfiles);
+  return { role, attached, inline, profiles };
 }
 function roleProblem(found: NonNullable<Awaited<ReturnType<typeof readRole>>>, expectedTrust: unknown, allowed: string): string | undefined {
   if (found.role.Path !== AWS_PATH) return `it is not under ${AWS_PATH}`;
@@ -100,6 +109,7 @@ function roleProblem(found: NonNullable<Awaited<ReturnType<typeof readRole>>>, e
   const extra = found.attached.filter((arn) => arn !== allowed);
   if (extra.length) return `it has other policies attached (${few(extra.map((arn) => arn.split('/').at(-1)!))})`;
   if (found.inline.length) return 'it has policies of its own that Hypervibe did not add';
+  if (found.profiles.length) return 'servers use it through an instance profile Hypervibe did not add';
   return undefined;
 }
 const roleItem = (id: AwsSetupItem['id'], name: string, attached: string[], label: string): AwsSetupItem => ({ id, label, steps: [
@@ -108,7 +118,7 @@ const roleItem = (id: AwsSetupItem['id'], name: string, attached: string[], labe
 ] });
 
 async function readPolicy(iam: AwsSender, arn: string) {
-  const policy = (await orAbsent(() => iam.send(new GetPolicyCommand({ PolicyArn: arn }))))?.Policy;
+  const policy = await one(iam, new GetPolicyCommand({ PolicyArn: arn }), 'Policy');
   if (!policy) return undefined;
   if (policy.Arn !== arn || typeof policy.AttachmentCount !== 'number' || typeof policy.PermissionsBoundaryUsageCount !== 'number') throw new Unreadable();
   // No usage filter: both ordinary attachments and uses as a permissions boundary are listed.
@@ -140,14 +150,23 @@ export async function readAwsSetup(clients: AwsRemovalClients, accountId: string
     if (olderRoles.length) blockers.push(`deploy roles from an earlier Hypervibe version: ${few(olderRoles)} (run hv_connections provider="aws" action="connect" once to replace them)`);
 
     reading = `user ${LOCAL_USER}`;
-    const user = (await orAbsent(() => iam.send(new GetUserCommand({ UserName: LOCAL_USER }))))?.User;
+    const user = await one(iam, new GetUserCommand({ UserName: LOCAL_USER }), 'User');
     if (user) {
       if (user.UserName !== LOCAL_USER || typeof user.Path !== 'string') throw new Unreadable();
       const keys = strings(await pages(iam, (Marker) => new ListAccessKeysCommand({ UserName: LOCAL_USER, Marker }), (page) => page.AccessKeyMetadata), 'AccessKeyId');
       const inline = await pages(iam, (Marker) => new ListUserPoliciesCommand({ UserName: LOCAL_USER, Marker }), (page) => page.PolicyNames) as string[];
       const attached = await pages(iam, (Marker) => new ListAttachedUserPoliciesCommand({ UserName: LOCAL_USER, Marker }), (page) => page.AttachedPolicies);
       const groups = await pages(iam, (Marker) => new ListGroupsForUserCommand({ UserName: LOCAL_USER, Marker }), (page) => page.Groups);
-      const problem = user.Path !== AWS_PATH ? `it is not under ${AWS_PATH}` : !tagged(user.Tags) ? 'it does not carry Hypervibe\'s tag'
+      // AWS refuses to delete a user that has any of these, and setup adds none of them. Checked before anything of the user's is deleted.
+      const password = await orAbsent(() => iam.send(new GetLoginProfileCommand({ UserName: LOCAL_USER })));
+      const otherCredentials = [
+        await pages(iam, (Marker) => new ListMFADevicesCommand({ UserName: LOCAL_USER, Marker }), (page) => page.MFADevices),
+        await pages(iam, (Marker) => new ListSSHPublicKeysCommand({ UserName: LOCAL_USER, Marker }), (page) => page.SSHPublicKeys),
+        await pages(iam, (Marker) => new ListSigningCertificatesCommand({ UserName: LOCAL_USER, Marker }), (page) => page.Certificates),
+        // Not paginated.
+        await pages(iam, () => new ListServiceSpecificCredentialsCommand({ UserName: LOCAL_USER }), (page) => page.ServiceSpecificCredentials),
+      ].some((list) => list.length);
+      const problem = password || otherCredentials ? 'it has a password or other sign-in credentials Hypervibe did not add' : user.Path !== AWS_PATH ? `it is not under ${AWS_PATH}` : !tagged(user.Tags) ? 'it does not carry Hypervibe\'s tag'
         : attached.length || groups.length || inline.some((name) => name !== LOCAL_USER_POLICY) ? 'it has permissions or groups Hypervibe did not add' : undefined;
       if (problem) note(`user ${LOCAL_USER}`, problem, `${IAM_CONSOLE}/users/details/${LOCAL_USER}`);
       else items.push({ id: 'local-user', label: `User ${LOCAL_USER}${keys.length ? ` and its ${keys.length === 1 ? 'access key' : `${keys.length} access keys`}` : ''}`, steps: [

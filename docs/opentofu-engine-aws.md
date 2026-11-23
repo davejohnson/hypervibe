@@ -247,10 +247,12 @@ preview again to continue.
 Limits: databases and snapshots are looked for only in regions Hypervibe has a
 local record of (saved access, and torn-down environments' snapshots); the
 result names them. Other regional leftovers (Parameter Store settings, log
-groups, images) are not looked for; teardown removes those. Checks for a login
-profile, MFA device or SSH key on `hypervibe-local` are not made, so AWS would
-refuse that user's deletion after its keys are gone. The AWS console links are
-unverified.
+groups, images) are not looked for; teardown removes those. A `hypervibe-local`
+user with a console password, MFA device, SSH key, signing certificate or
+service credential, and a role in an instance profile, are left alone, because
+AWS would refuse to delete them after their keys and policies were gone. GitHub
+repositories that still deploy through the deploy role are not detected; the
+preview warns that they lose access. The AWS console links are unverified.
 
 ## Waking on-demand workers
 

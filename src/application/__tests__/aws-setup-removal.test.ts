@@ -45,11 +45,11 @@ const githubTrust = (subjects: string | string[]) => ({ Sid: 'GitHubActions', Ef
  * DescribeDBClusterSnapshots (lists under DBClusters / DBClusterSnapshots, a Marker
  * only while more exists).
  */
-interface Role { Path: string; Tags?: typeof TAGS; trust: unknown; attached: string[]; inline: string[]; boundary?: string }
+interface Role { Path: string; Tags?: typeof TAGS; trust: unknown; attached: string[]; inline: string[]; boundary?: string; profiles?: string[] }
 interface Account {
   roles: Record<string, Role>;
   policies: Record<string, { Description?: string; versions: string[] }>;
-  users: Record<string, { Path: string; Tags?: typeof TAGS; keys: string[]; inline: string[]; attached: string[]; groups: string[] }>;
+  users: Record<string, { Path: string; Tags?: typeof TAGS; keys: string[]; inline: string[]; attached: string[]; groups: string[]; password?: boolean; mfa?: string[] }>;
   oidc: Record<string, { Tags?: typeof TAGS }>;
   clusters: Record<string, Array<{ DBClusterIdentifier: string; TagList?: typeof TAGS }>>;
   snapshots: Record<string, Array<{ DBClusterSnapshotIdentifier: string; TagList?: typeof TAGS }>>;
@@ -96,8 +96,15 @@ function clientsFor(aws: Account) {
       case 'GetRole': if (!role) throw missing(); return { Role: { ...roleShape(input.RoleName!, role), ...(role.Tags ? { Tags: role.Tags } : {}) } };
       case 'ListAttachedRolePolicies': if (!role) throw missing(); return { AttachedPolicies: role.attached.map((PolicyArn) => ({ PolicyName: PolicyArn.split('/').at(-1), PolicyArn })), IsTruncated: false };
       case 'ListRolePolicies': if (!role) throw missing(); return { PolicyNames: role.inline, IsTruncated: false };
+      case 'ListInstanceProfilesForRole': if (!role) throw missing(); return { InstanceProfiles: (role.profiles ?? []).map((InstanceProfileName) => ({ InstanceProfileName })), IsTruncated: false };
+      // GetLoginProfile raises NoSuchEntity when the user has no console password.
+      case 'GetLoginProfile': if (!user?.password) throw missing(); return { LoginProfile: { UserName: input.UserName, CreateDate: new Date(0) } };
+      case 'ListMFADevices': if (!user) throw missing(); return { MFADevices: (user.mfa ?? []).map((SerialNumber) => ({ UserName: input.UserName, SerialNumber })), IsTruncated: false };
+      case 'ListSSHPublicKeys': return { SSHPublicKeys: [], IsTruncated: false };
+      case 'ListSigningCertificates': if (!user) throw missing(); return { Certificates: [], IsTruncated: false };
+      case 'ListServiceSpecificCredentials': if (!user) throw missing(); return { ServiceSpecificCredentials: [] };
       case 'DetachRolePolicy': if (!role || !role.attached.includes(input.PolicyArn!)) throw missing(); role.attached = role.attached.filter((arn) => arn !== input.PolicyArn); return {};
-      case 'DeleteRole': if (!role) throw missing(); if (role.attached.length || role.inline.length) throw refuse('DeleteConflictException'); delete aws.roles[input.RoleName!]; return {};
+      case 'DeleteRole': if (!role) throw missing(); if (role.attached.length || role.inline.length || role.profiles?.length) throw refuse('DeleteConflictException'); delete aws.roles[input.RoleName!]; return {};
       case 'GetPolicy': if (!policy) throw missing(); return { Policy: { PolicyName: input.PolicyArn!.split('/').at(-1), PolicyId: 'ANPAEXAMPLE', Arn: input.PolicyArn, Path: '/hypervibe/', DefaultVersionId: policy.versions.at(-1),
         AttachmentCount: Object.values(aws.roles).filter((entry) => entry.attached.includes(input.PolicyArn!)).length, PermissionsBoundaryUsageCount: Object.values(aws.roles).filter((entry) => entry.boundary === input.PolicyArn).length,
         IsAttachable: true, ...(policy.Description ? { Description: policy.Description } : {}), Tags: [] } };
@@ -112,7 +119,7 @@ function clientsFor(aws: Account) {
       case 'ListGroupsForUser': if (!user) throw missing(); return { Groups: user.groups.map((GroupName) => ({ GroupName, Path: '/', GroupId: 'AGPAEXAMPLE', Arn: `arn:aws:iam::${ACCOUNT}:group/${GroupName}`, CreateDate: new Date(0) })), IsTruncated: false };
       case 'DeleteAccessKey': if (!user || !user.keys.includes(input.AccessKeyId!)) throw missing(); user.keys = user.keys.filter((id) => id !== input.AccessKeyId); return {};
       case 'DeleteUserPolicy': if (!user || !user.inline.includes(input.PolicyName!)) throw missing(); user.inline = user.inline.filter((id) => id !== input.PolicyName); return {};
-      case 'DeleteUser': if (!user) throw missing(); if (user.keys.length || user.inline.length) throw refuse('DeleteConflictException'); delete aws.users[input.UserName!]; return {};
+      case 'DeleteUser': if (!user) throw missing(); if (user.keys.length || user.inline.length || user.password || user.mfa?.length) throw refuse('DeleteConflictException'); delete aws.users[input.UserName!]; return {};
       case 'ListOpenIDConnectProviders': return { OpenIDConnectProviderList: Object.keys(aws.oidc).map((Arn) => ({ Arn })) };
       case 'GetOpenIDConnectProvider': { const found = aws.oidc[input.OpenIDConnectProviderArn!]; if (!found) throw missing();
         return { Url: 'token.actions.githubusercontent.com', ClientIDList: ['sts.amazonaws.com'], ThumbprintList: ['6938fd4d98bab03faadb97b34396831e3780aea1'], CreateDate: new Date(0), ...(found.Tags ? { Tags: found.Tags } : {}) }; }
@@ -197,6 +204,31 @@ describe('removing Hypervibe\'s setup from an AWS account', () => {
     expect(audits.map((entry) => entry.action)).toEqual(['connection.deleted', 'connection.deleted', 'aws.setup.removed']);
     // Neither the sign-in nor the saved key reaches the result or the audit trail.
     expect(JSON.stringify([result, audits])).not.toMatch(new RegExp(`${KEY_ID}|session-token-value|ASIAEXAMPLESESSION00|${SESSION_SECRET.replace(/[/+]/g, '.')}`));
+  });
+
+  it('is not blocked by an environment that was torn down, which keeps its account on record', async () => {
+    // What AWS teardown leaves on the environment: provider and account stay, the engine record is emptied.
+    environments.p2 = [{ name: 'staging', platformBindings: { provider: 'aws', projectId: ACCOUNT, environmentId: 'us-west-2', engine: {}, aws: { naming: 2, tornDownAt: '2026-11-12T00:00:00Z' } } }];
+    expect(await run(account())).toMatchObject({ success: true, mode: 'preview' });
+    // Deployed again after a teardown: the engine record is filled, so it counts.
+    environments.p2 = [{ name: 'staging', platformBindings: { provider: 'aws', projectId: ACCOUNT, engine: { stateSerial: 3 }, aws: { naming: 2, tornDownAt: '2026-11-12T00:00:00Z' } } }];
+    expect(await run(account())).toMatchObject({ success: false, status: 'blocked', found: ['environment billforge/staging'] });
+  });
+
+  it('leaves a user or role alone, untouched, when AWS would refuse to delete it after its keys and policies were gone', async () => {
+    const aws = account();
+    aws.users['hypervibe-local']!.password = true;
+    aws.roles['hypervibe-deploy']!.profiles = ['someone-elses-profile'];
+    const preview = await run(aws);
+    expect(preview.willDelete?.join('|')).not.toMatch(/User hypervibe-local|Role hypervibe-deploy,/);
+    expect(preview.leftAlone?.map((entry) => entry.name)).toEqual(expect.arrayContaining(['user hypervibe-local', 'role hypervibe-deploy']));
+    const mfa = account(); mfa.users['hypervibe-local']!.mfa = ['arn:aws:iam::123456789012:mfa/x'];
+    expect((await run(mfa)).leftAlone?.map((entry) => entry.name)).toContain('user hypervibe-local');
+  });
+
+  it('treats an answer with no user in it as unknown, not as no user', async () => {
+    const aws = account(); aws.instead.GetUser = () => ({});
+    expect(await run(aws)).toMatchObject({ success: false, status: 'blocked' });
   });
 
   it('is blocked, before any sign-in, while any Hypervibe project records an environment in the account', async () => {
