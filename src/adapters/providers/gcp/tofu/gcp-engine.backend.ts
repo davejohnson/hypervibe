@@ -5,6 +5,8 @@ import type {
   EngineResourceMapping,
   InfrastructureEngineBackend,
 } from '../../../../domain/ports/infrastructure-engine.port.js';
+import type { GcpDatabaseConnection } from './gcp-database-connection.js';
+import { dedicatedDatabase, dedicatedDatabaseConnection, type GcpCloudSqlInput } from './gcp-dedicated-database.js';
 
 /**
  * GCP half of the OpenTofu engine integration. Everything Google-specific
@@ -210,33 +212,6 @@ export function domainEngineKey(domain: string, additional = false): string {
 
 const DOMAIN_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
-export interface GcpCloudSqlInput {
-  /** Physical instance name; unique per project for a week after deletion, so Hypervibe picks and records it. */
-  instanceName: string;
-  databaseName: string;
-  tier?: string;
-  /** Refuse deletion, both in the engine and on Google's side, until turned off in a reviewed change. */
-  deletionProtection?: boolean;
-  /** Creation-only backup/PITR defaults; ordinary plans preserve existing native policy. */
-  retainedBackups?: number;
-  transactionLogDays?: number;
-  /** PostgreSQL major version (default 16). */
-  majorVersion?: number;
-  /**
-   * Wire services to the database (socket volume + CLOUD_SQL_CONNECTION_NAME).
-   * False until Hypervibe's credential exists, so a first deployment never
-   * points services at a database they cannot log in to.
-   */
-  wireServices: boolean;
-}
-
-export const DATABASE_ENGINE_ADDRESSES = ['google_sql_database_instance.db', 'google_sql_database.app', 'google_sql_user.worker_waker'] as const;
-
-/** The Cloud SQL IAM database user for a service account email. */
-export function iamDatabaseUser(serviceAccountEmail: string): string {
-  return serviceAccountEmail.replace(/\.gserviceaccount\.com$/, '');
-}
-
 function wakerAddresses(key: string): string[] {
   return [`google_workflows_workflow.${key}_waker`, `google_cloud_scheduler_job.${key}_waker`, `google_cloud_run_v2_worker_pool_iam_member.${key}_waker`];
 }
@@ -248,14 +223,14 @@ function wakerAddresses(key: string): string[] {
  * zero otherwise. If the count cannot be read it keeps one instance running,
  * so work is never stranded.
  */
-function wakerWorkflow(input: GcpCloudRunEngineInput, service: GcpCloudRunServiceInput, key: string): string {
+function wakerWorkflow(input: GcpCloudRunEngineInput, service: GcpCloudRunServiceInput, key: string, query: GcpDatabaseConnection['workerQuery']): string {
   const pool = `https://run.googleapis.com/v2/projects/${input.projectId}/locations/${input.region}/workerPools/${service.resourceName}`;
   return JSON.stringify({ main: { steps: [
     { count: { try: { steps: [
       { query: { call: 'http.post', args: {
-        url: `https://sqladmin.googleapis.com/v1/projects/${input.projectId}/instances/${input.database!.instanceName}/executeSql`,
+        url: `https://sqladmin.googleapis.com/v1/projects/${query.projectId}/instances/${query.instanceName}/executeSql`,
         auth: { type: 'OAuth2' },
-        body: { database: input.database!.databaseName, sqlStatement: service.pendingWorkQuery, autoIamAuthn: true, rowLimit: '1', application: `hv-waker-${key}`.slice(0, 32) },
+        body: { database: query.databaseName, sqlStatement: service.pendingWorkQuery, autoIamAuthn: true, rowLimit: '1', application: `hv-waker-${key}`.slice(0, 32) },
       }, result: 'sql' } },
       { read: { assign: [{ pending: '${int(sql.body.results[0].rows[0].values[0].value)}' }, { want: '${if(pending > 0, 1, 0)}' }, { readError: '' }] } },
     ] }, except: { as: 'error', steps: [{ fallback: { assign: [{ pending: -1 }, { want: 1 }, { readError: '${default(map.get(error, "message"), "the pending-work query failed")}' }] } }] } } },
@@ -326,7 +301,7 @@ function assertImmutableImage(image: string): void {
   }
 }
 
-function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServiceInput): Record<string, unknown> {
+function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServiceInput, connection: GcpDatabaseConnection | undefined): Record<string, unknown> {
   assertImmutableImage(service.initialImage);
   if (!service.runtimeServiceAccountEmail.endsWith(`@${input.projectId}.iam.gserviceaccount.com`)) {
     throw new Error(`Runtime identity for ${service.logicalName} must belong to project ${input.projectId}.`);
@@ -371,11 +346,11 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
       env.push({ name, value });
     }
   }
-  const wired = input.database?.wireServices === true;
-  if (wired) {
+  const wired = connection?.wireServices === true;
+  if (wired && connection) {
     // The socket path and connection name are infrastructure facts; the credential is a secret reference.
-    env.push({ name: 'CLOUD_SQL_CONNECTION_NAME', value: '${google_sql_database_instance.db.connection_name}' });
-    env.push({ name: 'PGHOST', value: '/cloudsql/${google_sql_database_instance.db.connection_name}' });
+    env.push({ name: 'CLOUD_SQL_CONNECTION_NAME', value: connection.connectionName });
+    env.push({ name: 'PGHOST', value: `/cloudsql/${connection.connectionName}` });
   }
   const container: Record<string, unknown> = {
     image: service.initialImage,
@@ -406,7 +381,7 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
         ...(service.maxInstances !== undefined ? { max_instance_count: service.maxInstances } : {}),
       }] } : {}),
       containers: [container],
-      ...(wired ? { volumes: [{ name: 'cloudsql', cloud_sql_instance: [{ instances: ['${google_sql_database_instance.db.connection_name}'] }] }] } : {}),
+      ...(wired ? { volumes: [{ name: 'cloudsql', cloud_sql_instance: [{ instances: [connection!.connectionName] }] }] } : {}),
       // Direct VPC egress reaches the private Redis address; everything else still leaves normally.
       ...(input.cache?.wireServices ? { vpc_access: [{
         network_interfaces: [{ network: input.cache.network, subnetwork: input.cache.subnetwork }],
@@ -428,8 +403,8 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
  * An always-on background worker: a Cloud Run worker pool. Unlike a service it
  * receives no requests and needs no listening port or startup probe.
  */
-function workerPoolResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServiceInput): Record<string, unknown> {
-  const base = serviceResource(input, service) as { labels: unknown; template: Array<Record<string, unknown>>; lifecycle: unknown };
+function workerPoolResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServiceInput, connection: GcpDatabaseConnection | undefined): Record<string, unknown> {
+  const base = serviceResource(input, service, connection) as { labels: unknown; template: Array<Record<string, unknown>>; lifecycle: unknown };
   const template = base.template[0]!;
   const container = { ...(template.containers as Array<Record<string, unknown>>)[0] };
   const resources = (container.resources as Array<Record<string, unknown>>)[0]!;
@@ -470,13 +445,14 @@ function addScheduledJob(
   key: string,
   jobs: Record<string, unknown>,
   schedules: Record<string, unknown>,
-  jobIam: Record<string, unknown>
+  jobIam: Record<string, unknown>,
+  connection: GcpDatabaseConnection | undefined,
 ): void {
   const scheduled = service.workload === 'job';
   if (scheduled && (!service.schedule || !/^(\S+\s+){4}\S+$/.test(service.schedule.trim()))) throw new Error(`Scheduled job ${service.logicalName} needs a five-field cron schedule.`);
   if (!service.jobCommand?.trim()) throw new Error(`Scheduled job ${service.logicalName} needs an explicit command (startCommand).`);
   // Reuse the service builder for env, secrets and database wiring, then reshape it as a job.
-  const base = serviceResource(input, { ...service, workload: 'worker' }) as { labels: unknown; template: Array<Record<string, unknown>> };
+  const base = serviceResource(input, { ...service, workload: 'worker' }, connection) as { labels: unknown; template: Array<Record<string, unknown>> };
   const template = base.template[0]!;
   const container = { ...(template.containers as Array<Record<string, unknown>>)[0] };
   const resources = (container.resources as Array<Record<string, unknown>>)[0]!;
@@ -534,6 +510,8 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   const iam: Record<string, unknown> = {};
   const resources: Record<string, EngineResourceMapping> = {};
   const seen = new Set<string>();
+  const connection = dedicatedDatabaseConnection(input.projectId, input.database);
+  const onDemand = input.services.some((service) => service.workload === 'worker' && service.pendingWorkQuery);
   const jobs: Record<string, unknown> = {};
   const schedules: Record<string, unknown> = {};
   const jobIam: Record<string, unknown> = {};
@@ -553,16 +531,16 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
           'template.*.scaling.*.max_instance_count', 'scaling.*.manual_instance_count'],
     };
     if (service.workload === 'job') {
-      addScheduledJob(input, service, key, jobs, schedules, jobIam);
+      addScheduledJob(input, service, key, jobs, schedules, jobIam, connection);
       for (const address of jobAddresses(key)) resources[address] = mapping;
       continue;
     }
     if (service.workload === 'worker') {
-      workerPools[key] = workerPoolResource(input, service);
+      workerPools[key] = workerPoolResource(input, service, connection);
       resources[`google_cloud_run_v2_worker_pool.${key}`] = mapping;
       for (const address of wakerAddresses(key)) resources[address] = mapping;
       if (service.pendingWorkQuery) {
-        if (!input.database) throw new Error(`Worker ${service.logicalName} counts pending work in the database, so it needs one.`);
+        if (!connection) throw new Error(`Worker ${service.logicalName} counts pending work in the database, so it needs one.`);
         // The waker acts as the pool's identity and reads the database as the shared identity's login.
         if (service.runtimeServiceAccountEmail !== input.runtimeServiceAccountEmail) throw new Error(`On-demand worker ${service.logicalName} must run as the shared runtime identity.`);
         workflows[`${key}_waker`] = {
@@ -573,7 +551,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
           service_account: service.runtimeServiceAccountEmail,
           deletion_protection: false,
           labels: { 'managed-by': 'hypervibe', ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
-          source_contents: wakerWorkflow(input, service, key),
+          source_contents: wakerWorkflow(input, service, key, connection.workerQuery),
         };
         schedules[`${key}_waker`] = {
           name: `${service.resourceName}-waker`.slice(0, 500),
@@ -600,7 +578,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       }
       continue;
     }
-    services[key] = serviceResource(input, service);
+    services[key] = serviceResource(input, service, connection);
     resources[`google_cloud_run_v2_service.${key}`] = mapping;
     if (service.public && service.workload === 'web') {
       iam[`${key}_public`] = {
@@ -613,80 +591,12 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
       resources[`google_cloud_run_v2_service_iam_member.${key}_public`] = mapping;
     }
   }
-  const sql: Record<string, Record<string, unknown>> = {};
-  const databaseMapping: EngineResourceMapping = { actionId: 'database:postgres', kind: 'database', name: 'postgres', dataBearing: true, billable: true,
-    costAttributes: ['settings.*.tier', 'settings.*.disk_size', 'settings.*.disk_type', 'settings.*.availability_type', 'settings.*.edition'] };
-  const onDemand = input.services.some((service) => service.workload === 'worker' && service.pendingWorkQuery);
-  if (input.database) {
-    if (!/^[a-z][a-z0-9-]{0,96}[a-z0-9]$/.test(input.database.instanceName)) throw new Error('Cloud SQL instance name is invalid.');
-    if (!/^[a-z][a-z0-9_]{0,62}$/.test(input.database.databaseName)) throw new Error('Database name is invalid.');
-    sql.google_sql_database_instance = { db: {
-      name: input.database.instanceName,
-      project: input.projectId,
-      region: input.region,
-      database_version: `POSTGRES_${input.database.majorVersion ?? 16}`,
-      // Hypervibe's confirmation gate always governs deletion. A protected database also refuses
-      // deletion here and in the Google console until protection is turned off in its own change.
-      deletion_protection: input.database.deletionProtection === true,
-      // Backup changes need their own scoped review. Retain the provider's full policy,
-      // including fields absent from our input, on updates and interrupted-create adoption.
-      // Enterprise Plus can retain longer PITR logs, so its edition must survive too.
-      lifecycle: [{
-        ignore_changes: ['settings[0].backup_configuration', 'settings[0].edition'],
-        // Enterprise-only defaults cannot resize a retained Plus instance.
-        // Evaluate the effective plan values, after ignore_changes preserves its
-        // edition, instead of hiding all tier drift (which would disable sizing).
-        // https://cloud.google.com/sql/docs/postgres/machine-series-overview
-        postcondition: [{
-          condition: '${self.settings[0].edition != "ENTERPRISE_PLUS" || !(startswith(self.settings[0].tier, "db-custom-") || contains(["db-f1-micro", "db-g1-small"], self.settings[0].tier))}',
-          error_message: 'This database uses Cloud SQL Enterprise Plus, but the requested size is only available on Enterprise. Hypervibe cannot apply this size change while preserving the database recovery settings.',
-        }],
-      }],
-      settings: [{
-        deletion_protection_enabled: input.database.deletionProtection === true,
-        // Shared-core tiers require the Enterprise edition.
-        edition: 'ENTERPRISE',
-        tier: input.database.tier ?? 'db-f1-micro',
-        availability_type: 'ZONAL',
-        ip_configuration: [{ ipv4_enabled: true }],
-        // On-demand workers count pending work through the Data API as an IAM database user.
-        ...(onDemand ? {
-          data_api_access: 'ALLOW_DATA_API',
-          database_flags: [{ name: 'cloudsql.iam_authentication', value: 'on' }],
-        } : {}),
-        backup_configuration: [{
-          enabled: true, point_in_time_recovery_enabled: true,
-          ...(input.database.transactionLogDays ? { transaction_log_retention_days: input.database.transactionLogDays } : {}),
-          ...(input.database.retainedBackups ? { backup_retention_settings: [{ retained_backups: input.database.retainedBackups, retention_unit: 'COUNT' }] } : {}),
-        }],
-        user_labels: { 'managed-by': 'hypervibe', ...(input.environmentId ? { 'hv-environment': input.environmentId.toLowerCase() } : {}) },
-      }],
-    } };
-    sql.google_sql_database = { app: {
-      name: input.database.databaseName,
-      project: input.projectId,
-      instance: '${google_sql_database_instance.db.name}',
-      // Deleting the instance removes its databases; dropping one first fails while connections exist.
-      deletion_policy: 'ABANDON',
-    } };
-    if (onDemand) {
-      if (!input.runtimeServiceAccountEmail) throw new Error('On-demand workers require the runtime identity.');
-      sql.google_sql_user = { worker_waker: {
-        name: iamDatabaseUser(input.runtimeServiceAccountEmail),
-        project: input.projectId,
-        instance: '${google_sql_database_instance.db.name}',
-        type: 'CLOUD_IAM_SERVICE_ACCOUNT',
-        // Google cannot delete a PostgreSQL login that holds grants, and this one is granted read access.
-        // It is left in place when it leaves the plan and goes with the instance when the database is removed.
-        deletion_policy: 'ABANDON',
-      } };
-    }
-  }
-  if (input.database || input.retiredDatabase) {
-    for (const address of DATABASE_ENGINE_ADDRESSES) resources[address] = databaseMapping;
-  }
+  // The database's own resources come from its module; this generator only places them.
+  const database = dedicatedDatabase({ projectId: input.projectId, region: input.region, environmentId: input.environmentId, database: input.database,
+    retired: input.retiredDatabase, workerLoginEmail: onDemand ? input.runtimeServiceAccountEmail ?? '' : undefined, adoptInstance: input.adopt?.databaseInstance });
+  Object.assign(resources, database.mappings);
   if (input.releaseJob) {
-    addScheduledJob(input, { ...input.releaseJob, workload: 'worker' }, RELEASE_JOB_KEY, jobs, schedules, jobIam);
+    addScheduledJob(input, { ...input.releaseJob, workload: 'worker' }, RELEASE_JOB_KEY, jobs, schedules, jobIam, connection);
   }
   if (input.releaseJob || input.retiredReleaseJob) {
     resources[`google_cloud_run_v2_job.${RELEASE_JOB_KEY}`] = { actionId: 'release-job:migrations', kind: 'service', name: 'release command' };
@@ -865,10 +775,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
     if (!(input.secrets ?? []).some((entry) => entry.secretId === secretId)) throw new Error('Only a desired secret container can be adopted.');
     imports[`google_secret_manager_secret.${secretEngineKey(secretId)}`] = `projects/${input.projectId}/secrets/${secretId}`;
   }
-  if (input.adopt?.databaseInstance) {
-    if (input.adopt.databaseInstance !== input.database?.instanceName) throw new Error('Only the desired database instance can be adopted.');
-    imports['google_sql_database_instance.db'] = `projects/${input.projectId}/instances/${input.adopt.databaseInstance}`;
-  }
+  Object.assign(imports, database.imports);
   for (const name of input.adopt?.buckets ?? []) {
     const bucket = (input.storage ?? []).find((entry) => entry.name === name);
     if (!bucket) throw new Error(`Only desired storage can be adopted (${name}).`);
@@ -902,7 +809,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
           ...(Object.keys(domainMappings).length ? { google_cloud_run_domain_mapping: domainMappings } : {}),
         },
       } : {},
-      'cloudsql.tf.json': Object.keys(sql).length ? { resource: sql } : {},
+      'cloudsql.tf.json': Object.keys(database.resource).length ? { resource: database.resource } : {},
       'memorystore.tf.json': Object.keys(redis).length ? { resource: { google_redis_instance: redis } } : {},
       'pubsub.tf.json': Object.keys(topics).length ? { resource: { google_pubsub_topic: topics, google_pubsub_subscription: subscriptions } } : {},
       'storage.tf.json': Object.keys(buckets).length ? {

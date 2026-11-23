@@ -58,3 +58,21 @@ describe('Google configuration is unchanged by the database seam', () => {
     expect(Object.values(baseline).filter((value) => value.startsWith('threw:'))).toEqual([]);
   });
 });
+
+describe('the workload generator cannot tell where a database comes from', () => {
+  const source = readFileSync(path.join(here, '..', 'gcp-engine.backend.ts'), 'utf8');
+
+  it('names no Cloud SQL resource; those live in the database module', () => {
+    expect(source).not.toMatch(/google_sql/);
+  });
+
+  it('reads the database input only to hand it to the database module', () => {
+    const readers = source.split('\n').filter((line) => /input\.(database|retiredDatabase)\b|adopt\?\.databaseInstance/.test(line));
+    expect(readers.length).toBeGreaterThan(0);
+    expect(readers.filter((line) => !/dedicatedDatabase(Connection)?\(|retired: input\.retiredDatabase/.test(line))).toEqual([]);
+  });
+
+  it('gives services a database through the connection alone', () => {
+    expect(readFileSync(path.join(here, '..', 'gcp-database-connection.ts'), 'utf8')).not.toMatch(/tier|deletion|backup|adopt|shared|pool|dedicated/i);
+  });
+});
