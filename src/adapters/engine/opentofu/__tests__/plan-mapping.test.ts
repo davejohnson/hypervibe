@@ -200,6 +200,37 @@ describe('network interruptions', () => {
     ].join('\n');
     expect([...networkInterruptedAddresses(stdout)]).toEqual(['google_sql_database_instance.db']);
   });
+
+  // Event shapes captured from OpenTofu 1.13.9 deleting a resource that had left the configuration: the error carries no address.
+  const errored = (addr: string) => JSON.stringify({ type: 'apply_errored', hook: { resource: { addr }, action: 'delete', elapsed_seconds: 0 } });
+  const unaddressed = (summary: string) => JSON.stringify({ type: 'diagnostic', diagnostic: { severity: 'error', summary, detail: '' } });
+
+  it('recognises a dropped connection while deleting, where OpenTofu names no resource in the error', async () => {
+    const { networkInterruptedAddresses } = await import('../engine.js');
+    const stdout = [
+      errored('google_sql_database_instance.db'),
+      unaddressed('Error, failed to delete instance db: Error waiting for Delete Instance: error while retrieving operation: Get "https://sqladmin.googleapis.com/sql/v1beta4/projects/p/operations/1": http2: client connection lost'),
+    ].join('\n');
+    expect([...networkInterruptedAddresses(stdout)]).toEqual(['google_sql_database_instance.db']);
+    expect([...networkInterruptedAddresses([errored('google_sql_user.u'), unaddressed('Delete "https://sqladmin.googleapis.com/x": http2: client connection lost')].join('\n'))]).toEqual(['google_sql_user.u']);
+  });
+
+  it('keeps a failed delete failed when any unnamed error is a provider refusal', async () => {
+    const { networkInterruptedAddresses } = await import('../engine.js');
+    const stdout = [
+      errored('google_sql_user.u'), errored('google_sql_database_instance.db'),
+      unaddressed('Error, failed to deleteuser u: dial tcp 127.0.0.1:9: connect: connection refused'),
+      unaddressed('googleapi: Error 400: role cannot be dropped because some objects depend on it'),
+    ].join('\n');
+    expect([...networkInterruptedAddresses(stdout)]).toEqual([]);
+  });
+
+  it('keeps a refused delete that has its own error, and a delete that timed out, failed', async () => {
+    const { networkInterruptedAddresses } = await import('../engine.js');
+    const named = JSON.stringify({ type: 'diagnostic', diagnostic: { severity: 'error', address: 'aws_security_group.x', summary: 'DependencyViolation: resource has a dependent object' } });
+    expect([...networkInterruptedAddresses([errored('aws_security_group.x'), errored('aws_subnet.y'), named, unaddressed('read tcp 1.2.3.4:5: connection reset by peer')].join('\n'))]).toEqual(['aws_subnet.y']);
+    expect([...networkInterruptedAddresses([errored('aws_security_group.x'), unaddressed('deleting Security Group: waiting for delete: context deadline exceeded')].join('\n'))]).toEqual([]);
+  });
 });
 
 describe('database major-version changes', () => {

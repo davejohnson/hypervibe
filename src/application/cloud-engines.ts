@@ -72,10 +72,25 @@ export interface CloudEngine {
   /** Removes a whole environment as one reviewed plan. */
   planTeardown?(ctx: CommandContext, params: EnginePlanParams & { deleteFinalSnapshot?: boolean }): Promise<InfrastructurePlanResult | { blocked: string[] }>;
   /**
-   * Deletes the cloud project that Hypervibe's own setup created, once nothing is left in it.
-   * A preview until called again with that preview's id and `confirm`.
+   * Removes what Hypervibe's own setup created in the cloud, once nothing depends on it: the whole
+   * project on Google, Hypervibe's account access on AWS. A preview until called again with that
+   * preview's id and `confirm`. `cloudProjectId` is the Google project id or the AWS account id.
    */
   removeProject?(params: { project: Project; cloudProjectId: string; previewId?: string; confirm?: boolean }): Promise<EngineProjectRemoval>;
+  /** How a command reaches `removeProject`: which input names the target, and the words for it. */
+  projectRemoval?: {
+    idInput: 'gcpProjectId' | 'awsAccountId' | 'azureSubscriptionId';
+    /** The preview finds the target after sign-in, so the id is given only to confirm. */
+    idFromPreview?: true;
+    /** Removal signs in with the administrator's default Google credentials, so the command must say so. */
+    adminAuth?: 'default';
+    /** One sentence listing the fields the command takes. */
+    usage: string;
+    /** What the agent shows and asks the person before confirming. */
+    ask: (cloudProjectId: string, projectName: string) => string;
+    /** Used when a failed removal gives no reason. */
+    failure: string;
+  };
   apply(ctx: CommandContext, params: EngineApplyParams): Promise<EngineApplyOutcome>;
   release(ctx: CommandContext, params: EngineReleaseParams): Promise<EngineReleaseOutcome>;
   /** Generates a repository workflow only after the exact applied CI binding exists. */
@@ -92,6 +107,11 @@ const gcp: CloudEngine = {
   plan: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpInfrastructureEngine(ctx, params),
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpTeardown(ctx, params),
   removeProject: async ({ project, cloudProjectId, previewId, confirm }) => ({ ...await (await import('./gcp-project-removal.js')).runGcpProjectRemoval({ project, gcpProjectId: cloudProjectId, previewId, confirm }) }),
+  projectRemoval: {
+    idInput: 'gcpProjectId', adminAuth: 'default', failure: 'The Google project was not removed.',
+    usage: 'action="remove-project" takes provider="cloudrun", project, the exact gcpProjectId and adminAuth="default"; add previewId and confirm=true only after reviewing its preview.',
+    ask: (id) => `Show the user this preview for Google project ${id}: what was checked, what was not checked and every warning. Ask whether to delete the whole Google project. Confirm only after they say yes to deleting this exact project.`,
+  },
   apply: async (ctx, params) => (await import('./infrastructure-engine.js')).applyGcpInfrastructureEngine(ctx, params),
   release: async (ctx, params) => (await import('./infrastructure-engine.js')).releaseGcpEngineServices(ctx, params),
   secretStore: async (ctx, project, spec, environmentName) => (await import('./infrastructure-engine.js')).gcpSecretStore(ctx, project, spec, environmentName),
@@ -104,6 +124,12 @@ const aws: CloudEngine = {
   ciRelease: async (binding, context, spec) => (await import('../adapters/providers/aws/aws-ci-release.js')).createAwsCiReleaseTarget(binding, context, spec),
   plan: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).planAwsInfrastructureEngine(ctx, params),
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).planAwsTeardown(ctx, params),
+  removeProject: async ({ project, cloudProjectId, previewId, confirm }) => ({ ...await (await import('./aws-setup-removal.js')).runAwsSetupRemoval({ project, awsAccountId: cloudProjectId, previewId, confirm }) }),
+  projectRemoval: {
+    idInput: 'awsAccountId', failure: 'Hypervibe\'s setup was not removed from the AWS account.',
+    usage: 'action="remove-project" takes provider="aws", project and the exact awsAccountId; add previewId and confirm=true only after reviewing its preview.',
+    ask: (id) => `Show the user this preview for AWS account ${id}: everything in willDelete, everything left alone or left behind with its link, and every warning. Ask whether to remove Hypervibe's setup from this AWS account. Confirm only after they say yes for this exact account.`,
+  },
   apply: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).applyAwsInfrastructureEngine(ctx, params),
   release: async (ctx, params) => (await import('./infrastructure-engine-aws-release.js')).releaseAwsEngineServices(ctx, params),
   secretStore: async (ctx, project, spec, environmentName) => (await import('./infrastructure-engine-aws.js')).awsSecretStore(ctx, project, environmentName, spec),
@@ -123,6 +149,11 @@ const azure: CloudEngine = {
   connect: async (params) => (await import('./azure-connect.js')).connectAzureStep(params),
   // Azure has no project of its own to delete: this removes what one-time setup created. `cloudProjectId` is the subscription id, empty on a first preview.
   removeProject: async ({ project, cloudProjectId, previewId, confirm }) => ({ ...await (await import('./azure-setup-removal.js')).runAzureSetupRemoval({ project, subscriptionId: cloudProjectId, previewId, confirm }) }),
+  projectRemoval: {
+    idInput: 'azureSubscriptionId', idFromPreview: true, failure: 'Hypervibe\'s Azure setup was not removed.',
+    usage: 'action="remove-project" with provider="azure" takes project only; to confirm, add the preview\'s subscriptionId as azureSubscriptionId, its previewId and confirm=true.',
+    ask: (_id, name) => `Show the user this preview for ${name}: everything in willDelete, everything in willPurge (permanent), what is left behind and every warning. Ask whether to remove Hypervibe's Azure setup. Confirm only after they say yes to exactly this list.`,
+  },
   ownsPlan: (document) => Boolean(document.engine?.azure),
 };
 
@@ -145,12 +176,12 @@ export function cloudEngineForPlan(document: { environmentName: string; engine?:
   return [azure, aws].find((engine) => engine.ownsPlan(document)) ?? cloudEngineFor(spec, document.environmentName) ?? gcp;
 }
 
-/** The engine whose guided connection serves a connection provider name, if it has one. */
-/** The engine that can delete a cloud project created through this connection provider's setup. */
+/** The engine that can remove what this connection provider's setup created in the cloud. */
 export function cloudEngineForProjectRemoval(provider: string): CloudEngine | undefined {
-  return cloudEngines.find((engine) => engine.removeProject && engine.hostingProvider === provider);
+  return cloudEngines.find((engine) => engine.removeProject && engine.projectRemoval && engine.hostingProvider === provider);
 }
 
+/** The engine whose guided connection serves a connection provider name, if it has one. */
 export function cloudEngineForConnection(provider: string): CloudEngine | undefined {
   return cloudEngines.find((engine) => engine.connect && engine.hostingProvider === provider);
 }

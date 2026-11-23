@@ -24,13 +24,14 @@ import { AWS_WEB_INFRASTRUCTURE_ROLE } from './tofu/aws-engine.config.js';
 export const AWS_SETUP_VERSION = 'aws-v1';
 export const AWS_PATH = '/hypervibe/';
 export const AWS_APP_ROLE_PATH = '/hypervibe/app/';
-const LOCAL_USER = 'hypervibe-local';
-const BOUNDARY = 'hypervibe-app-boundary';
-const DEPLOY_POLICY = 'hypervibe-deploy';
-const GITHUB_OIDC_HOST = 'token.actions.githubusercontent.com';
+export const LOCAL_USER = 'hypervibe-local';
+export const LOCAL_USER_POLICY = 'assume-hypervibe-deploy-roles';
+export const BOUNDARY = 'hypervibe-app-boundary';
+export const DEPLOY_POLICY = 'hypervibe-deploy';
+export const GITHUB_OIDC_HOST = 'token.actions.githubusercontent.com';
 /** AWS's managed policy for the role ECS Express Mode manages web service infrastructure with. */
-const WEB_INFRASTRUCTURE_POLICY = 'arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices';
-const WEB_INFRASTRUCTURE_TRUST = { Version: '2012-10-17', Statement: [{ Sid: 'AllowAccessInfrastructureForECSExpressServices', Effect: 'Allow', Principal: { Service: 'ecs.amazonaws.com' }, Action: 'sts:AssumeRole' }] };
+export const WEB_INFRASTRUCTURE_POLICY = 'arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices';
+export const WEB_INFRASTRUCTURE_TRUST = { Version: '2012-10-17', Statement: [{ Sid: 'AllowAccessInfrastructureForECSExpressServices', Effect: 'Allow', Principal: { Service: 'ecs.amazonaws.com' }, Action: 'sts:AssumeRole' }] };
 
 /** Earlier versions created one deploy role per project; setup retires them in favor of the account role. */
 export const deployRoleName = (project: string) => `hypervibe-deploy-${project.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 40)}`;
@@ -129,7 +130,7 @@ export function deployPolicyDocument(accountId: string): Record<string, unknown>
   };
 }
 
-function deployTrustDocument(accountId: string, owners: string[]): Record<string, unknown> {
+export function deployTrustDocument(accountId: string, owners: string[]): Record<string, unknown> {
   return {
     Version: '2012-10-17',
     Statement: [
@@ -309,7 +310,7 @@ export async function applyAwsSetup(session: AwsSignInSession, plan: AwsSetupPla
   if (!(await exists(() => iam.send(new GetUserCommand({ UserName: LOCAL_USER }))))) {
     await iam.send(new CreateUserCommand({ UserName: LOCAL_USER, Path: AWS_PATH, Tags: tags }));
   }
-  await iam.send(new PutUserPolicyCommand({ UserName: LOCAL_USER, PolicyName: 'assume-hypervibe-deploy-roles', PolicyDocument: JSON.stringify({
+  await iam.send(new PutUserPolicyCommand({ UserName: LOCAL_USER, PolicyName: LOCAL_USER_POLICY, PolicyDocument: JSON.stringify({
     Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'sts:AssumeRole', Resource: [`arn:aws:iam::${account}:role${AWS_PATH}${ACCOUNT_DEPLOY_ROLE}`, `arn:aws:iam::${account}:role${AWS_PATH}${ACCOUNT_DEPLOY_ROLE}-*`] }],
   }) }));
   const trust = JSON.stringify(deployTrustDocument(account, plan.githubOwners));

@@ -173,6 +173,10 @@ SQL connections and setup record for that project, and renames the saved setup
 state (`project-shared.removed-<time>`) instead of deleting it. If the result
 could not be confirmed, it says so and changes nothing locally; preview again.
 
+AWS reaches the same action with `provider="aws"` and `awsAccountId`; there it
+removes Hypervibe's account access, not the account
+([details](opentofu-engine-aws.md#removing-hypervibes-setup-from-the-account)).
+
 Not built: removing Hypervibe's setup from a project it did not create
 ([#103](https://github.com/davejohnson/hypervibe/issues/103)).
 
