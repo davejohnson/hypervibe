@@ -441,6 +441,8 @@ export class OpenTofuEngine {
 }
 
 const NETWORK_ERROR = /error while retrieving operation|no such host|can't assign requested address|connection reset|connection refused|i\/o timeout|TLS handshake timeout|network is unreachable|EOF$|broken pipe|context deadline exceeded|client connection lost/i;
+/** A delete that times out is often a provider waiting on something that still depends on the resource, not a dropped connection. */
+const DELETE_TIMEOUT = /context deadline exceeded/i;
 
 /**
  * Addresses whose apply error is a local network failure rather than a provider decision.
@@ -452,17 +454,20 @@ export function networkInterruptedAddresses(stdout: string): Set<string> {
   const result = new Set<string>();
   const failedDeletes: string[] = [];
   const unnamed: boolean[] = [];
+  const named = new Set<string>();
   for (const line of stdout.split('\n')) {
     try {
       const event = JSON.parse(line) as { type?: string; hook?: { action?: string; resource?: { addr?: string } };
         diagnostic?: { severity?: string; summary?: string; address?: string } };
       if (event.type === 'apply_errored' && event.hook?.action === 'delete' && event.hook.resource?.addr) failedDeletes.push(event.hook.resource.addr);
       if (event.type !== 'diagnostic' || event.diagnostic?.severity !== 'error') continue;
-      const network = NETWORK_ERROR.test(event.diagnostic.summary ?? '');
-      if (!event.diagnostic.address) unnamed.push(network);
-      else if (network) result.add(event.diagnostic.address);
+      const summary = event.diagnostic.summary ?? '';
+      const network = NETWORK_ERROR.test(summary);
+      if (!event.diagnostic.address) unnamed.push(network && !DELETE_TIMEOUT.test(summary));
+      else { named.add(event.diagnostic.address); if (network) result.add(event.diagnostic.address); }
     } catch { /* not an event line */ }
   }
-  if (unnamed.length && unnamed.every(Boolean)) for (const address of failedDeletes) result.add(address);
+  // A failed delete with an error of its own keeps that error's verdict.
+  if (unnamed.length && unnamed.every(Boolean)) for (const address of failedDeletes) if (!named.has(address)) result.add(address);
   return result;
 }

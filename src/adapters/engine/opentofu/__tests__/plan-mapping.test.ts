@@ -224,6 +224,13 @@ describe('network interruptions', () => {
     ].join('\n');
     expect([...networkInterruptedAddresses(stdout)]).toEqual([]);
   });
+
+  it('keeps a refused delete that has its own error, and a delete that timed out, failed', async () => {
+    const { networkInterruptedAddresses } = await import('../engine.js');
+    const named = JSON.stringify({ type: 'diagnostic', diagnostic: { severity: 'error', address: 'aws_security_group.x', summary: 'DependencyViolation: resource has a dependent object' } });
+    expect([...networkInterruptedAddresses([errored('aws_security_group.x'), errored('aws_subnet.y'), named, unaddressed('read tcp 1.2.3.4:5: connection reset by peer')].join('\n'))]).toEqual(['aws_subnet.y']);
+    expect([...networkInterruptedAddresses([errored('aws_security_group.x'), unaddressed('deleting Security Group: waiting for delete: context deadline exceeded')].join('\n'))]).toEqual([]);
+  });
 });
 
 describe('database major-version changes', () => {
