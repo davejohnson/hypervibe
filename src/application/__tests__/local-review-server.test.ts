@@ -1,4 +1,4 @@
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { request } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReviewArtifact } from '../../adapters/storage/local-review-catalog.js';
@@ -66,12 +66,30 @@ describe('loopback review service', () => {
     expect((await submit(savedForm, running.origin)).status).toBe(204);
     expect(approve).toHaveBeenCalledOnce();
     const after = await (await fetch(running.origin + path)).text();
-    expect(after).toContain('Approved');
+    expect(after).toContain('Approval recorded');
+    expect(after.indexOf('Approval recorded')).toBeLessThan(after.indexOf('id="resource-map"'));
     expect(after).not.toContain('name="csrf"');
   });
-  it('serves the interactive resource map in a separately sandboxed document', async () => {
-    const review = await (await fetch(running.origin + path)).text();
-    expect(review).toContain('sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"');
+  it('puts the approval before the report and renders the interactive plan in the same document', async () => {
+    plan.report!.actions[0]!.name = 'Storage <em>example</em>';
+    const page = await fetch(running.origin + path);
+    const html = await page.text();
+    expect(html).not.toContain('<iframe');
+    expect(html.match(/<main>/g)).toHaveLength(1);
+    for (const marker of ['id="resource-map"', 'id="action-type"', 'class="action-row"']) {
+      expect(html).toContain(marker);
+      expect(html.indexOf('>Approve plan</button>')).toBeGreaterThan(-1);
+      expect(html.indexOf('>Approve plan</button>')).toBeLessThan(html.indexOf(marker));
+    }
+    expect(html).toContain('Storage &lt;em&gt;example&lt;/em&gt;');
+    const policy = page.headers.get('content-security-policy')!;
+    expect(policy).not.toContain('unsafe-inline');
+    for (const [, tag, content] of html.matchAll(/<(style|script)>([\s\S]*?)<\/\1>/g)) {
+      const directive = policy.split(';').find(item => item.trim().startsWith(tag + '-src'))!;
+      expect(directive).toContain("'sha256-" + createHash('sha256').update(content!).digest('base64') + "'");
+    }
+  });
+  it('keeps existing full-report links interactive and read-only', async () => {
     const report = await fetch(running.origin + path + '/report');
     expect(report.headers.get('content-security-policy')).toContain('sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox;');
     const html = await report.text();

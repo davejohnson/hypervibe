@@ -63,7 +63,7 @@ export async function startLocalReviewServer(options: ReviewServerOptions): Prom
     response.setHeader('X-Frame-Options', 'DENY');
     response.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     response.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
-    response.setHeader('Content-Security-Policy', reviewPagePolicy);
+    response.setHeader('Content-Security-Policy', reviewPagePolicy());
     if (request.headers.host !== host) { response.writeHead(421).end(); return; }
     if (foreignRequest(request, origin)) { response.writeHead(403).end(); return; }
 
@@ -89,8 +89,7 @@ export async function startLocalReviewServer(options: ReviewServerOptions): Prom
     const path = home + 'r/' + id;
     if (action === 'report') {
       if (!item.report) { response.writeHead(404).end(); return; }
-      // The server regenerates the redacted report. Both the HTTP policy and the
-      // iframe give its hash-pinned diagram script an opaque, read-only origin.
+      // Existing full-report links still open as standalone read-only documents.
       response.setHeader('Content-Security-Policy', `sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox; frame-ancestors 'self'; ${planReportPolicy}`);
       response.setHeader('X-Frame-Options', 'SAMEORIGIN');
       html(renderPlanReportHtml(item.report, { localReview: true }));
@@ -109,6 +108,7 @@ export async function startLocalReviewServer(options: ReviewServerOptions): Prom
       return;
     }
     const related = all?.filter(other => linksTo(item, other)) ?? [];
+    if (item.report) response.setHeader('Content-Security-Policy', reviewPagePolicy(true));
     html(reviewDetail(item, home, path, related, approval && !approval.approvedAt ? csrf(item.id, approval.digest) : undefined));
   }
   const server = createServer({ requestTimeout: 10000, headersTimeout: 10000 }, (request, response) => {
