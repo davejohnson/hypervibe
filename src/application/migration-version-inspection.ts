@@ -4,7 +4,7 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { ConvergeExecutor, type ActionResult, type PlanRunDocument } from '../domain/plan/converge.executor.js';
 import { migrationVersionActionId, migrationVersionActionSchema, migrationVersionReceiptSchema, migrationSourceInventorySchema,
-  type MigrationVersionMetadata } from '../domain/plan/migration-version.contract.js';
+  type MigrationInspectionAccess, type MigrationVersionMetadata } from '../domain/plan/migration-version.contract.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
@@ -14,7 +14,7 @@ import { migrationDatabaseBindingConflict } from './migration-database-binding.j
 
 type Selection = { project: Project; source: Environment; targetName: string; spec: ProjectSpec };
 class MissingTrustedAccess extends Error {}
-async function current(ctx: CommandContext, selection: Selection, checkAccess = false) {
+async function current(ctx: CommandContext, selection: Selection, purpose: MigrationInspectionAccess = 'inspect') {
   const { project, spec, targetName } = selection;
   const source = ctx.repos.environments.findById(selection.source.id);
   if (!source || source.projectId !== project.id || source.name === targetName || spec.environments[source.name]?.hosting.provider !== 'railway'
@@ -30,10 +30,7 @@ async function current(ctx: CommandContext, selection: Selection, checkAccess = 
   const connected = await adapterFactory.getHostingAdapterByName(provider, project);
   if (!connected.success || connected.adapter?.name !== provider || !connected.adapter.privateMigrationSourceInspection) throw new Error();
   const inspection = connected.adapter.privateMigrationSourceInspection;
-  if (checkAccess) {
-    const available = await inspection.hasTrustedAccess().catch(() => false);
-    if (!available) throw new MissingTrustedAccess();
-  }
+  if (!await inspection.hasTrustedAccess(projectId, purpose).catch(() => false)) throw new MissingTrustedAccess();
   const observed = await inspection.observe({ projectId, environmentId, serviceId: database.externalId });
   const metadata: MigrationVersionMetadata = { operation: 'migrationSourceVersion', targetEnvironment: targetName, componentId: database.id,
     source: observed, programHash: inspection.programHash(observed) };
@@ -56,7 +53,7 @@ export async function planMigrationSourceVersion(ctx: CommandContext, selection:
     return { status: 'blocked', message: `Source inspection is unavailable for ${selection.source.name}. ${guidance}` };
   }
   try {
-    const { metadata, inspection } = await current(ctx, selection, selection.fresh);
+    const { metadata, inspection } = await current(ctx, selection, selection.fresh ? 'inspect' : 'reuse-receipt');
     const id = migrationVersionActionId(metadata);
     const run = selection.fresh ? undefined : ctx.repos.runs.findSuccessfulApplyForStep(selection.project.id, selection.source.id, id);
     const receipt = migrationVersionReceiptSchema.safeParse(run?.receipts.find(receipt => receipt.step === id && receipt.status === 'success')?.result?.sourceVersion);
@@ -68,7 +65,7 @@ export async function planMigrationSourceVersion(ctx: CommandContext, selection:
         return { major: Math.floor(receipt.data.inventory.versionNumber / 10000) };
       }
     }
-    if (!selection.fresh && !await inspection.hasTrustedAccess().catch(() => false)) throw new MissingTrustedAccess();
+    if (!selection.fresh && !await inspection.hasTrustedAccess(metadata.source.projectId, 'inspect').catch(() => false)) throw new MissingTrustedAccess();
     const reason = `Read the PostgreSQL server version, user-table count and estimated live rows in ${selection.source.name} over its existing SSH connection for ${selection.targetName}.`;
     const action = migrationVersionActionSchema.parse({ id, type: 'update', verified: true, requiresConfirm: true, reason, metadata,
       resource: { kind: 'database', provider: 'railway', name: 'postgres' } });
@@ -80,7 +77,7 @@ export async function planMigrationSourceVersion(ctx: CommandContext, selection:
       changes: [{ id, change: reason }], estimatedMonthlyCost: [] };
   } catch (error) {
     const requirement = error instanceof MissingTrustedAccess
-      ? 'For this SSH inspection, the selected Railway connection needs the absolute paths sshIdentityFile (an already registered private key) and sshKnownHostsFile (independently trusted Railway host keys). Supply both in that connection using a private credentials reference.'
+      ? 'For this SSH inspection, attach sshIdentityFile (the absolute path to an already registered private key) and sshKnownHostsFile (the absolute path to independently trusted host keys) to the selected Railway connection using a private credentials reference. For a shared or global connection, include the source Railway project ID as sshProjectId.'
       : 'The exact tracked Railway database, attached volume, running deployment, image digest and replica must be verifiable.';
     const next = selection.fresh ? '' : ` Use hv_launch for ${selection.targetName} to prepare the empty target independently.`;
     return { status: 'blocked', message: `The private source version could not be reviewed. ${requirement}${next}` };

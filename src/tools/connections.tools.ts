@@ -807,6 +807,7 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
 
         // Auto-verify so one call does add + verify.
         const verified = saved.verification ?? await verifyConnection(provider, scope);
+        if (verified.kind === 'changed') return commandError('VALIDATION', verified.error);
         if (verified.kind !== 'verified') {
           return commandError('PROVIDER_ERROR', verified.error ?? 'Verification failed.', {
             details: { connection: saved.connection, ...setupDetails(provider, guidanceContext) },
@@ -857,6 +858,8 @@ export function registerConnectionsTools(commands: CommandRegistrar, ctx: Comman
           });
         case 'unknown_provider':
           return commandError('UNSUPPORTED', verified.error);
+        case 'changed':
+          return commandError('VALIDATION', verified.error);
         default:
           return commandError('PROVIDER_ERROR', verified.error, {
             details: setupDetails(provider, guidanceContext),

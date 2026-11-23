@@ -370,7 +370,7 @@ describe('current source credential handoff', () => {
     const versionSource = { ...scope, serviceId: 'source-postgres', serviceInstanceId: 'source-instance', replicaId: 'active-replica',
       deploymentId: 'active-deployment', volumeId: 'source-volume', volumeInstanceId: 'source-volume-instance', imageDigest: 'sha256:' + 'a'.repeat(64) };
     const versionInspection = { programHash: () => '7'.repeat(64), observe: vi.fn(async () => ({ ...versionSource })), inspect: vi.fn(async () => ({ versionNumber: 170002, tables: 4, estimatedRows: '20' })),
-      hasTrustedAccess: vi.fn(async () => false) };
+      hasTrustedAccess: vi.fn(async (_projectId: string, _purpose?: 'inspect' | 'reuse-receipt') => false) };
     const adapter = Object.assign(Object.create(RailwayAdapter.prototype), { name: 'railway', privateMigrationSourceInspection: versionInspection,
       serviceName: async () => 'source-postgres', runPrivateTask, lastPrivateTaskCleanup: true,
     });
@@ -461,6 +461,31 @@ describe('current source credential handoff', () => {
     f.versionInspection.hasTrustedAccess.mockResolvedValue(true);
     expect(await f.migrate()).toMatchObject({ status: 'needs_confirmation' });
     expect(f.versionInspection.inspect).not.toHaveBeenCalled();
+  });
+
+  it('checks the native Railway project for review, apply and reuse of a successful inspection', async () => {
+    const f = railwayFixture();
+    f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: {
+      ...f.target.platformBindings.engine as engine.EngineBinding, migration: { from: 'source' },
+    } });
+    let permitted = 'other-project';
+    f.versionInspection.hasTrustedAccess.mockImplementation(async projectId => projectId === permitted);
+    expect(await f.migrate({ inspectSource: true })).toMatchObject({ status: 'blocked' });
+    expect(f.versionInspection.observe).not.toHaveBeenCalled();
+    permitted = f.versionSource.projectId;
+    const review = await f.migrate({ inspectSource: true });
+    if (review.status !== 'needs_confirmation') throw new Error('Expected a saved source review for the permitted project.');
+    const approval = { planId: review.planId, confirmActions: review.confirmActions };
+    permitted = 'other-project';
+    expect(await f.migrate(approval)).toMatchObject({ status: 'blocked' });
+    expect(f.versionInspection.inspect).not.toHaveBeenCalled();
+    permitted = f.versionSource.projectId;
+    const next = await f.migrate({ inspectSource: true });
+    if (next.status !== 'needs_confirmation') throw new Error('Expected a fresh source review.');
+    expect(await f.migrate({ planId: next.planId, confirmActions: next.confirmActions })).toMatchObject({ status: 'source_inspected' });
+    permitted = 'other-project';
+    expect(await f.migrate()).toMatchObject({ status: 'blocked', message: expect.stringContaining('SSH') });
+    expect(f.versionInspection.inspect).toHaveBeenCalledTimes(1);
   });
 
   it.each([

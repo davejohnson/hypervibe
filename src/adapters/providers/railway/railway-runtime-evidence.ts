@@ -15,7 +15,8 @@ export type RailwayRuntimeRequest = { keys: string[]; expectedHashes?: Record<st
 export type RailwayRuntimeEvidence = { state: 'verified' | 'unknown'; envVarHashes?: Record<string, string>; instanceIds?: string[];
   authentication: 'authenticated' | 'rejected' | 'unknown' | 'unchecked' };
 export interface RailwayRuntimeReader { read(target: RailwayRuntimeTarget, request: RailwayRuntimeRequest): Promise<RailwayRuntimeEvidence> }
-export type RailwayRuntimeCredentials = { sshIdentityFile?: string; sshKnownHostsFile?: string };
+type RailwaySshFiles = { sshIdentityFile: string; sshKnownHostsFile: string };
+export type RailwayRuntimeCredentials = Partial<RailwaySshFiles> & { sshProjectId?: string };
 const identity = z.string().regex(/^[A-Za-z0-9-]{1,128}$/), hash = z.string().regex(/^[a-f0-9]{64}$/);
 const unknown = (): RailwayRuntimeEvidence => ({ state: 'unknown', authentication: 'unknown' });
 const responseSchema = z.object({ version: z.literal(1), nonce: z.string(), state: z.literal('verified'),
@@ -65,7 +66,7 @@ async function main(request) {
 `;
 
 const runtimeCommand = 'test -z "$NODE_OPTIONS" && test -z "$NODE_EXTRA_CA_CERTS" && node -';
-export async function trustedRailwaySshCredentials(credentials?: RailwayRuntimeCredentials | null): Promise<Required<RailwayRuntimeCredentials> | undefined> {
+export async function trustedRailwaySshCredentials(credentials?: RailwayRuntimeCredentials | null): Promise<RailwaySshFiles | undefined> {
   if (!credentials?.sshIdentityFile || !credentials.sshKnownHostsFile) return;
   const files = [credentials.sshIdentityFile, credentials.sshKnownHostsFile];
   if (files.some(path => !isAbsolute(path) || /[%\x00-\x1f\x7f]|\$\{/.test(path))) return;
@@ -76,7 +77,15 @@ export async function trustedRailwaySshCredentials(credentials?: RailwayRuntimeC
   return { sshIdentityFile: files[0]!, sshKnownHostsFile: files[1]! };
 }
 
-async function executeRailwayEvidence(instanceId: string, credentials: Required<RailwayRuntimeCredentials>, input: string,
+export function railwaySshProjectAllowed(credentials: RailwayRuntimeCredentials | null | undefined, projectId: string): boolean {
+  return credentials?.sshProjectId === undefined || (projectId === credentials.sshProjectId && identity.safeParse(projectId).success);
+}
+
+export async function railwaySshCredentialsForProject(credentials: RailwayRuntimeCredentials | null | undefined, projectId: string): Promise<RailwaySshFiles | undefined> {
+  if (railwaySshProjectAllowed(credentials, projectId)) return trustedRailwaySshCredentials(credentials);
+}
+
+async function executeRailwayEvidence(instanceId: string, credentials: RailwaySshFiles, input: string,
   interpreter: 'runtime-node' | 'database-sh' = 'runtime-node'): Promise<unknown> {
   // No user ssh config, forwarding, prompts, host-key writes or implicit key
   // discovery. CLI source documents exact deployment-instance SSH usernames.
@@ -113,7 +122,7 @@ async function executeRailwayEvidence(instanceId: string, credentials: Required<
 }
 
 export async function readRailwayServerVersion(source: MigrationVersionSource, credentials?: RailwayRuntimeCredentials | null): Promise<MigrationSourceInventory> {
-  const trusted = await trustedRailwaySshCredentials(credentials);
+  const trusted = await railwaySshCredentialsForProject(credentials, source.projectId);
   if (!trusted) throw new Error('The exact running Railway database and its private version reply could not be verified.');
   const nonce = randomBytes(16).toString('hex');
   const value = await executeRailwayEvidence(source.replicaId, trusted, versionProgram(source, nonce), 'database-sh');
@@ -152,7 +161,7 @@ export function createRailwayRuntimeEvidence(clientFor: () => GraphQLClient | nu
       request = requestSchema.parse(request);
       if (new Set(request.keys).size !== request.keys.length
         || [request.expectedHashes, request.connectionConfigurationHashes].some(hashes => hashes && (Object.keys(hashes).length !== request.keys.length || request.keys.some(key => !hashes[key])))) return unknown();
-      const credentials = await trustedRailwaySshCredentials(credentialsFor());
+      const credentials = await railwaySshCredentialsForProject(credentialsFor(), target.projectId);
       if (!credentials) return unknown();
       const before = await inventory(target);
       const results = await Promise.all(before.ids.map(async instanceId => {

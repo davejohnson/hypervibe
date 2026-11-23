@@ -31,7 +31,7 @@ export function githubPackageReadCredentialUpdate(verify: (apiToken: string) => 
         return { success: false, error: 'The supplied token did not prove read:packages permission. The existing connection was preserved.' };
       }
       return { success: true, credentials: { ...existing, login: secondary.login, packageReadToken: input.data.packageReadToken },
-        credentialKeys: ['packageReadToken'], message: 'GitHub package-read credential verified and updated; the existing API credential was preserved.' };
+        credentialKeys: ['packageReadToken'], primaryVerified: true, message: 'GitHub package-read credential verified and updated; the existing API credential was preserved.' };
     },
   };
 }

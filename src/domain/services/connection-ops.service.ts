@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { ConnectionRepository } from '../../adapters/db/repositories/connection.repository.js';
 import { AuditRepository } from '../../adapters/db/repositories/audit.repository.js';
 import { getSecretStore } from '../../adapters/secrets/secret-store.js';
@@ -44,6 +45,7 @@ export async function saveConnection(
   scope = normalizeConnectionScope(scope) ?? undefined;
   const secretStore = getSecretStore();
   const registeredProvider = providerRegistry.get(provider);
+  const storage = registeredProvider?.credentialStorage;
   const sourceDetails = {
     provider, scope: scope || null,
     ...(options.credentialsSource ? { credentialsSource: options.credentialsSource } : {}),
@@ -61,7 +63,8 @@ export async function saveConnection(
       error: 'A secondary credential update requires an existing verified connection at this exact provider scope.' };
     const privateValues = suppliedStrings(credentials);
     try {
-      const current = secretStore.decryptObject<Record<string, unknown>>(existing.credentialsEncrypted);
+      const stored = secretStore.decryptObject<Record<string, unknown>>(existing.credentialsEncrypted);
+      const current = storage ? storage.decode(stored) : stored;
       privateValues.push(...updater.secretKeys.flatMap(key => suppliedStrings(current[key])));
       const currentValidation = providerRegistry.validateCredentials(provider, current);
       if (!currentValidation.success || !currentValidation.data || typeof currentValidation.data !== 'object'
@@ -69,19 +72,24 @@ export async function saveConnection(
       const proposed = await updater.prepare({ existing: currentValidation.data as Record<string, unknown>, supplied: credentials, scope: existing.scope });
       if (!proposed.success) return redactExactValues({ success: false, error: proposed.error }, privateValues);
       const merged = providerRegistry.validateCredentials(provider, proposed.credentials);
-      if (!merged.success || proposed.credentialKeys.length === 0
+      if (!merged.success || !merged.data || typeof merged.data !== 'object' || Array.isArray(merged.data) || proposed.credentialKeys.length === 0
         || proposed.credentialKeys.some(key => !Object.hasOwn(credentials, key))) return { success: false,
         error: 'The secondary credential update did not preserve a valid connection. Nothing was written.' };
-      const connection = connectionRepo.updateVerifiedCredentialsIfUnchanged(existing, secretStore.encryptObject(merged.data), {
+      // A secondary update preserves stored fields outside the current provider schema.
+      const next = { ...current, ...merged.data };
+      const nextStored = storage ? storage.encode(next) : next;
+      const unchanged = !proposed.primaryVerified && isDeepStrictEqual(stored, nextStored);
+      const encrypted = unchanged ? existing.credentialsEncrypted : secretStore.encryptObject(nextStored);
+      const connection = connectionRepo.updateVerifiedCredentialsIfUnchanged(existing, encrypted, {
         action: 'connection.credentials.updated', resourceType: 'connection', resourceId: existing.id,
         details: redactExactValues({ ...sourceDetails, credentialKeys: proposed.credentialKeys }, privateValues),
-      });
+      }, proposed.primaryVerified);
       if (!connection) return { success: false, error: 'The connection changed during credential verification. Nothing was overwritten; retry against its current identity.' };
       return redactExactValues({ success: true,
         connection: { id: connection.id, provider: connection.provider, scope: connection.scope,
           status: connection.status, createdAt: connection.createdAt },
-        verification: { kind: 'verified', message: proposed.message,
-          data: { updatedCredentialKeys: proposed.credentialKeys } },
+        verification: { kind: 'verified', message: unchanged ? 'The supplied settings already match the saved connection.' : proposed.message,
+          data: { updatedCredentialKeys: unchanged ? [] : proposed.credentialKeys } },
       }, privateValues);
     } catch {
       return { success: false, error: 'The secondary credential update could not complete. The existing connection was preserved.' };
@@ -99,7 +107,7 @@ export async function saveConnection(
   }
 
   // Encrypt credentials
-  const credentialsEncrypted = secretStore.encryptObject(validation.data);
+  const credentialsEncrypted = secretStore.encryptObject(storage ? storage.encode(validation.data) : validation.data);
 
   // Upsert connection
   const connection = connectionRepo.upsert({
@@ -138,6 +146,7 @@ export async function saveConnection(
 export type VerifyConnectionOutcome =
   | { kind: 'not_found'; error: string }
   | { kind: 'unknown_provider'; error: string }
+  | { kind: 'changed'; error: string }
   | { kind: 'verified'; message: string; data: Record<string, unknown> }
   | { kind: 'failed'; error: string }
   | { kind: 'threw'; error: string };
@@ -178,7 +187,22 @@ export async function verifyConnection(provider: string, scope?: string): Promis
     collectSuppliedValues(credentials);
     return credentials;
   };
-  const safeOutcome = (outcome: VerifyConnectionOutcome): VerifyConnectionOutcome => redactExactValues(outcome, suppliedValues);
+  const finish = (outcome: Extract<VerifyConnectionOutcome, { kind: 'verified' | 'failed' | 'threw' }>,
+    auditDetails?: Record<string, unknown>, enriched?: Record<string, unknown>): VerifyConnectionOutcome => {
+    const status = outcome.kind === 'verified' ? 'verified' : 'failed';
+    try {
+      const stored = enriched && (registeredProvider?.credentialStorage?.encode(enriched) ?? enriched);
+      const encrypted = stored ? secretStore.encryptObject(stored) : connection.credentialsEncrypted;
+      const saved = connectionRepo.recordVerificationIfUnchanged(connection, status, encrypted, auditDetails && {
+        action: `connection.${status}`, resourceType: 'connection', resourceId: connection.id,
+        details: redactExactValues({ provider, scope: scope || null, ...auditDetails }, suppliedValues),
+      });
+      if (!saved) return { kind: 'changed', error: 'The connection changed during verification. Verify the current connection to refresh its status.' };
+    } catch {
+      return { kind: 'threw', error: 'The verification result could not be saved. Retry verification against the current connection.' };
+    }
+    return redactExactValues(outcome, suppliedValues);
+  };
 
   // Secret managers verify through their own registry/adapter interface.
   if (!registeredProvider && secretManagerRegistry.has(provider)) {
@@ -188,27 +212,18 @@ export async function verifyConnection(provider: string, scope?: string): Promis
       await adapter.connect(decryptedCreds);
       const result = await adapter.verify();
       if (result.success) {
-        connectionRepo.updateStatus(connection.id, 'verified');
-        auditRepo.create({
-          action: 'connection.verified',
-          resourceType: 'connection',
-          resourceId: connection.id,
-          details: redactExactValues({ provider, scope: scope || null }, suppliedValues),
-        });
-        return safeOutcome({
+        return finish({
           kind: 'verified',
           message: `${provider} connection (${scopeDisplay}) verified${result.identity ? ` as ${result.identity}` : ''}`,
           data: { ...(result.identity ? { identity: result.identity } : {}) },
-        });
+        }, {});
       }
-      connectionRepo.updateStatus(connection.id, 'failed');
-      return safeOutcome({
+      return finish({
         kind: 'failed',
         error: result.error ?? 'Verification failed',
       });
     } catch (error) {
-      connectionRepo.updateStatus(connection.id, 'failed');
-      return safeOutcome({
+      return finish({
         kind: 'threw',
         error: error instanceof Error ? error.message : String(error),
       });
@@ -226,8 +241,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
     // Check if adapter has a verify method
     if (typeof (adapter as { verify?: () => Promise<unknown> }).verify !== 'function') {
       // For providers without verify (like local, tunnel), just mark as verified
-      connectionRepo.updateStatus(connection.id, 'verified');
-      return safeOutcome({
+      return finish({
         kind: 'verified',
         message: `${provider} connection (${scopeDisplay}) saved`,
         data: {},
@@ -253,49 +267,14 @@ export async function verifyConnection(provider: string, scope?: string): Promis
     }).verify(scope || undefined);
 
     if (result.success) {
-      // Persist discovered Railway workspaceId so future deploy/apply flows can create projects
-      // without requiring manual workspace lookup.
-      if (provider === 'railway' && result.workspaceId) {
-        const creds = decryptedCreds as { apiToken?: string; workspaceId?: string; teamId?: string };
-        if (!creds.workspaceId) {
-          const nextCreds = { ...creds, workspaceId: result.workspaceId };
-          const nextEncrypted = secretStore.encryptObject(nextCreds);
-          connectionRepo.updateCredentials(connection.id, nextEncrypted);
-        }
+      let enriched: Record<string, unknown> | undefined;
+      if (provider === 'railway' && result.workspaceId && !decryptedCreds.workspaceId) {
+        enriched = { ...decryptedCreds, workspaceId: result.workspaceId };
+      } else if (provider === 'github' && result.login && result.login !== decryptedCreds.login) {
+        enriched = { ...decryptedCreds, login: result.login };
+      } else if (provider === 'cloudflare' && result.tokenKind && result.tokenKind !== decryptedCreds.apiTokenKind) {
+        enriched = { ...decryptedCreds, apiTokenKind: result.tokenKind };
       }
-      if (provider === 'github' && result.login) {
-        const creds = decryptedCreds as {
-          apiToken?: string;
-          login?: string;
-          packageReadToken?: string;
-        };
-        const nextCreds = { ...creds, login: result.login };
-        if (JSON.stringify(nextCreds) !== JSON.stringify(creds)) {
-          const nextEncrypted = secretStore.encryptObject(nextCreds);
-          connectionRepo.updateCredentials(connection.id, nextEncrypted);
-        }
-      }
-      if (provider === 'cloudflare' && result.tokenKind) {
-        const creds = decryptedCreds as {
-          apiToken?: string;
-          accountId?: string;
-          registrarApiToken?: string;
-          apiTokenKind?: 'user' | 'account' | 'unknown';
-        };
-        if (creds.apiTokenKind !== result.tokenKind) {
-          const nextCreds = { ...creds, apiTokenKind: result.tokenKind };
-          const nextEncrypted = secretStore.encryptObject(nextCreds);
-          connectionRepo.updateCredentials(connection.id, nextEncrypted);
-        }
-      }
-
-      connectionRepo.updateStatus(connection.id, 'verified');
-      auditRepo.create({
-        action: 'connection.verified',
-        resourceType: 'connection',
-        resourceId: connection.id,
-        details: redactExactValues({ provider, scope: scope || null, email: result.email, accountId: result.accountId, version: result.version }, suppliedValues),
-      });
 
       const displayName = registeredProvider.metadata.displayName;
       let message = `${displayName} connection (${scopeDisplay}) verified successfully`;
@@ -313,7 +292,7 @@ export async function verifyConnection(provider: string, scope?: string): Promis
         githubPermissionProblem?.hint,
       ].filter(Boolean).join(' ');
 
-      return safeOutcome({
+      return finish({
         kind: 'verified',
         message,
         data: {
@@ -326,30 +305,13 @@ export async function verifyConnection(provider: string, scope?: string): Promis
           ...(result.workspaceId && { workspaceId: result.workspaceId }),
           ...(result.workspaces && result.workspaces.length > 0 && { workspaces: result.workspaces }),
         },
-      });
+      }, { email: result.email, accountId: result.accountId, version: result.version }, enriched);
     } else {
-      connectionRepo.updateStatus(connection.id, 'failed');
-      auditRepo.create({
-        action: 'connection.failed',
-        resourceType: 'connection',
-        resourceId: connection.id,
-        details: redactExactValues({ provider, scope: scope || null, reason: result.error }, suppliedValues),
-      });
-
       const errorMsg = `${registeredProvider.metadata.displayName} verification failed: ${result.error}.`;
-
-      return safeOutcome({ kind: 'failed', error: errorMsg });
+      return finish({ kind: 'failed', error: errorMsg }, { reason: result.error });
     }
   } catch (error) {
-    connectionRepo.updateStatus(connection.id, 'failed');
-    auditRepo.create({
-      action: 'connection.failed',
-      resourceType: 'connection',
-      resourceId: connection.id,
-      details: redactExactValues({ provider, scope: scope || null, error: String(error) }, suppliedValues),
-    });
-
-    return safeOutcome({ kind: 'threw', error: `Verification failed: ${error}.` });
+    return finish({ kind: 'threw', error: `Verification failed: ${error}.` }, { error: String(error) });
   }
 }
 

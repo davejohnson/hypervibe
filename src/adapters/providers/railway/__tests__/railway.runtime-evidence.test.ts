@@ -73,6 +73,31 @@ describe('existing-access Railway runtime evidence', () => {
     expect(f.contractErrors).toEqual([]); expect(f.mutations).toEqual([]);
   });
 
+  it('uses a project-scoped SSH key only for runtime evidence in its Railway project', async () => {
+    const f = await fixture();
+    f.credentials.sshProjectId = 'other-project';
+    expect(await f.read()).toEqual(unknown);
+    expect(f.spawn).not.toHaveBeenCalled();
+    f.credentials.sshProjectId = target.projectId;
+    expect(await f.read()).toMatchObject({ state: 'verified' });
+    expect(f.spawn).toHaveBeenCalledTimes(2);
+  });
+
+  it('checks project access for fresh and previously approved source inspections', async () => {
+    const f = await fixture();
+    const inspection = f.adapter.privateMigrationSourceInspection;
+    await f.adapter.connect({ apiToken: 'fixture', ...f.credentials, sshProjectId: target.projectId });
+    for (const projectId of ['', 'other-project']) {
+      expect(await inspection.hasTrustedAccess(projectId, 'inspect')).toBe(false);
+      expect(await inspection.hasTrustedAccess(projectId, 'reuse-receipt')).toBe(false);
+    }
+    expect(await inspection.hasTrustedAccess(target.projectId, 'inspect')).toBe(true);
+    await f.adapter.connect({ apiToken: 'fixture' });
+    expect(await inspection.hasTrustedAccess(target.projectId, 'inspect')).toBe(false);
+    expect(await inspection.hasTrustedAccess(target.projectId, 'reuse-receipt')).toBe(true);
+    expect(f.spawn).not.toHaveBeenCalled();
+  });
+
   it.each(['missing-key', 'missing-host-trust', 'absent-files', 'relative-path', 'public-key-file-mode', 'writable-host-trust'])('does not spawn SSH with %s', async kind => {
     const credentials: RailwayRuntimeCredentials = { sshIdentityFile: join(directory, 'existing-key'), sshKnownHostsFile: join(directory, 'existing-host-trust') };
     if (kind === 'missing-key') delete credentials.sshIdentityFile;
