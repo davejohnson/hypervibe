@@ -8,6 +8,7 @@ import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.serv
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { CommandContext } from './context.js';
+import { gcpDatabaseLocation, type GcpDatabaseLocation } from './gcp-database-location.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore, type SpecResult } from '../domain/spec/spec.store.js';
@@ -499,7 +500,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     const prepared = await prepareMigrationBuckets(params.project, sourceEnvironment, buckets);
     if (!prepared.prepared) return { status: 'blocked', message: prepared.blocked };
     const result = await verifyMigratedCopy({ lease, buckets: prepared.prepared, project: params.project, from: params.from, to: params.to, sourceSpec, sourceEnvironment, spec, context, environmentLabel,
-      instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName, copiedAt: copy.copiedAt });
+      database: gcpDatabaseLocation(context.gcpProjectId, (environment().platformBindings as { engine?: EngineBinding }).engine), copiedAt: copy.copiedAt });
     if (!sameAttempt(copy)) return supersededResult;
     const change = selectionProblem();
     return change ? { status: 'blocked', message: change } : result;
@@ -608,19 +609,19 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     const superseded = () => migration()?.copyAttempt?.id !== copyAttempt.id || migration()?.copyAttempt?.status !== 'incomplete' || !!selectionProblem();
     let database: Extract<MigrateResult, { status: 'migrated' }>['database'];
     if (privateRailwaySource) {
-      const copied = await copyPrivateRailwayDatabase(ctx, { project: params.project, sourceEnvironment, to: params.to, context, transfer, instance: (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName });
+      const copied = await copyPrivateRailwayDatabase(ctx, { project: params.project, sourceEnvironment, to: params.to, context, transfer, database: gcpDatabaseLocation(context.gcpProjectId, (environment().platformBindings as { engine?: EngineBinding }).engine) });
       if ('blocked' in copied) return { status: 'blocked', message: copied.blocked, ...(copied.details ? { details: copied.details } : {}) };
       database = copied;
     } else if (sourceAccess && summary) {
       const major = Math.max(16, Math.floor(Number(summary.version) / 10000));
-      const instance = (environment().platformBindings as { engine?: EngineBinding }).engine?.database?.instanceName;
+      const targetDatabase = gcpDatabaseLocation(context.gcpProjectId, (environment().platformBindings as { engine?: EngineBinding }).engine);
       const secret = await observeSecret(await transfer.token(), context.gcpProjectId, engineSecretId(params.to, ENGINE_DATABASE_URL_KEY));
-      if (!instance || secret.state !== 'present' || !secret.value.latestVersion) return { status: 'blocked', message: 'The target database is not ready yet. Run hv_migrate again.' };
+      if (!targetDatabase || secret.state !== 'present' || !secret.value.latestVersion) return { status: 'blocked', message: 'The target database is not ready yet. Run hv_migrate again.' };
       const result = await sourceAccess.lease.withConnection((sourceUrl) => runTransferJob<DatabaseTransferResult>(transfer, {
         purpose: 'database', image: `postgres:${major}-alpine`, script: databaseTransferScript(), env: {},
         sourceSecrets: { SOURCE_DATABASE_URL: sourceUrl },
         secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion! } },
-        cloudSqlConnectionName: `${context.gcpProjectId}:${context.region}:${instance}`, timeoutSeconds: 3600,
+        cloudSqlConnectionName: `${targetDatabase.gcpProjectId}:${context.region}:${targetDatabase.instanceName}`, timeoutSeconds: 3600,
       }));
       if (!result.ok) return { status: 'blocked', message: result.error ?? 'The database copy failed.' };
       const compared = manifestsMatch(result.source, result.target);
@@ -673,7 +674,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
 async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   project: Project; sourceEnvironment: Environment; to: string;
   context: Awaited<ReturnType<typeof resolveEngineContext>> & { gcpProjectId: string };
-  transfer: TransferContext; instance?: string;
+  transfer: TransferContext; database?: GcpDatabaseLocation;
 }): Promise<NonNullable<Extract<MigrateResult, { status: 'migrated' }>['database']> | { blocked: string; details?: unknown }> {
   const { context, transfer } = params;
   if (!('adapter' in context)) return { blocked: 'The target environment is not ready.' };
@@ -685,7 +686,8 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   const databaseServiceName = await railway.adapter.serviceName(component.externalId);
   if (!databaseServiceName) return { blocked: 'The source Railway database service could not be found.' };
   const secret = await observeSecret(await transfer.token(), context.gcpProjectId, engineSecretId(params.to, ENGINE_DATABASE_URL_KEY));
-  if (!params.instance || secret.state !== 'present' || !secret.value.latestVersion) return { blocked: 'The target database is not ready yet. Run hv_migrate again.' };
+  if (!params.database || secret.state !== 'present' || !secret.value.latestVersion) return { blocked: 'The target database is not ready yet. Run hv_migrate again.' };
+  const targetDatabase = params.database;
 
   const key = JSON.parse(context.adapter.engineConnection().credentials) as { client_email: string; private_key: string };
   const bucket = buildSourceBucketName(context.gcpProjectId);
@@ -709,7 +711,7 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
     purpose: 'database', image: 'postgres:18-alpine', script: databaseRestoreScript(), env: { SOURCE_DATABASE_IDENTITY: sourceIdentity },
     sourceSecrets: { DUMP_URL: sign('GET') },
     secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion } },
-    cloudSqlConnectionName: `${context.gcpProjectId}:${context.region}:${params.instance}`, timeoutSeconds: 3600,
+    cloudSqlConnectionName: `${targetDatabase.gcpProjectId}:${context.region}:${targetDatabase.instanceName}`, timeoutSeconds: 3600,
   });
   if (!restored.ok) return { blocked: restored.error ?? 'Restoring the database in Google Cloud failed.' };
   const compared = manifestsMatch(exportResult.source, restored.target);
@@ -887,7 +889,7 @@ async function verifyMigratedCopy(params: {
   lease: MigrationTargetLease;
   project: Project; from: string; to: string; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment; spec: ProjectSpec;
   buckets: NonNullable<Awaited<ReturnType<typeof prepareMigrationBuckets>>['prepared']>;
-  context: Awaited<ReturnType<typeof resolveEngineContext>> & { gcpProjectId: string }; environmentLabel: string; instance?: string; copiedAt?: string;
+  context: Awaited<ReturnType<typeof resolveEngineContext>> & { gcpProjectId: string }; environmentLabel: string; database?: GcpDatabaseLocation; copiedAt?: string;
 }): Promise<MigrateResult> {
   const { context } = params;
   if (!('adapter' in context)) return { status: 'blocked', message: 'The target environment is not ready.' };
@@ -899,7 +901,8 @@ async function verifyMigratedCopy(params: {
   let database: Extract<MigrateResult, { status: 'verified' | 'differs' }>['database'];
   if (params.sourceSpec.database && params.spec.environments[params.to]!.database) {
     const secret = await observeSecret(await transfer.token(), context.gcpProjectId, engineSecretId(params.to, ENGINE_DATABASE_URL_KEY));
-    if (!params.instance || secret.state !== 'present' || !secret.value.latestVersion) return { status: 'blocked', message: 'The target database is not ready.' };
+    if (!params.database || secret.state !== 'present' || !secret.value.latestVersion) return { status: 'blocked', message: 'The target database is not ready.' };
+    const targetDatabase = params.database;
     const access = await acquireManagedDatabaseAccess(params.project, params.sourceEnvironment);
     if (!access.ok) return { status: 'blocked', message: `Could not open the source database: ${access.error}` };
     let checked: DatabaseTransferResult;
@@ -907,7 +910,7 @@ async function verifyMigratedCopy(params: {
       checked = await access.lease.withConnection((sourceUrl) => runTransferJob<DatabaseTransferResult>(transfer, {
         purpose: 'database', image: 'postgres:18-alpine', script: databaseManifestScript(), env: {}, sourceSecrets: { SOURCE_DATABASE_URL: sourceUrl },
         secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion! } },
-        cloudSqlConnectionName: `${context.gcpProjectId}:${context.region}:${params.instance}`, timeoutSeconds: 1800,
+        cloudSqlConnectionName: `${targetDatabase.gcpProjectId}:${context.region}:${targetDatabase.instanceName}`, timeoutSeconds: 1800,
       }));
     } finally {
       await access.lease.release().catch(() => undefined);

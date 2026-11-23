@@ -9,6 +9,7 @@ import type { TemporaryDatabaseAccess } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
 import { isExternallyUsableDatabaseUrl, resolveExternalDatabaseUrl } from './database-ops.service.js';
 import { ENGINE_DATABASE_URL_KEY, engineSecretId } from './engine-secret-id.js';
+import { gcpDatabaseLocation, type GcpDatabaseBinding } from './gcp-database-location.js';
 
 const componentRepo = new ComponentRepository();
 const DEFAULT_LEASE_TTL_MS = 2 * 60 * 1000;
@@ -385,20 +386,18 @@ export async function acquireDatabaseComponentAccess(
  * environment's engine binding, and its login stays in Secret Manager.
  */
 export function engineDatabaseComponent(environment: Environment): Component | undefined {
-  const bindings = environment.platformBindings as {
-    provider?: unknown; projectId?: unknown; region?: unknown; engine?: { database?: { instanceName?: unknown } };
-  };
-  const instanceName = bindings.engine?.database?.instanceName;
-  if (bindings.provider !== 'cloudrun' || typeof instanceName !== 'string' || !instanceName
-    || typeof bindings.projectId !== 'string' || typeof bindings.region !== 'string') return undefined;
+  const bindings = environment.platformBindings as { provider?: unknown; projectId?: unknown; region?: unknown; engine?: GcpDatabaseBinding };
+  if (bindings.provider !== 'cloudrun' || typeof bindings.projectId !== 'string' || typeof bindings.region !== 'string') return undefined;
+  const database = gcpDatabaseLocation(bindings.projectId, bindings.engine);
+  if (!database) return undefined;
   return {
     id: `engine:${environment.id}:postgres`,
     environmentId: environment.id,
     type: 'postgres',
-    externalId: instanceName,
+    externalId: database.instanceName,
     bindings: {
       provider: 'cloudsql',
-      providerScope: { projectId: bindings.projectId, region: bindings.region },
+      providerScope: { projectId: database.gcpProjectId, region: bindings.region },
       connectionSecretId: engineSecretId(environment.name, ENGINE_DATABASE_URL_KEY),
     },
     createdAt: environment.createdAt,
