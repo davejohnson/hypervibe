@@ -9,7 +9,7 @@ describe('proposed migration target', () => {
       services: {
         web: { workloadKind: 'web', databaseEnvAliases: { POSTGRES_DB_URL: 'DATABASE_URL' } },
         worker: { workloadKind: 'worker', databaseEnvAliases: { WORKER_DB: 'DIRECT_URL' } },
-        hourly: { workloadKind: 'cron', cronSchedule: '0 * * * *', databaseEnvAliases: { JOB_DB: 'DATABASE_URL' } },
+        hourly: { workloadKind: 'cron', cronSchedule: '0 * * * *', startCommand: 'npm run hourly', databaseEnvAliases: { JOB_DB: 'DATABASE_URL' } },
         other: { workloadKind: 'web' },
       },
     } as unknown as EnvironmentSpec;

@@ -9,6 +9,7 @@ import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
 import { domainServiceFor, environmentDomains, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { secretTargetsService } from '../domain/services/secret-service-scope.js';
 import { buildDatabaseAliasEnvVars, databaseEnvAliasKeys } from '../domain/services/database-env.js';
+import { gcpReleaseServiceName } from '../domain/services/gcp-runtime-env.js';
 import { gcpSecretScopeGate, gcpSecretScopeNotes, RELEASE_WORKLOAD } from './gcp-secret-scope.js';
 import { recordAppliedWorkloads } from '../adapters/providers/gcp/secret-scope-state.js';
 import type { GcpAppliedWorkload } from '../domain/services/gcp-secret-scope.js';
@@ -408,7 +409,8 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   // The release command runs with the web service's configuration (secrets, database, storage),
   // so it never holds a secret that is limited to other services.
   const command = releaseCommandFor(environmentSpec);
-  const primary = services.find((service) => service.workload === 'web') ?? services.find((service) => service.workload !== 'job');
+  const primaryName = gcpReleaseServiceName(environmentSpec);
+  const primary = services.find(service => service.logicalName === primaryName);
   return {
     projectId: context.gcpProjectId,
     region: context.region,

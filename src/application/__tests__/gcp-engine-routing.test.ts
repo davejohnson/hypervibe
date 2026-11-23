@@ -85,6 +85,33 @@ describe('GCP engine public routing', () => {
     } } } });
   });
 
+  it.each([['web', true], ['worker', true], ['web', false]] as const)(
+    'checks database alias destinations for each Cloud Run workload and the release job (%s, release %s)', async (primaryKind, release) => {
+      const f = fixture('cloudrun');
+      // https://docs.cloud.google.com/run/docs/container-contract#env-vars
+      const jobKeys = ['CLOUD_RUN_JOB', 'CLOUD_RUN_EXECUTION', 'CLOUD_RUN_TASK_INDEX', 'CLOUD_RUN_TASK_ATTEMPT', 'CLOUD_RUN_TASK_COUNT'];
+      const poolKeys = ['CLOUD_RUN_WORKER_POOL', 'CLOUD_RUN_REVISION'];
+      const aliases = (...keys: string[]) => Object.fromEntries(keys.map(key => [key, 'DATABASE_URL']));
+      const spec = projectSpecSchema.parse({ ...f.spec, environments: { staging: {
+        hosting: { provider: 'cloudrun' }, database: { provider: 'cloudsql' },
+        ...(release ? { migrations: { mode: 'releaseCommand', command: 'npm run migrate' } } : {}),
+        services: {
+          zeta: { workloadKind: primaryKind, databaseEnvAliases: aliases('CLOUD_RUN_EXECUTION') },
+          alpha: { workloadKind: primaryKind, databaseEnvAliases: aliases('CLOUD_RUN_TASK_INDEX', 'X_GOOGLE_APP_DB') },
+          worker: { workloadKind: 'worker', databaseEnvAliases: aliases(...poolKeys) },
+          scheduled: { workloadKind: 'cron', cronSchedule: '0 1 * * *', startCommand: 'npm run daily', databaseEnvAliases: aliases(...jobKeys, 'CLOUD_RUN_REVISION') },
+        },
+      } } });
+      const plan = await engine.planGcpInfrastructureEngine(f.ctx, { project: f.project, spec, specRevision: 1, environmentName: 'staging' });
+      expect(plan).toMatchObject({ blocked: [
+        ...(release ? [expect.stringMatching(/"CLOUD_RUN_TASK_INDEX".*"alpha"/)] : []),
+        expect.stringMatching(/"X_GOOGLE_APP_DB".*"alpha"/),
+        ...poolKeys.map(key => expect.stringContaining(`"${key}" for another setting on service "worker"`)),
+        ...jobKeys.map(key => expect.stringContaining(`"${key}" for another setting on service "scheduled"`)),
+      ] });
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
   it.each([undefined, 'opentofu'] as const)('accepts hv_spec with engine=%s', async engineChoice => {
     const f = fixture('cloudrun', engineChoice);
     const result = await f.commands.execute('hv_spec', { project: f.project.name, spec: f.spec });
