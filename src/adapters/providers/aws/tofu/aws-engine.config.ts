@@ -25,7 +25,7 @@ export interface AwsEngineInput {
   parameterPath: string;
   /** The environment's own database on the project's shared testing cluster. */
   database?: AwsEnvironmentDatabaseInput;
-  storage?: Array<{ name: string; bucket: string; versioning?: boolean; browserUploads?: boolean }>;
+  storage?: Array<{ name: string; bucket: string; versioning?: boolean; browserUploads?: boolean; autoTiering?: boolean }>;
   /** Web services on Fargate; public ones get an HTTPS address through ECS Express Mode. */
   services?: AwsWebServiceInput[];
   /** Background workers on Fargate; on-demand ones sit at zero tasks until there is work. */
@@ -286,9 +286,17 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
       }
       if (bucket.versioning) {
         (bucketResources.aws_s3_bucket_versioning ??= {})[key] = { bucket: reference, versioning_configuration: [{ status: 'Enabled' }] };
+      }
+      if (bucket.versioning || bucket.autoTiering) {
+        // A bucket has one lifecycle configuration. The tiering rule comes first, so adding or removing it is always
+        // a change to rule 0's transition. Intelligent-Tiering's delayed archive tiers are opt-in and never enabled:
+        // files stay instantly readable. S3 leaves files under 128 KB where they are.
         (bucketResources.aws_s3_bucket_lifecycle_configuration ??= {})[key] = {
-          bucket: reference, depends_on: [`aws_s3_bucket_versioning.${key}`],
-          rule: [{ id: 'expire-old-versions', status: 'Enabled', filter: [{}], noncurrent_version_expiration: [{ noncurrent_days: 30 }] }],
+          bucket: reference, ...(bucket.versioning ? { depends_on: [`aws_s3_bucket_versioning.${key}`] } : {}),
+          rule: [
+            ...(bucket.autoTiering ? [{ id: 'auto-tiering', status: 'Enabled', filter: [{}], transition: [{ days: 0, storage_class: 'INTELLIGENT_TIERING' }] }] : []),
+            ...(bucket.versioning ? [{ id: 'expire-old-versions', status: 'Enabled', filter: [{}], noncurrent_version_expiration: [{ noncurrent_days: 30 }] }] : []),
+          ],
         };
       }
       if (bucket.browserUploads) {

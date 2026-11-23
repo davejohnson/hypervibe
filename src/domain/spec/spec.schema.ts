@@ -1206,6 +1206,12 @@ export const storageSpecSchema = z.object({
    * The bucket stays private: every request still needs that address.
    */
   browserUploads: z.boolean().optional(),
+  /**
+   * Let the cloud move files that have not been read for a while to cheaper storage,
+   * and back when they are read. Files stay instantly readable. Off unless set.
+   * Google Cloud ("gcs"): Autoclass, down to Nearline. AWS ("s3"): S3 Intelligent-Tiering.
+   */
+  autoTiering: z.boolean().optional(),
 }).strict().superRefine((storage, ctx) => {
   if (storage.purpose === 'backup' && storage.injectInto.length) ctx.addIssue({ code: z.ZodIssueCode.custom,
     path: ['injectInto'], message: 'Backup storage cannot be injected into application services.' });
@@ -1218,6 +1224,26 @@ export const storageSpecSchema = z.object({
     });
   }
 });
+
+/** Hosting whose managed engine applies auto-tiering to each storage provider. Anything else would ignore the setting. */
+const AUTO_TIERING_HOSTING: Record<string, { hosting: string; cloud: string }> = {
+  gcs: { hosting: 'cloudrun', cloud: 'Google Cloud' },
+  s3: { hosting: 'aws', cloud: 'AWS' },
+};
+
+/** Why autoTiering cannot be honored for this bucket; undefined when it can. A declared setting is never silently dropped. */
+export function autoTieringProblem(storageProvider: string, hostingProvider: string): string | undefined {
+  if (storageProvider === 'azureblob') {
+    return 'autoTiering is not available on Azure. Azure tracks when files were last read for a whole storage account, which every container in the environment shares, '
+      + 'and it charges for reading files it has moved to a cooler tier, so Hypervibe cannot offer the same setting for one container. Remove autoTiering.';
+  }
+  const supported = AUTO_TIERING_HOSTING[storageProvider];
+  if (!supported) return 'autoTiering is available only for Google Cloud Storage ("gcs") and Amazon S3 ("s3") buckets. Remove autoTiering.';
+  if (hostingProvider !== supported.hosting) {
+    return `autoTiering needs the environment to be hosted on ${supported.cloud} (hosting.provider "${supported.hosting}"), where Hypervibe manages this bucket's settings. Remove autoTiering.`;
+  }
+  return undefined;
+}
 
 /**
  * One reviewed, one-use copy of durable environment data. The target database
@@ -2078,6 +2104,8 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   }
   const storageByService = new Map<string, string>();
   for (const [storageName, storage] of Object.entries(environment.storage ?? {})) {
+    const tieringProblem = storage.autoTiering ? autoTieringProblem(storage.provider, environment.hosting.provider) : undefined;
+    if (tieringProblem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Storage ${storageName}: ${tieringProblem}`, path: ['storage', storageName, 'autoTiering'] });
     for (const serviceName of storage.injectInto) {
       if (!environment.services[serviceName]) {
         ctx.addIssue({

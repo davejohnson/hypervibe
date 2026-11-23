@@ -554,6 +554,44 @@ Design notes:
 - Hypervibe never overwrites DNS records it did not create and removes only the exact
   Google targets it wrote.
 
+### Automatic storage tiering
+
+`environments.<env>.storage.<name>.autoTiering: true` turns on Cloud Storage
+[Autoclass](https://docs.cloud.google.com/storage/docs/autoclass) for that one
+bucket. It is off unless set, and a spec without it produces the same bucket
+configuration as before the setting existed.
+
+- The bucket is updated in place. `autoclass` is not a field the pinned Google
+  provider recreates a bucket for, and it can be turned on for a bucket that
+  already holds files. A plan that proposes replacing a bucket is still shown
+  as a data-bearing replacement that needs its own approval, and buckets are
+  created without `force_destroy`.
+- The coldest class is Nearline (`terminal_storage_class`). Files of 128 KiB or
+  more that are not read for 30 days move to Nearline and return to Standard
+  when read. Every class is read instantly. Nearline is chosen over Archive
+  because, if tiering is later turned off, files keep their class and Nearline
+  has the smallest read fee and shortest minimum storage time.
+- While it is on Google charges a management fee and no retrieval or
+  early-deletion fees, plus a one-time enablement charge for a bucket that
+  already holds files. The plan says so on the storage action, and turning it
+  on or off needs that action's own approval.
+- Versioning and the 30-day cleanup of replaced files stay. Google refuses
+  Autoclass beside a lifecycle rule that sets or matches a storage class;
+  Hypervibe writes only a Delete rule.
+- Removing the setting turns Autoclass off in place. Nothing is deleted or
+  moved: files keep the class they have, ordinary Nearline charges apply to
+  those left there, and Google refuses to turn it back on for one day.
+- Composing objects fails in an Autoclass bucket unless every source object is
+  in Standard. An app that composes objects should leave the setting off.
+
+On AWS the same setting adds a lifecycle rule that moves files of 128 KB or
+more to S3 Intelligent-Tiering; only its automatic, instantly readable tiers
+are used. Removing it stops new moves and leaves moved files where they are.
+The spec refuses the setting for Azure, Railway and any bucket its
+environment's engine does not manage, so it is never silently ignored.
+
+No live run has been made of this setting on any cloud.
+
 ## Evidence boundaries and later implementation
 
 The November 5–6 evidence leaves browser sign-in, a confirmed from-scratch
