@@ -47,4 +47,12 @@ describe('DNS real pinned-provider configuration (no cloud writes)', () => {
     expect(await engine.validate(backend, configuration)).toEqual({ ok: true });
     expect(await engine.validate(backend, buildDnsAuthenticationProbe(zone))).toEqual({ ok: true });
   }, 300_000);
+
+  it.each(['cloudflare', 'gcp', 'aws', 'azure'] satisfies DnsProvider[])('validates %s when the last record is removed', async provider => {
+    const zone = DNS_ZONES[provider];
+    const configuration = buildDnsConfiguration({ zone, records: [], retiredRecords: [record({ authority: {
+      kind: 'managed', nativeId: dnsRecordNativeId(zone, 'www.example.com', 'A', provider === 'cloudflare' ? 'c'.repeat(32) : undefined), preserveValues: [],
+    } })] });
+    expect(await engine.validate(dnsEngineBackend(zone), configuration)).toEqual({ ok: true });
+  }, 300_000);
 });

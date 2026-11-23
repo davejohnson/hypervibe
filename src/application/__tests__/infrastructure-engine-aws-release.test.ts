@@ -33,3 +33,20 @@ describe('AWS teardown spec cleanup', () => {
     expect(specWithoutEnvironment(spec, 'demo')).toEqual({ environments: { demo: null }, secrets: { ONLY: null, SHARED: { environments: ['prod'] } } });
   });
 });
+
+describe('teardown spec cleanup of the project\'s main environment', () => {
+  it('leaves a spec that still validates when the removed environment was the canonical one', async () => {
+    const { specWithoutEnvironment } = await import('../engine-shared.js');
+    const { projectSpecSchema } = await import('../../domain/spec/spec.schema.js');
+    const { deepMergeSpec } = await import('../../domain/spec/spec.store.js');
+    const environment = { hosting: { provider: 'cloudrun', region: 'us-central1' }, services: { web: { workloadKind: 'web', startCommand: 'npm start' } } };
+    const spec = projectSpecSchema.parse({
+      version: 1, project: 'app', environments: { staging: environment, production: environment },
+      devops: { code: { provider: 'github', scope: 'owner/app' }, ci: { provider: 'github-actions' }, canonicalEnvironment: 'staging' },
+    });
+    const merged = projectSpecSchema.safeParse(deepMergeSpec(spec, specWithoutEnvironment(spec, 'staging')));
+    expect(merged.error?.issues ?? []).toEqual([]);
+    expect(merged.data?.devops?.canonicalEnvironment).toBeUndefined();
+    expect(Object.keys(merged.data!.environments)).toEqual(['production']);
+  });
+});
