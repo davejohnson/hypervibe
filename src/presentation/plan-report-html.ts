@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { transferAccessCheckScope, transferFileAccessCheckScope, type PlanReport, type PlanReportAction } from '../domain/plan/plan-report.js';
+import { planIdMeta, transferAccessCheckScope, transferFileAccessCheckScope, type PlanReport, type PlanReportAction } from '../domain/plan/plan-report.js';
 import type { PlanActionType } from '../domain/plan/plan.types.js';
 import { actionTitle, buildReportMap, humanize, isNamedResource, isSecretReadPermission, lanes, providerName, type MapGroup } from './plan-report-map.js';
 import { planReportBrowser } from './plan-report-browser.js';
@@ -99,7 +99,6 @@ function headline(actions: PlanReportAction[]): string {
   return `This plan ${listed(parts)}.${removal}`;
 }
 
-const codeList = (values: string[]) => values.length ? `<ul>${values.map(value => `<li><code>${escape(value)}</code></li>`).join('')}</ul>` : '';
 
 function actionRow(action: PlanReportAction, index: number, group: MapGroup, indexes: Map<string, number | null>, titles: string[], accessCheck: boolean) {
   const type = reviewType(action);
@@ -108,23 +107,20 @@ function actionRow(action: PlanReportAction, index: number, group: MapGroup, ind
   const flags = [
     action.billable && 'Costs money', action.dataBearing && 'Holds data', action.requiresConfirm && 'Needs your OK',
   ].filter(Boolean);
-  // A prerequisite is named the way its own row is; its id shows only when the plan does not list it.
-  const dependencies = action.dependsOn.map(id => {
+  // A prerequisite is named the way its own row is. One the plan does not list has no name to show.
+  const dependencies = action.dependsOn.flatMap(id => {
     const target = indexes.get(id);
-    return `<li>${typeof target === 'number' ? `<a href="#action-${target}">${escape(titles[target]!)}</a>` : `<code>${escape(id)}</code>`}</li>`;
+    return typeof target === 'number' ? [`<li><a href="#action-${target}">${escape(titles[target]!)}</a></li>`] : [];
   });
   const anchor = group.actions[0] === action ? `<span id="group-${group.index}"></span>` : '';
-  return `<li id="action-${index}" class="action-row" data-type="${escape(type)}" data-group="${group.index}">${anchor}
+  return `<li id="action-${index}" class="action-row" data-action="${escape(action.id)}" data-type="${escape(type)}" data-group="${group.index}">${anchor}
     <details><summary><span class="status">${types[type]}</span>
     <span class="action-main"><span class="action-name">${escape(title)}</span><span class="action-kind">${escape(group.title)} · ${escape(providerName(action.provider))}</span></span></summary>
     <div class="detail"><div class="bits">${flags.map(label => `<span>${label}</span>`).join('')}</div>
     ${action.reason ? `<p>${escape(action.reason)}</p>` : ''}<dl>
     ${name}
     ${accessCheck ? '' : fact('Checked', action.verified ? 'Confirmed with the provider when this plan was made' : 'Not confirmed with the provider when this plan was made')}
-    ${fact('Happens after', dependencies.length ? `<ul>${dependencies.join('')}</ul>` : undefined)}</dl>
-    <details class="technical"><summary>Technical details</summary><dl>
-    ${fact('Action ID', `<code>${escape(action.id)}</code>`)}
-    ${fact('Changed fields', codeList(action.fields))}${fact('Resource addresses', codeList(action.addresses))}</dl></details></div></details></li>`;
+    ${fact('Happens after', dependencies.length ? `<ul>${dependencies.join('')}</ul>` : undefined)}</dl></div></details></li>`;
 }
 
 export function renderPlanReportContent(report: PlanReport, options: { localReview?: boolean } = {}): string {
@@ -134,10 +130,6 @@ export function renderPlanReportContent(report: PlanReport, options: { localRevi
   report.actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
   const visibleTypes = Object.entries(types).filter(([type]) =>
     (type !== 'grant' && type !== 'revoke') || report.actions.some(action => reviewType(action) === type));
-  const stats = visibleTypes.map(([type]) => {
-    const count = report.actions.filter(action => reviewType(action) === type).length;
-    return `<div class="stat${count ? ' has-actions' : ''}" data-type="${type}"><strong>${count}</strong><span>${tallies[type as ReviewActionType]}</span></div>`;
-  }).join('');
   const titles = report.actions.map(actionTitle);
   const rows = report.actions.map((action, index) =>
     actionRow(action, index, map.groupByAction.get(action)!, indexes, titles, accessCheck)).join('');
@@ -158,13 +150,16 @@ export function renderPlanReportContent(report: PlanReport, options: { localRevi
     fact('Created', timeTag(report.createdAt)),
     fact('Approval', !options.localReview && report.approval === 'whole-plan' ? 'Approve the whole plan in the chat or terminal where you requested it.' : undefined),
   ].join('');
-  const flaggedCounts = [
-    [report.actions.filter(action => action.requiresConfirm).length, 'Need your OK'],
-    [report.actions.filter(action => action.billable).length, 'Cost money'],
-    [report.actions.filter(action => action.dataBearing).length, 'Hold data'],
-  ].filter(([count]) => count).map(([count, label]) => `<span>${label} <b>${count}</b></span>`).join('');
-  return `${accessCheck ? '' : `<p class="headline">${escape(headline(report.actions))}</p>`}<dl class="meta">${metadata}</dl><div class="counts" aria-label="Action counts">${stats}</div>
-${flaggedCounts ? `<div class="review-flags" aria-label="Actions to review">${flaggedCounts}</div>` : ''}
+  // Small badges beside the sentence; the explanation is in each badge's tooltip and accessible name.
+  const steps = (count: number) => count === 1 ? '1 step' : `${count} steps`;
+  const badges = ([
+    [report.actions.filter(action => action.requiresConfirm).length, 'confirm', (n: number) => n === 1 ? 'needs your OK' : 'need your OK', (n: number) => `${steps(n)} will not run until you approve.`],
+    [report.actions.filter(action => action.billable).length, 'cost', (n: number) => n === 1 ? 'costs money' : 'cost money', (n: number) => `${steps(n)} ${n === 1 ? 'creates or changes' : 'create or change'} something you pay for.`],
+    [report.actions.filter(action => action.dataBearing).length, 'data', (n: number) => n === 1 ? 'holds data' : 'hold data', (n: number) => `${steps(n)} ${n === 1 ? 'touches' : 'touch'} something that stores your data.`],
+  ] as Array<[number, string, (n: number) => string, (n: number) => string]>).filter(([count]) => count)
+    .map(([count, kind, label, tip]) => `<span class="badge" data-badge="${kind}" title="${escape(tip(count))}" aria-label="${escape(tip(count))}">${count} ${label(count)}</span>`).join('');
+  const lead = [accessCheck ? '' : `<span>${escape(headline(report.actions))}</span>`, badges ? `<span class="badges">${badges}</span>` : ''].join('');
+  return `${lead ? `<p class="headline">${lead}</p>` : ''}<dl class="meta">${metadata}</dl>
 ${notices ? `<section class="notices" aria-label="Plan notices">${notices}</section>` : ''}
 ${mapSection(map, accessCheck)}
 <section aria-labelledby="review"><div class="section-head"><h2 tabindex="-1" id="review">Plan actions</h2><span class="muted">${quantity(report.actions.length, 'action')}</span></div>
@@ -174,8 +169,7 @@ ${rows ? `<div class="review-scope" id="selected-group" hidden><a id="back-map" 
 <button class="button" id="reset" type="button">Clear filters</button></div>
 <p class="result-count" role="status" aria-live="polite" id="result-count"></p>
 <p id="empty-filter" class="empty-filter" hidden>No actions match these filters.</p><ol class="action-list">${rows}</ol>` : '<p>No actions are recorded in this plan.</p>'}
-</section>
-<details class="technical plan-technical"><summary>Technical details</summary><dl>${fact('Plan ID', `<code>${escape(report.planId)}</code>`)}</dl></details>`;
+</section>`;
 }
 
 export function renderPlanReportHtml(report: PlanReport, options: { localReview?: boolean } = {}): string {
@@ -183,7 +177,7 @@ export function renderPlanReportHtml(report: PlanReport, options: { localReview?
     : report.scope === transferAccessCheckScope ? 'Transfer access check' : 'Infrastructure plan';
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${planReportPolicy}">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.project)} · ${title} · Hypervibe</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">${planIdMeta(report.planId)}<title>${escape(report.project)} · ${title} · Hypervibe</title>
 <style>${planReportStyle}</style></head><body>
 <a class="skip" href="#review">Skip to plan actions</a>
 ${options.localReview ? '' : `<header class="mast"><div class="mast-inner"><div class="brand">

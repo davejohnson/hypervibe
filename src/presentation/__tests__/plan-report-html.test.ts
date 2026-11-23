@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { makePlanReport, type PlanReport, type PlanReportAction } from '../../domain/plan/plan-report.js';
+import { makePlanReport, planIdInSavedReport, type PlanReport, type PlanReportAction } from '../../domain/plan/plan-report.js';
 import { renderPlanReportHtml } from '../plan-report-html.js';
 import { gcpInfrastructureNotes } from '../../domain/plan/gcp-infrastructure-notes.js';
 import { buildReportMap } from '../plan-report-map.js';
@@ -12,6 +12,9 @@ const action = (id: string, name: string, extra: Partial<PlanReportAction> = {})
 const report = (actions: PlanReportAction[], extra: Partial<PlanReport> = {}): PlanReport => ({
   planId: 'saved-id', project: 'Example', scope: 'Project setup', blocked: [], warnings: [], actions, ...extra,
 });
+
+/** How many action rows of one type the page lists. */
+const rowsOf = (html: string, type: string) => (html.match(new RegExp(`class="action-row" data-action="[^"]*" data-type="${type}"`, 'g')) ?? []).length;
 
 describe('standalone infrastructure plan report', () => {
   it('shows exactly which buckets and account the user is approving and when the files move', () => {
@@ -30,19 +33,19 @@ describe('standalone infrastructure plan report', () => {
     const stored = action('secret-container:' + key, key, { kind: 'secret', type: 'noop' });
     const grant = action('secret-runtime-access:' + key, key, { kind: 'secret', requiresConfirm: true });
     const html = renderPlanReportHtml(report([stored, grant]));
-    expect(html).toContain('data-type="create"><strong>0</strong>');
-    expect(html).toContain('data-type="grant"><strong>1</strong>');
+    expect(rowsOf(html, 'create')).toBe(0);
+    expect(rowsOf(html, 'grant')).toBe(1);
     expect(html).toContain('<option value="grant">Grant access</option>');
     expect(html).toContain('<span class="status">Grant access</span>');
     expect(html).toContain('<span class="action-name">App read access to ' + key + '</span>');
     expect(html).toContain('<span class="node-title">Secret permissions</span>');
     expect(html).toContain('<span class="node-title">Secrets</span>');
-    expect(html).toContain('<code>' + grant.id + '</code>');
+    expect(html).toContain('data-action="' + grant.id + '"');
     expect(html).toContain('Needs your OK');
 
     const mixed = renderPlanReportHtml(report([{ ...stored, type: 'create' }, { ...grant, type: 'destroy' }]));
-    expect(mixed).toContain('data-type="create"><strong>1</strong>');
-    expect(mixed).toContain('data-type="revoke"><strong>1</strong>');
+    expect(rowsOf(mixed, 'create')).toBe(1);
+    expect(rowsOf(mixed, 'revoke')).toBe(1);
     expect(mixed).toContain('<span class="status">Remove access</span>');
   });
 
@@ -53,7 +56,7 @@ describe('standalone infrastructure plan report', () => {
     expect(html).toContain('<span class="node-title">App identity and permissions</span>');
     expect(html).toContain('<span class="node-title">runtime</span>');
     expect(html).toContain('<span class="action-name">App runtime identity</span>');
-    expect(html).toContain('data-type="create"><strong>2</strong>');
+    expect(rowsOf(html, 'create')).toBe(2);
     expect(html).not.toContain('<option value="grant">');
   });
 
@@ -75,8 +78,8 @@ describe('standalone infrastructure plan report', () => {
     expect(html).toContain('Enable run.googleapis.com');
     expect(html).toContain('Google Cloud · 2 actions');
     expect(html).toContain('serviceAccount:build roles/run.admin');
-    expect(html).toContain('<code>unresolved-id</code>');
-    // A prerequisite is named like its own row; only one the plan does not list shows its id.
+    expect(html).not.toContain('unresolved-id');
+    // A prerequisite is named like its own row; one the plan does not list is left out.
     expect(html).toContain('<a href="#action-0">Cloud Run API</a>');
     expect(html.match(/class="action-row"/g)).toHaveLength(4);
   });
@@ -86,15 +89,15 @@ describe('standalone infrastructure plan report', () => {
       type: 'replace', requiresConfirm: true, billable: true, dataBearing: true, verified: false, fields: ['size'],
     })], { blocked: ['Choose target'], warnings: ['Check backup'] }));
     for (const text of ['Replace', 'Costs money', 'Needs your OK', 'Holds data',
-      'Not confirmed with the provider when this plan was made', '<code>size</code>', 'Choose target', 'Check backup']) {
+      'Not confirmed with the provider when this plan was made', 'Choose target', 'Check backup']) {
       expect(html).toContain(text);
     }
-    expect(html).toContain('data-type="replace"><strong>1</strong>');
-    expect(html).toContain('data-type="create"><strong>0</strong>');
+    expect(rowsOf(html, 'replace')).toBe(1);
+    expect(rowsOf(html, 'create')).toBe(0);
   });
 
   it('opens with one plain sentence and always says whether anything is deleted', () => {
-    const sentence = (actions: PlanReportAction[]) => /<p class="headline">([^<]*)<\/p>/.exec(renderPlanReportHtml(report(actions)))?.[1];
+    const sentence = (actions: PlanReportAction[]) => /<p class="headline"><span>([^<]*)<\/span>/.exec(renderPlanReportHtml(report(actions)))?.[1];
     expect(sentence([action('a', 'A'), action('b', 'B'), action('c', 'C', { type: 'update' })])).toBe('This plan adds 2 things and changes 1 thing. Nothing is deleted.');
     expect(sentence([action('a', 'A'), action('d', 'D', { type: 'destroy' })])).toBe('This plan adds 1 thing and deletes 1 thing.');
     expect(sentence([action('r', 'R', { type: 'replace' })])).toBe('This plan replaces 1 thing. Replacing removes the old one; nothing else is deleted.');
@@ -102,18 +105,33 @@ describe('standalone infrastructure plan report', () => {
     expect(sentence([])).toBe('This plan has nothing in it.');
   });
 
-  it('keeps ids and raw timestamps out of the reading path', () => {
-    const html = renderPlanReportHtml(report([action('service:web', 'web', { addresses: ['google_cloud_run_v2_service.web'] })], { createdAt: '2026-11-23T22:42:10.123Z' }));
+  it('shows no ids, engine addresses or raw timestamps, and still names its plan for the saved-review catalog', () => {
+    const planId = '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10';
+    const html = renderPlanReportHtml(report([action('service:web', 'web', { addresses: ['google_cloud_run_v2_service.web'], fields: ['template.containers'] })],
+      { planId, createdAt: '2026-11-23T22:42:10.123Z' }));
     // The time is written for the reader's own clock, with a short readable fallback.
     expect(html).toContain('<time datetime="2026-11-23T22:42:10.123Z" data-local>Nov 23, 10:42 PM UTC</time>');
-    expect(html.replace(/<time[^>]*>/g, '')).not.toContain('2026-11-23T22:42');
-    // Ids and engine addresses are still on the page for whoever needs them, folded away.
-    const reading = html.replace(/<details class="technical[\s\S]*?<\/details>/g, '');
-    for (const technical of ['saved-id', 'service:web', 'google_cloud_run_v2_service.web', 'Plan ID', 'Action ID']) {
-      expect(html).toContain(technical);
-      expect(reading).not.toContain(technical);
+    // What a reader sees: the page without its head and without tag attributes.
+    const visible = html.slice(html.indexOf('<body')).replace(/<script[\s\S]*?<\/script>/g, '').replace(/<[^>]*>/g, ' ');
+    for (const technical of [planId, 'service:web', 'google_cloud_run_v2_service.web', 'template.containers', 'Plan ID', 'Action ID', 'Technical details', '2026-11-23T22:42']) {
+      expect(visible).not.toContain(technical);
     }
+    // A friendly-named copy is matched to its native report through this, so it must survive.
+    expect(planIdInSavedReport(html)).toBe(planId);
+    expect(planIdInSavedReport(`<div><dt>Plan ID</dt><dd>${planId}</dd></div>`)).toBe(planId);
     expect(renderPlanReportHtml(report([], { createdAt: 'not a date"><script>' }))).not.toContain('<script>not');
+  });
+
+  it('puts what needs attention in small badges beside the sentence, explained in their tooltips', () => {
+    const html = renderPlanReportHtml(report([
+      action('db', 'Catalog', { requiresConfirm: true, billable: true, dataBearing: true }), action('web', 'web', { billable: true }), action('key', 'key'),
+    ]));
+    expect(html).toContain('<span class="badge" data-badge="confirm" title="1 step will not run until you approve." aria-label="1 step will not run until you approve.">1 needs your OK</span>');
+    expect(html).toContain('title="2 steps create or change something you pay for."');
+    expect(html).toContain('>2 cost money</span>');
+    expect(html).toContain('title="1 step touches something that stores your data."');
+    expect(html).not.toMatch(/class="(counts|stat|review-flags)[" ]/);
+    expect(renderPlanReportHtml(report([action('key', 'key')]))).not.toContain('class="badge"');
   });
 
   it('keeps real risks visible and leaves traffic changes in the scope of their plan', () => {

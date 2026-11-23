@@ -136,9 +136,8 @@ input, select { width: 100%; font-size: .92rem; }
   .action-row { break-inside: avoid; }
   section { margin-top: 14px; }
 }
-.headline { font-size: 1.15rem; margin: 14px 0 4px; max-width: 60ch }
-.technical { margin-top: 12px; font-size: .88rem }
-.technical > summary { cursor: pointer; width: fit-content; opacity: .75 }
-.technical[open] > summary { margin-bottom: 8px }
-.plan-technical { margin-top: 32px }
+.headline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; font-size: 1.15rem; margin: 14px 0 4px }
+.badges { display: inline-flex; flex-wrap: wrap; gap: 6px }
+.badge { font-size: .78rem; font-weight: 600; padding: 2px 9px; border: 1px solid var(--frame); border-radius: 999px; color: var(--muted); cursor: help; white-space: nowrap }
+.badge[data-badge="confirm"] { color: var(--text) }
 `;

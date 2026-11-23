@@ -25,6 +25,15 @@ export type ReportCloudTarget =
   | { provider: 'aws'; accountId: string; region?: string; partition?: string }
   | { provider: 'azure'; subscriptionId: string; resourceGroup?: string; tenantId?: string };
 
+/**
+ * A saved report page names its plan so a friendly-named copy can be matched to the
+ * native report. New pages carry it in the head; pages saved before 2026-11-24 showed it as a field.
+ */
+export const planIdMeta = (planId: string) => `<meta name="hypervibe-plan-id" content="${planId.replace(/[^A-Za-z0-9_-]/g, '')}">`;
+export function planIdInSavedReport(html: string): string | undefined {
+  return (/<meta name="hypervibe-plan-id" content="([a-z0-9-]{36,42})">/i.exec(html) ?? /<dt>Plan ID<\/dt>\s*<dd>([a-z0-9-]{36,42})<\/dd>/i.exec(html))?.[1];
+}
+
 export interface PlanReport {
   planId: string;
   project: string;
