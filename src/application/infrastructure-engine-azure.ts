@@ -4,7 +4,7 @@ import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { secretServiceScopeProblems, secretServicesFor } from '../domain/services/secret-service-scope.js';
-import { specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
+import { forgetTornDownEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
 import { azureSelectedBuildRegistry, projectAzureCiRegistry, type AzureBuildRegistry } from '../adapters/providers/azure/azure-ci-registry.js';
@@ -664,7 +664,7 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'azure' },
-    reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${!remaining.length ? ' (nor the shared network, app environment, server and registry)' : ''}, and remove it from the spec.`,
+    reason: `Hypervibe will delete and purge ${environmentName}'s secrets in Key Vault (${context.vault.name}, names starting ${azureVaultSecretName(environmentName, 'x').slice(0, -1)}), confirm nothing tagged for it remains${!remaining.length ? ' (nor the shared network, app environment, server and registry)' : ''}, and remove it from the spec. Its release workflow file, if Hypervibe wrote one, is deleted from this repository.`,
     dependsOn: [...changing(environmentActions), ...changing(buildActions), ...changing(sharedActions), ...changing(dropActions)],
     metadata: { operation: AZURE_TEARDOWN_CLEANUP_OPERATION, subscriptionId, sharedRemoved: !remaining.length },
   };
@@ -775,8 +775,8 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
       const { azure: _azure, engine: _engine, ...rest } = current.platformBindings as Record<string, unknown>;
       ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, engine: {}, azure: { tornDownAt: new Date().toISOString() } });
       // The environment is gone; removing it from the spec keeps the next plan from recreating it.
-      new SpecStore().merge(params.project, specWithoutEnvironment(params.spec, context.environmentName));
-      return { success: true, message: `Purged ${purged.removed} secret(s) from Key Vault and confirmed nothing of ${context.environmentName} remains.` };
+      const workflow = forgetTornDownEnvironment(params.project, params.spec, context.environmentName);
+      return { success: true, message: `Purged ${purged.removed} secret(s) from Key Vault and confirmed nothing of ${context.environmentName} remains.${workflow}` };
     }
     default:
       return { success: false, status: 'blocked', message: `No engine-stage authority exists for ${action.id}.` };

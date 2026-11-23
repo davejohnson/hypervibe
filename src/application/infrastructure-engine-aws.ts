@@ -4,7 +4,7 @@ import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { secretServiceScopeProblems } from '../domain/services/secret-service-scope.js';
-import { describeFixedWorkerCountChanges, specWithoutEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
+import { describeFixedWorkerCountChanges, forgetTornDownEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
@@ -437,7 +437,7 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
   const cleanup: PlanAction = {
     id: 'cleanup:leftovers', type: 'destroy', verified: true, requiresConfirm: true,
     resource: { kind: 'secret', name: 'environment leftovers', provider: 'aws' },
-    reason: `Hypervibe will delete this environment's settings in Parameter Store (${context.parameterPath}), the task revisions its releases registered and its build logs.`,
+    reason: `Hypervibe will delete this environment's settings in Parameter Store (${context.parameterPath}), the task revisions its releases registered and its build logs. It then removes the environment from the spec. Its release workflow file, if Hypervibe wrote one, is deleted from this repository.`,
     ...(engineActions.length ? { dependsOn: engineActions.map((action) => action.id) } : {}),
     metadata: { operation: AWS_TEARDOWN_CLEANUP_OPERATION, accountId, parameterPath: context.parameterPath, families, logGroups: [`/hypervibe/${context.prefix}/builds`],
       ...(lastOnShared && !params.deleteFinalSnapshot ? { finalSnapshot: `${context.shared.prefix}-postgres-final` } : {}) },
@@ -683,7 +683,8 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
             ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, engine: {},
               aws: { naming: 2, tornDownAt: new Date().toISOString(), ...(kept ? { finalSnapshot: { identifier: kept, region: context.connection.region } } : {}) } });
             // The environment is gone; removing it from the spec keeps the next plan from recreating it.
-            new SpecStore().merge(params.project, specWithoutEnvironment(params.spec, environmentName));
+            const workflow = forgetTornDownEnvironment(params.project, params.spec, environmentName);
+            if (workflow) return { ...removed, message: `${removed.message ?? ''}${workflow}`.trim() };
           }
           return removed;
         }

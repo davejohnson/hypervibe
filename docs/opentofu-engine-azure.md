@@ -356,7 +356,7 @@ every destructive action confirmed separately:
    the shared network, Container Apps environment, server and registry.
 5. Hypervibe deletes and purges the environment's Key Vault secrets, confirms nothing
    tagged for the environment (or the shared group, if removed) remains, clears the
-   bindings and removes the environment from the spec.
+   bindings and removes the environment from the spec. It also deletes the environment's release workflow (`.github/workflows/hypervibe-release-<environment>.yml`) from the local repository, when Hypervibe wrote it; commit and push that deletion, or the next push tries to release an environment that is gone.
 
 **A failed app environment.** When Azure fails to create the shared Container Apps
 environment it leaves one behind in the `Failed` state that OpenTofu never recorded,
