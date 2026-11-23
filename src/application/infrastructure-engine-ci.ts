@@ -216,6 +216,8 @@ const MANAGED_WORKFLOW_MARKER = '# Managed by Hypervibe.';
  * something that no longer exists. Only a file Hypervibe wrote is deleted. Returns a sentence for the user, or ''.
  */
 export function removeReleaseWorkflow(repositoryRoot: string, environmentName: string): string {
+  // The name becomes part of a path; anything that could step outside the workflows folder is not looked for.
+  if (!/^[A-Za-z0-9_-]+$/.test(environmentName)) return '';
   const target = releaseWorkflowPath(repositoryRoot, environmentName);
   const shown = path.relative(repositoryRoot, target);
   let content: string;
@@ -223,6 +225,7 @@ export function removeReleaseWorkflow(repositoryRoot: string, environmentName: s
     return (error as NodeJS.ErrnoException).code === 'ENOENT' ? '' : ` Hypervibe could not read ${shown}; delete it if it releases ${environmentName}.`;
   }
   if (!content.startsWith(MANAGED_WORKFLOW_MARKER)) return ` ${shown} was not written by Hypervibe, so it was left in place; delete it if it releases ${environmentName}.`;
-  fs.rmSync(target);
+  // The environment is already gone by now, so a file that cannot be deleted is reported, not thrown.
+  try { fs.rmSync(target); } catch { return ` Hypervibe could not delete ${shown}; delete it yourself, or the next push will try to release ${environmentName} and fail.`; }
   return ` Hypervibe deleted ${shown}. Commit and push that, or the next push will try to release ${environmentName} and fail.`;
 }

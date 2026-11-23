@@ -33,6 +33,22 @@ describe('removing a torn-down environment\'s release workflow', () => {
     expect(fs.readFileSync(target, 'utf8')).toBe('name: mine\non: push\n');
   });
 
+  it('never follows an environment name out of the workflows folder', () => {
+    const dir = root();
+    const production = writeReleaseWorkflow(dir, 'production', '# Managed by Hypervibe.\nname: x\n').path;
+    expect(removeReleaseWorkflow(dir, 'x/../hypervibe-release-production')).toBe('');
+    expect(removeReleaseWorkflow(dir, '../../production')).toBe('');
+    expect(fs.existsSync(production)).toBe(true);
+  });
+
+  it('reports a workflow it cannot delete instead of failing the teardown', () => {
+    const dir = root();
+    const target = writeReleaseWorkflow(dir, 'staging', '# Managed by Hypervibe.\nname: x\n').path;
+    fs.chmodSync(path.dirname(target), 0o555);
+    try { expect(removeReleaseWorkflow(dir, 'staging')).toContain('could not delete'); } finally { fs.chmodSync(path.dirname(target), 0o755); }
+    expect(fs.existsSync(target)).toBe(true);
+  });
+
   it('says nothing when there is no workflow', () => {
     expect(removeReleaseWorkflow(root(), 'staging')).toBe('');
   });

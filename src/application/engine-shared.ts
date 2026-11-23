@@ -3,11 +3,11 @@ import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
 import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
-import path from 'node:path';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { removeReleaseWorkflow } from './infrastructure-engine-ci.js';
+import { localRepositoryFor } from './local-repository.js';
 import type { InfrastructurePlanResult } from './infrastructure-engine.js';
 
 /** Helpers every cloud engine uses. Add shared engine behavior here, not to one cloud's module. */
@@ -29,9 +29,12 @@ export function specWithoutEnvironment(spec: ProjectSpec, environmentName: strin
  */
 export function forgetTornDownEnvironment(project: Project, spec: ProjectSpec, environmentName: string): string {
   const saved = new SpecStore().merge(project, specWithoutEnvironment(spec, environmentName));
-  // The repository spec lives at <root>/.hypervibe/spec.json.
-  const source = saved.source;
-  return source?.kind === 'repo' ? removeReleaseWorkflow(path.dirname(path.dirname(source.path)), environmentName) : '';
+  let root: string | undefined;
+  // The same check launch makes before writing the workflow: this checkout must be the project's own repository.
+  try { root = localRepositoryFor(project, saved?.source); } catch {
+    return ` Hypervibe could not confirm this folder is the project's repository, so it did not look for ${environmentName}'s release workflow. Delete .github/workflows/hypervibe-release-${environmentName}.yml from the project's repository if it exists.`;
+  }
+  return root ? removeReleaseWorkflow(root, environmentName) : '';
 }
 
 export function describeFixedWorkerCountChanges(actions: PlanAction[], environment: EnvironmentSpec, countField: string): void {
