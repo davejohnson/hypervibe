@@ -46,7 +46,7 @@ export function engineOutsideKeys(spec: ProjectSpec, environmentName: string, im
   const declared = Object.entries(spec.secrets ?? {})
     .filter(([, secret]) => secret.ownership !== 'hypervibe' && secret.environments.includes(environmentName))
     .map(([key]) => key);
-  const environment = spec.environments[environmentName];
+  const environment = spec.environments?.[environmentName];
   // Cloud Run supplies declared database aliases from the target login, even if an old migration imported the same name.
   const aliases = environment?.hosting.provider === 'cloudrun' ? databaseEnvAliasKeys(environment) : undefined;
   return [...new Set([...declared, ...importedSecrets.filter(key => !aliases?.has(key))])].sort();
