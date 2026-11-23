@@ -1,8 +1,12 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import YAML from 'yaml';
 import { admitEngineCiRelease, parseEngineCiBinding, type EngineCiBinding } from '../../domain/spec/engine-ci-binding.js';
 import { environmentDeploymentContractHash } from '../../domain/services/deployment-contract.service.js';
-import { renderEngineCiWorkflow } from '../engine-ci-workflow.js';
+import { renderEngineCiWorkflow, writeEngineCiWorkflow } from '../engine-ci-workflow.js';
+import { removeReleaseWorkflow } from '../infrastructure-engine-ci.js';
 import { azureCiRegistry } from '../../adapters/providers/azure/azure-ci-registry.js';
 
 const rawSpec = { version: 1, project: 'app', gitRemoteUrl: 'https://github.com/owner/app', environments: {
@@ -55,6 +59,14 @@ describe('applied engine CI admission', () => {
 });
 
 describe('native engine CI workflow', () => {
+  it('writes a workflow that teardown recognises as its own and deletes', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hv-workflow-'));
+    try {
+      const written = writeEngineCiWorkflow(dir, binding);
+      expect(removeReleaseWorkflow(dir, parseEngineCiBinding(binding).environmentName)).toContain('Hypervibe deleted');
+      expect(fs.existsSync(written.path)).toBe(false);
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
   it('uses the shared packaged runner with exact branch guards, OIDC and bounded receipts', () => {
     const text = renderEngineCiWorkflow(binding, '0.1.99'); const workflow = YAML.parse(text);
     expect(workflow.on.push.branches).toEqual(['main']);

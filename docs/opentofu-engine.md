@@ -134,6 +134,8 @@ are removed from the spec and applied, because teardown does not change DNS. Env
 teardown leaves the project-level setup (the Google project, its identities, the
 shared image repository and the build bucket) in place.
 
+The last step also deletes the environment's release workflow (`.github/workflows/hypervibe-release-<environment>.yml`) from the local repository, when Hypervibe wrote it; commit and push that deletion, or the next push tries to release an environment that is gone.
+
 ### Removing the Google project
 
 `hv_connections provider="cloudrun" action="remove-project"` with `project`, the

@@ -207,3 +207,22 @@ export function writeReleaseWorkflow(repositoryRoot: string, environmentName: st
   fs.writeFileSync(target, content);
   return { path: target, changed: true };
 }
+
+/** The first line of every release workflow Hypervibe writes. */
+const MANAGED_WORKFLOW_MARKER = '# Managed by Hypervibe.';
+
+/**
+ * Deletes a torn-down environment's release workflow from the local repository, so pushes stop trying to release to
+ * something that no longer exists. Only a file Hypervibe wrote is deleted. Returns a sentence for the user, or ''.
+ */
+export function removeReleaseWorkflow(repositoryRoot: string, environmentName: string): string {
+  const target = releaseWorkflowPath(repositoryRoot, environmentName);
+  const shown = path.relative(repositoryRoot, target);
+  let content: string;
+  try { content = fs.readFileSync(target, 'utf8'); } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? '' : ` Hypervibe could not read ${shown}; delete it if it releases ${environmentName}.`;
+  }
+  if (!content.startsWith(MANAGED_WORKFLOW_MARKER)) return ` ${shown} was not written by Hypervibe, so it was left in place; delete it if it releases ${environmentName}.`;
+  fs.rmSync(target);
+  return ` Hypervibe deleted ${shown}. Commit and push that, or the next push will try to release ${environmentName} and fail.`;
+}

@@ -174,7 +174,7 @@ plan; every action needs its own confirmation:
    Parameter Store settings, task revisions registered by releases (deregistered,
    then deleted) and the CodeBuild log group.
 4. The environment's bindings are cleared and it is removed from the spec, so the
-   next plan does not recreate it.
+   next plan does not recreate it. Hypervibe also deletes its release workflow (`.github/workflows/hypervibe-release-<environment>.yml`) from the local repository, when Hypervibe wrote it; commit and push that deletion, or the next push tries to release an environment that is gone.
 
 While other testing environments use the shared cluster, teardown drops only
 the environment's database and logins (no snapshot; the cluster's one-day

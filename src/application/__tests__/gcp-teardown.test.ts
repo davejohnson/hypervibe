@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GCP_STORAGE_EMPTY_OPERATION, GCP_TEARDOWN_CLEANUP_OPERATION, emptyGcpBucket, finishGcpTeardown } from '../infrastructure-engine.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
@@ -74,9 +77,16 @@ describe('the last Google teardown step', () => {
 
   it('removes the environment from the spec only when Google confirms every piece is gone', async () => {
     updates.length = 0;
-    const merge = vi.spyOn(SpecStore.prototype, 'merge').mockReturnValue(undefined as never);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hv-teardown-'));
+    const workflow = path.join(root, '.github', 'workflows', 'hypervibe-release-test.yml');
+    fs.mkdirSync(path.dirname(workflow), { recursive: true });
+    fs.writeFileSync(workflow, '# Managed by Hypervibe. Releases test on every push to main.\nname: x\n');
+    const merge = vi.spyOn(SpecStore.prototype, 'merge').mockReturnValue({ source: { kind: 'repo', path: path.join(root, '.hypervibe', 'spec.json') } } as never);
     answers(() => 404);
-    expect(await run()).toMatchObject({ success: true });
+    try {
+      expect(await run()).toMatchObject({ success: true, message: expect.stringContaining('Hypervibe deleted .github/workflows/hypervibe-release-test.yml') });
+      expect(fs.existsSync(workflow)).toBe(false);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
     expect(merge).toHaveBeenCalledWith(expect.anything(), { environments: { test: null } });
     expect(updates).toEqual([expect.objectContaining({ provider: 'cloudrun', services: {}, engine: {}, gcp: { tornDownAt: expect.any(String) } })]);
   });
