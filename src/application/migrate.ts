@@ -8,7 +8,7 @@ import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.serv
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { CommandContext } from './context.js';
-import { gcpDatabaseLocation, type GcpDatabaseLocation } from './gcp-database-location.js';
+import { gcpDatabaseConnectionName, gcpDatabaseLocation, type GcpDatabaseLocation } from './gcp-database-location.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore, type SpecResult } from '../domain/spec/spec.store.js';
@@ -621,7 +621,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
         purpose: 'database', image: `postgres:${major}-alpine`, script: databaseTransferScript(), env: {},
         sourceSecrets: { SOURCE_DATABASE_URL: sourceUrl },
         secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion! } },
-        cloudSqlConnectionName: `${targetDatabase.gcpProjectId}:${context.region}:${targetDatabase.instanceName}`, timeoutSeconds: 3600,
+        cloudSqlConnectionName: gcpDatabaseConnectionName(targetDatabase, context.region), timeoutSeconds: 3600,
       }));
       if (!result.ok) return { status: 'blocked', message: result.error ?? 'The database copy failed.' };
       const compared = manifestsMatch(result.source, result.target);
@@ -711,7 +711,7 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
     purpose: 'database', image: 'postgres:18-alpine', script: databaseRestoreScript(), env: { SOURCE_DATABASE_IDENTITY: sourceIdentity },
     sourceSecrets: { DUMP_URL: sign('GET') },
     secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion } },
-    cloudSqlConnectionName: `${targetDatabase.gcpProjectId}:${context.region}:${targetDatabase.instanceName}`, timeoutSeconds: 3600,
+    cloudSqlConnectionName: gcpDatabaseConnectionName(targetDatabase, context.region), timeoutSeconds: 3600,
   });
   if (!restored.ok) return { blocked: restored.error ?? 'Restoring the database in Google Cloud failed.' };
   const compared = manifestsMatch(exportResult.source, restored.target);
@@ -910,7 +910,7 @@ async function verifyMigratedCopy(params: {
       checked = await access.lease.withConnection((sourceUrl) => runTransferJob<DatabaseTransferResult>(transfer, {
         purpose: 'database', image: 'postgres:18-alpine', script: databaseManifestScript(), env: {}, sourceSecrets: { SOURCE_DATABASE_URL: sourceUrl },
         secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion! } },
-        cloudSqlConnectionName: `${targetDatabase.gcpProjectId}:${context.region}:${targetDatabase.instanceName}`, timeoutSeconds: 1800,
+        cloudSqlConnectionName: gcpDatabaseConnectionName(targetDatabase, context.region), timeoutSeconds: 1800,
       }));
     } finally {
       await access.lease.release().catch(() => undefined);

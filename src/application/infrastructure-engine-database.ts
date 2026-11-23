@@ -8,7 +8,6 @@ import { Connector, GoogleAuth, IpAddressTypes } from '@google-cloud/cloud-sql-c
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
-import type { GcpDatabaseLocation } from './gcp-database-location.js';
 import { sqlAdmin, waitForSqlOperation } from '../adapters/providers/gcp/gcp-data.client.js';
 import {
   observeSecret, recordSecretVersionMetadata, writeSecretVersion,
@@ -34,10 +33,7 @@ export type DatabaseCredentialMode = 'initialize' | 'rotate' | 'revoke';
 export interface DatabaseCredentialMetadata {
   operation: string;
   mode: DatabaseCredentialMode;
-  /** The environment's own project, where the DATABASE_URL secret is. */
   gcpProjectId: string;
-  /** Project of the Cloud SQL instance; recorded only when it is not the environment's own. */
-  instanceGcpProjectId?: string;
   instanceName: string;
   secretId: string;
   labels: Record<string, string>;
@@ -53,16 +49,6 @@ export interface DatabaseCredentialObservation {
   generation: number;
   latestVersion?: string;
   retirePending?: DatabaseLogin;
-}
-
-/** Plans for a database in the environment's own project stay exactly as they were: nothing is added. */
-export function instanceProjectMetadata(environmentGcpProjectId: string, database: GcpDatabaseLocation): { instanceGcpProjectId?: string } {
-  return database.gcpProjectId === environmentGcpProjectId ? {} : { instanceGcpProjectId: database.gcpProjectId };
-}
-
-/** Project to ask Cloud SQL about the instance. Secret Manager calls keep using `gcpProjectId`. */
-function instanceProject(meta: { gcpProjectId: string; instanceGcpProjectId?: string }): string {
-  return meta.instanceGcpProjectId ?? meta.gcpProjectId;
 }
 
 export function otherLogin(login: DatabaseLogin): DatabaseLogin {
@@ -162,13 +148,13 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
   const meta = action.metadata as unknown as DatabaseCredentialMetadata;
   const container = await observeSecret(token, meta.gcpProjectId, meta.secretId);
   if (container.state !== 'present' || container.value.labels['managed-by'] !== 'hypervibe' || container.value.labels['hv-environment'] !== meta.labels['hv-environment']) return { success: false, status: 'blocked', message: 'The owned database secret container must be created by hv_plan/hv_apply before changing database logins.' };
-  const instanceResponse = await sqlAdmin(token, instanceProject(meta), `instances/${meta.instanceName}`);
+  const instanceResponse = await sqlAdmin(token, meta.gcpProjectId, `instances/${meta.instanceName}`);
   if (instanceResponse.status === 404) return { success: false, status: 'blocked', message: `Database instance ${meta.instanceName} does not exist yet.` };
   if (!instanceResponse.ok) return { success: false, status: 'blocked', message: `Cloud SQL returned HTTP ${instanceResponse.status} for ${meta.instanceName}.` };
   const instance = await instanceResponse.json() as { state?: string; connectionName?: string; settings?: { userLabels?: Record<string, string> } };
   if (instance.state !== 'RUNNABLE' || !instance.connectionName) return { success: false, status: 'pending', message: `Database instance ${meta.instanceName} is not ready yet.` };
   if (instance.settings?.userLabels?.['managed-by'] !== 'hypervibe') return { success: false, status: 'blocked', message: `Database instance ${meta.instanceName} is not managed by Hypervibe.` };
-  const usersResponse = await sqlAdmin(token, instanceProject(meta), `instances/${meta.instanceName}/users`);
+  const usersResponse = await sqlAdmin(token, meta.gcpProjectId, `instances/${meta.instanceName}/users`);
   if (!usersResponse.ok) return { success: false, status: 'blocked', message: `Listing database logins returned HTTP ${usersResponse.status}.` };
   const existing = new Set(((await usersResponse.json() as { items?: Array<{ name?: string }> }).items ?? []).map((item) => item.name));
   const labelsFor = (login: DatabaseLogin, retire?: DatabaseLogin) => ({
@@ -180,7 +166,7 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
     if (meta.mode === 'initialize') {
       const secrets: Record<DatabaseLogin, string> = { app_a: password(), app_b: password() };
       for (const login of DATABASE_LOGINS) {
-        const set = await setLoginPassword(token, instanceProject(meta), meta.instanceName, login, secrets[login], existing.has(login));
+        const set = await setLoginPassword(token, meta.gcpProjectId, meta.instanceName, login, secrets[login], existing.has(login));
         if (set !== 'done') return set;
       }
       // app_a creates the shared owner role (and so may grant it), then hands it the database.
@@ -205,7 +191,7 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
     if (meta.mode === 'rotate') {
       const next = meta.login!;
       const secret = password();
-      const set = await setLoginPassword(token, instanceProject(meta), meta.instanceName, next, secret, existing.has(next));
+      const set = await setLoginPassword(token, meta.gcpProjectId, meta.instanceName, next, secret, existing.has(next));
       if (set !== 'done') return set;
       if (!await verifyLogin(serviceAccount, instance.connectionName, next, secret, meta.databaseName)) {
         return { success: false, message: `The new password for ${next} did not work; the app keeps using its current login.` };
@@ -217,7 +203,7 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
 
     // revoke: every service now runs the new secret version, so the old password can go.
     const retired = meta.login!;
-    const set = await setLoginPassword(token, instanceProject(meta), meta.instanceName, retired, password(), true);
+    const set = await setLoginPassword(token, meta.gcpProjectId, meta.instanceName, retired, password(), true);
     if (set !== 'done') return set;
     const observed = await observeSecret(token, meta.gcpProjectId, meta.secretId);
     if (observed.state !== 'present') return { success: false, status: 'pending', message: `${meta.secretId} could not be read after revoking ${retired}.` };
@@ -236,10 +222,7 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
 
 export interface WorkerWakeGrantMetadata {
   operation: string;
-  /** The environment's own project, where the DATABASE_URL secret is. */
   gcpProjectId: string;
-  /** Project of the Cloud SQL instance; recorded only when it is not the environment's own. */
-  instanceGcpProjectId?: string;
   instanceName: string;
   databaseName: string;
   /** Secret holding the app's current connection URL; read here, never output. */
@@ -256,7 +239,7 @@ export interface WorkerWakeGrantMetadata {
  */
 export async function grantWorkerWakeRead(token: string, serviceAccount: Record<string, unknown>, action: PlanAction): Promise<ActionResult> {
   const meta = action.metadata as unknown as WorkerWakeGrantMetadata;
-  const instanceResponse = await sqlAdmin(token, instanceProject(meta), `instances/${meta.instanceName}`);
+  const instanceResponse = await sqlAdmin(token, meta.gcpProjectId, `instances/${meta.instanceName}`);
   if (!instanceResponse.ok) return { success: false, status: 'blocked', message: `Cloud SQL returned HTTP ${instanceResponse.status} for ${meta.instanceName}.` };
   const instance = await instanceResponse.json() as { state?: string; connectionName?: string };
   if (instance.state !== 'RUNNABLE' || !instance.connectionName) return { success: false, status: 'pending', message: `Database instance ${meta.instanceName} is not ready yet.` };

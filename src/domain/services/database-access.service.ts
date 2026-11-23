@@ -397,7 +397,7 @@ export function engineDatabaseComponent(environment: Environment): Component | u
     externalId: database.instanceName,
     bindings: {
       provider: 'cloudsql',
-      providerScope: { projectId: database.gcpProjectId, region: bindings.region },
+      providerScope: { projectId: database.gcpProjectId, region: database.region ?? bindings.region },
       connectionSecretId: engineSecretId(environment.name, ENGINE_DATABASE_URL_KEY),
     },
     createdAt: environment.createdAt,

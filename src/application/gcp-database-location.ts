@@ -3,4 +3,4 @@
  * in the domain layer so the query path can use it too; application code
  * imports it from here.
  */
-export { GCP_DEFAULT_DATABASE_NAME, gcpDatabaseLocation, type GcpDatabaseBinding, type GcpDatabaseLocation } from '../domain/services/gcp-database-location.js';
+export { GCP_DEFAULT_DATABASE_NAME, gcpDatabaseConnectionName, gcpDatabaseLocation, gcpDatabasePlanBlocker, type GcpDatabaseBinding, type GcpDatabaseLocation } from '../domain/services/gcp-database-location.js';

@@ -30,7 +30,7 @@ import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-dedicated-database.js';
-import { gcpDatabaseLocation, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
+import { gcpDatabaseLocation, gcpDatabasePlanBlocker, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
 import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -68,7 +68,7 @@ import { gcpEnvironmentBindingConflict, gcpCredentialsMatchProject, gcpConnectio
 import { ConnectionRepository } from '../adapters/db/repositories/connection.repository.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
 import {
-  executeDatabaseCredential, grantWorkerWakeRead, instanceProjectMetadata, observeDatabaseCredential, otherLogin,
+  executeDatabaseCredential, grantWorkerWakeRead, observeDatabaseCredential, otherLogin,
   type DatabaseCredentialMetadata, type DatabaseCredentialObservation, type DatabaseLogin,
 } from './infrastructure-engine-database.js';
 import {
@@ -152,7 +152,7 @@ export interface EngineBinding {
    * the database is not the environment's own instance; without them it is instance `instanceName` in the
    * environment's project, database `app`.
    */
-  database?: { instanceName: string; connectionName?: string; gcpProjectId?: string; databaseName?: string };
+  database?: { instanceName: string; connectionName?: string; gcpProjectId?: string; databaseName?: string; region?: string };
   domains?: string[];
   /** Retained before attempting a mapping, including cancellation before DNS starts. */
   domainClaims?: Record<string, { zone: DnsZoneIdentity; connectionScope?: string; owner?: string }>;
@@ -635,7 +635,7 @@ export async function planDatabaseCredential(params: {
   const metadata = (mode: DatabaseCredentialMetadata['mode'], login?: DatabaseLogin): DatabaseCredentialMetadata => ({
     operation: ENGINE_DATABASE_CREDENTIAL_OPERATION, mode, gcpProjectId: params.context.gcpProjectId, instanceName: database.instanceName,
     secretId: params.databaseSecretId, labels: params.labels, databaseName: database.databaseName, generation: params.desiredGeneration,
-    ...(login ? { login } : {}), ...instanceProjectMetadata(params.context.gcpProjectId, database),
+    ...(login ? { login } : {}),
   });
   if (!observation.ready) {
     return [{ ...base, type: 'create', ...(params.dependsOn.length ? { dependsOn: params.dependsOn } : {}),
@@ -994,6 +994,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const databaseSpec = environmentSpec!.database;
   const engineBinding = (context.environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
   // Reuse a recorded identity before inventing one: an interrupted create may have succeeded on Google.
+  const databaseBlocker = gcpDatabasePlanBlocker(context.gcpProjectId, engineBinding);
+  if (databaseBlocker) return { blocked: [databaseBlocker] };
   const boundDatabase = gcpDatabaseLocation(context.gcpProjectId, engineBinding);
   // An instance not recorded yet is one this environment is about to own, so it gets the defaults.
   const database = boundDatabase ?? gcpDatabaseLocation(context.gcpProjectId, { database: {
@@ -1347,7 +1349,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     dependsOn: [databaseAction, ...credentialActions, ...serviceActions.filter((action) => onDemandWorkers.some((name) => action.id === `service:${name}`))]
       .filter((action): action is PlanAction => Boolean(action && action.type !== 'noop')).map((action) => action.id),
     metadata: { operation: ENGINE_WORKER_WAKE_GRANT_OPERATION, gcpProjectId: context.gcpProjectId, instanceName, databaseName: database.databaseName,
-      secretId: databaseSecretId, iamUser: wakeUser, ...instanceProjectMetadata(context.gcpProjectId, database) },
+      secretId: databaseSecretId, iamUser: wakeUser },
   }] : [];
   const cacheAction = serviceActions.find((action) => action.id === 'cache:redis');
   const s3CredentialActions: PlanAction[] = pendingS3Storage.map((storageName) => {
