@@ -53,4 +53,13 @@ describe('engine selection', () => {
     spec.environments.staging.database = { engine: 'mysql', provider: 'cloudsql' } as never;
     expect(engineEnvironmentProblems(spec, 'staging')).toContain('The OpenTofu engine manages Cloud SQL only with engine "postgres".');
   });
+
+  it('reserves cache, queue and S3-specific names only for desired Cloud Run resources that supply them', () => {
+    const spec = projectSpecSchema.parse({ version: 1, project: 'gcp-alias', environments: {
+      staging: { hosting: { provider: 'cloudrun' }, database: { provider: 'cloudsql' },
+        storage: { uploads: { provider: 'gcs', type: 'bucket', region: 'US', injectInto: ['web'] } },
+        services: { web: { databaseEnvAliases: { REDIS_URL: 'DATABASE_URL', QUEUE_BACKEND: 'DATABASE_URL', AWS_ACCESS_KEY_ID: 'DATABASE_URL' } } } },
+    } });
+    expect(engineEnvironmentProblems(spec, 'staging')).toEqual([]);
+  });
 });

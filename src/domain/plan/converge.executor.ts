@@ -323,7 +323,7 @@ export const planRunDocumentSchema = z.object({
     return;
   }
   if (document.dns) ctx.addIssue({ code: 'custom', message: 'A DNS descriptor requires its isolated DNS engine stage.' });
-  const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure',
+  const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure', 'gcpRetainDatabaseAliasImports',
     'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
     'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete', 'awsImageBuild', 'awsDatabaseDrop',
     'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup', 'azureFailedAppEnvironment', 'gcpStorageEmpty', 'gcpTeardownCleanup'];

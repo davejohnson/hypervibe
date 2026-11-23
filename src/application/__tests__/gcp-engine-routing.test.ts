@@ -51,6 +51,40 @@ function fixture(provider: 'railway' | 'cloudrun', engineChoice?: 'opentofu') {
 }
 
 describe('GCP engine public routing', () => {
+  it('blocks Cloud SQL aliases that take managed settings and lets an owner repair a saved spec', async () => {
+    const f = fixture('cloudrun');
+    const keys = [
+      'NPM_TOKEN', 'NODE_AUTH_TOKEN', 'CLOUD_SQL_CONNECTION_NAME', 'PGHOST', 'PORT',
+      'REDIS_URL', 'QUEUE_BACKEND', 'QUEUE_TOPIC_SEND_EMAIL', 'QUEUE_SUBSCRIPTION_SEND_EMAIL',
+      'OBJECT_STORAGE_BUCKET', 'GOOGLE_CLOUD_STORAGE_BUCKET', 'AWS_SECRET_ACCESS_KEY',
+      'AWS_ENDPOINT_URL', 'AWS_REQUEST_CHECKSUM_CALCULATION',
+    ];
+    const stored = projectSpecSchema.parse({ ...f.spec, environments: { staging: {
+      hosting: { provider: 'cloudrun' }, database: { provider: 'cloudsql' },
+      services: { web: { databaseEnvAliases: Object.fromEntries(keys.map(key => [key, 'DATABASE_URL'])) }, worker: { workloadKind: 'worker' } },
+      cache: { provider: 'memorystore' }, queues: { 'send-email': {} },
+      storage: { uploads: { provider: 'gcs', type: 'bucket', region: 'US', access: 's3', injectInto: ['web'] } },
+    } } });
+    const saved = new ProjectSpecRepository();
+    saved.insert(f.project.id, 1, stored);
+    const environmentLookup = vi.spyOn(f.ctx.repos.environments, 'findByProjectAndName');
+    const result = await engine.planGcpInfrastructureEngine(f.ctx, { project: f.project, spec: stored, specRevision: 1, environmentName: 'staging' });
+    expect(result).toMatchObject({ blocked: keys.map(key => expect.stringContaining(`"${key}"`)) });
+    expect(environmentLookup).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+
+    const corrected = structuredClone(stored);
+    const environment = corrected.environments.staging;
+    environment.services.web!.databaseEnvAliases = { APP_DATABASE_URL: 'DATABASE_URL' };
+    environment.services.worker!.databaseEnvAliases = { OBJECT_STORAGE_BUCKET: 'DIRECT_URL' };
+    const repair = await f.commands.execute('hv_spec', { project: f.project.name, spec: corrected, replace: true });
+    expect(repair.ok, repair.error?.message).toBe(true);
+    expect(saved.findLatest(f.project.id)?.document).toMatchObject({ environments: { staging: { services: {
+      web: { databaseEnvAliases: { APP_DATABASE_URL: 'DATABASE_URL' } },
+      worker: { databaseEnvAliases: { OBJECT_STORAGE_BUCKET: 'DIRECT_URL' } },
+    } } } });
+  });
+
   it.each([undefined, 'opentofu'] as const)('accepts hv_spec with engine=%s', async engineChoice => {
     const f = fixture('cloudrun', engineChoice);
     const result = await f.commands.execute('hv_spec', { project: f.project.name, spec: f.spec });

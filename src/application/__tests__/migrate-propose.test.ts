@@ -3,6 +3,22 @@ import { pointsAtSourceData, proposeTargetEnvironment, scopedToEnvironment } fro
 import type { EnvironmentSpec } from '../../domain/spec/spec.schema.js';
 
 describe('proposed migration target', () => {
+  it('preserves the database variable names each workload reads', () => {
+    const source = {
+      hosting: { provider: 'railway' }, database: { provider: 'railway' }, envVars: {},
+      services: {
+        web: { workloadKind: 'web', databaseEnvAliases: { POSTGRES_DB_URL: 'DATABASE_URL' } },
+        worker: { workloadKind: 'worker', databaseEnvAliases: { WORKER_DB: 'DIRECT_URL' } },
+        hourly: { workloadKind: 'cron', cronSchedule: '0 * * * *', databaseEnvAliases: { JOB_DB: 'DATABASE_URL' } },
+        other: { workloadKind: 'web' },
+      },
+    } as unknown as EnvironmentSpec;
+    const target = proposeTargetEnvironment(source, {});
+    for (const [name, service] of Object.entries(source.services)) {
+      expect(target.services[name]?.databaseEnvAliases).toEqual(service.databaseEnvAliases);
+    }
+  });
+
   it('maps a Railway environment onto OpenTofu-managed Google Cloud equivalents', () => {
     const source = {
       hosting: { provider: 'railway', region: 'us-west1' },

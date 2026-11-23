@@ -205,6 +205,18 @@ value storage and version publication inside its operational secret boundary.
 Raw credential values do not belong in public plans or generated configuration.
 Cloud Run receives Secret Manager references.
 
+If a Google Cloud service declares `databaseEnvAliases`, Hypervibe gives it
+the target database connection under the names the app reads. For example,
+`POSTGRES_DB_URL: DATABASE_URL` makes both names refer to the same version of
+the Cloud SQL connection secret. A Railway migration carries each service’s
+mapping into the proposed environment and skips those names when importing
+settings from Railway. For a target saved by an older version, add any missing
+mapping to the target service in the project spec and review its next
+infrastructure plan. If a previous migration imported a source database
+variable under that name, Hypervibe asks for the missing mapping before
+resuming. If Hypervibe asks to replace an older saved plan, generate a fresh
+infrastructure plan so the review includes the corrected workload bindings.
+
 ### Limiting a secret to named services
 
 A secret declaration may list `services`. Its reference then goes only to those

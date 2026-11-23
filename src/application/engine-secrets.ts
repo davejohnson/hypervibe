@@ -1,6 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import type { Project } from '../domain/entities/project.entity.js';
+import { databaseEnvAliasKeys } from '../domain/services/database-env.js';
+import { BUILD_TOKEN_KEYS } from '../domain/services/runtime-env-policy.js';
 import { valueLooksLocal } from '../domain/services/deploy-env-file.js';
 import { parseEnvFile } from '../utils/env-parser.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
@@ -44,7 +46,10 @@ export function engineOutsideKeys(spec: ProjectSpec, environmentName: string, im
   const declared = Object.entries(spec.secrets ?? {})
     .filter(([, secret]) => secret.ownership !== 'hypervibe' && secret.environments.includes(environmentName))
     .map(([key]) => key);
-  return [...new Set([...declared, ...importedSecrets])].sort();
+  const environment = spec.environments[environmentName];
+  // Cloud Run supplies declared database aliases from the target login, even if an old migration imported the same name.
+  const aliases = environment?.hosting.provider === 'cloudrun' ? databaseEnvAliasKeys(environment) : undefined;
+  return [...new Set([...declared, ...importedSecrets.filter(key => !aliases?.has(key))])].sort();
 }
 
 /** Outside keys the spec declares required: false: the app runs without them, so a missing value never blocks. */
@@ -56,7 +61,7 @@ export function optionalOutsideKeys(spec: ProjectSpec, environmentName: string):
 }
 
 /** Outside keys that authenticate private package installs. They are mounted into image builds and never given to running services. */
-export const BUILD_TOKEN_KEYS = ['NODE_AUTH_TOKEN', 'NPM_TOKEN'] as const;
+export { BUILD_TOKEN_KEYS };
 export const isBuildTokenKey = (key: string): boolean => (BUILD_TOKEN_KEYS as readonly string[]).includes(key);
 /** The package token this environment declares, if any. */
 export function buildTokenKey(spec: ProjectSpec, environmentName: string): string | undefined {

@@ -3,13 +3,14 @@ import crypto from 'crypto';
 import { cloudRunGet } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { retireSupersededSecretVersions, type RetirementWorkload } from './secret-version-retirement.js';
 import { strictHealthCheck } from '../domain/services/release-health.js';
+import { databaseEnvAliasKeys } from '../domain/services/database-env.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import type { CommandContext } from './context.js';
 import {
   ENGINE_CACHE_URL_KEY, ENGINE_DATABASE_URL_KEY, type EngineBinding, engineSecretId, engineSecretKeys, isEngineManaged,
-  resolveEngineContext, writeSecretVersion,
+  resolveEngineContext, retainDatabaseAliasImports, writeSecretVersion,
 } from './infrastructure-engine.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
 import { contextRows } from './local-connect-page.js';
@@ -106,11 +107,12 @@ export async function secretAges(ctx: CommandContext, project: Project, spec: Pr
   const token = await engine.adapter.engineAccessToken();
   const everyDays = (environmentSpec as { secretRotation?: { everyDays: number } }).secretRotation?.everyDays ?? DEFAULT_ROTATION_DAYS;
   const generatedKeys = new Set(engineSecretKeys(spec, environmentName));
+  const imports = retainDatabaseAliasImports(binding(engine), databaseEnvAliasKeys(environmentSpec));
   const kinds: Array<[string, SecretKind]> = [
     ...[...generatedKeys].map((key) => [key, 'generated'] as [string, SecretKind]),
     ...(environmentSpec.database ? [[ENGINE_DATABASE_URL_KEY, 'database'] as [string, SecretKind]] : []),
     ...(environmentSpec.cache ? [[ENGINE_CACHE_URL_KEY, 'derived'] as [string, SecretKind]] : []),
-    ...(binding(engine).importedSecrets ?? []).filter((key) => !generatedKeys.has(key))
+    ...(imports.importedSecrets ?? []).filter((key) => !generatedKeys.has(key))
       .map((key) => [key, looksSecret(key) ? 'third-party' : 'setting'] as [string, SecretKind]),
   ];
   const secrets: SecretAge[] = [];

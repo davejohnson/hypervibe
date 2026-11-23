@@ -3,7 +3,7 @@ import {
   providerRegistry,
   type DatabaseRuntimeProjection,
 } from '../registry/provider.registry.js';
-import type { DatabaseSpec, ServiceSpec } from '../spec/spec.schema.js';
+import type { DatabaseSpec, EnvironmentSpec, ServiceSpec } from '../spec/spec.schema.js';
 
 /** Runtime keys owned by a declared database component. */
 export const DATABASE_ENV_KEYS = [
@@ -33,11 +33,15 @@ export const DATABASE_ENV_KEYS = [
 
 export type DatabaseEnvAliasSource = 'DATABASE_URL' | 'DIRECT_URL';
 
-export function buildDatabaseAliasEnvVars(
-  managedEnvVars: Record<string, string>,
+export function databaseEnvAliasKeys(environment: Pick<EnvironmentSpec, 'services'>): Set<string> {
+  return new Set(Object.values(environment.services).flatMap(service => Object.keys(service.databaseEnvAliases ?? {})));
+}
+
+export function buildDatabaseAliasEnvVars<T>(
+  managedEnvVars: Record<string, T>,
   aliases: ServiceSpec['databaseEnvAliases']
-): Record<string, string> {
-  const resolved: Record<string, string> = {};
+): Record<string, T> {
+  const resolved: Record<string, T> = {};
   for (const [alias, source] of Object.entries(aliases ?? {})) {
     const value = managedEnvVars[source as DatabaseEnvAliasSource];
     if (value !== undefined) {
