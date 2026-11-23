@@ -11,6 +11,7 @@ import { getDataDir } from '../adapters/storage/paths.js';
 import { GCP_PROJECT_REMOVAL_CHECKED, readGcpProjectContents, readGcpProjectLifecycle, requestGcpProjectDeletion } from '../adapters/providers/gcp/gcp-project-removal.client.js';
 import { redactExactValues } from '../utils/redact-exact-values.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import { gcpDatabaseLocation, type GcpDatabaseBinding } from './gcp-database-location.js';
 import { buildSourceBucketName, getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
 import { GCP_PROJECT_ID_PATTERN } from '../domain/services/gcp-environment-target.js';
 import { readGcpBootstrappedProject } from '../domain/services/gcp-project-setup.service.js';
@@ -60,7 +61,9 @@ function recordedEnvironments(gcpProjectId: string): string[] {
       const engine = asRecord(bindings.engine);
       // Empty lists and settings left behind by an environment that was emptied do not count; Google's own answer below is the proof.
       const holds = (value: unknown) => Array.isArray(value) ? value.length > 0 : Boolean(value && typeof value === 'object' && Object.keys(value).length);
-      return bindings.projectId === gcpProjectId
+      // A database may be recorded on an instance in another project than its environment's.
+      const database = typeof bindings.projectId === 'string' ? gcpDatabaseLocation(bindings.projectId, engine as GcpDatabaseBinding) : undefined;
+      return database?.gcpProjectId === gcpProjectId || bindings.projectId === gcpProjectId
         && (holds(bindings.services) || ['database', 'cache', 'storage', 'queues', 'secrets', 'releaseJob'].some((key) => typeof engine[key] === 'string' ? Boolean(engine[key]) : holds(engine[key])));
     }).map((environment) => `${project.name}/${environment.name}`));
 }

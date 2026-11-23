@@ -1,5 +1,6 @@
 import { engineDatabaseIdentity } from '../domain/services/engine-database-access.service.js';
 import type { CommandContext } from './context.js';
+import { gcpDatabaseLocation, type GcpDatabaseBinding } from './gcp-database-location.js';
 import type { Component } from '../domain/entities/component.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { Project } from '../domain/entities/project.entity.js';
@@ -89,8 +90,10 @@ function identities(ctx: CommandContext, project: Project, spec: ProjectSpec, en
   if (database) {
     if (declared !== undefined && declared !== 'cloudsql') evidence.conflict = true;
     if (['instanceName', 'connectionName'].some(key => database[key] !== undefined && !text(database[key]))) evidence.conflict = true;
-    const instance = text(database.instanceName);
-    const projectId = text(bindings.projectId);
+    // An unusable instance name is already a conflict above; the location then stays unknown, as before.
+    const located = text(database.instanceName) ? gcpDatabaseLocation(text(bindings.projectId) ?? '', { database: database as GcpDatabaseBinding['database'] }) : undefined;
+    const instance = located?.instanceName;
+    const projectId = located?.gcpProjectId || text(bindings.projectId);
     const connectionName = text(database.connectionName);
     const connection = connectionName?.split(':');
     if (connectionName && (connection?.length !== 3 || connection.some(part => !part)
