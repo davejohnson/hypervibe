@@ -25,6 +25,7 @@ and runs. They do not verify other profiles, workloads or subsequent revisions.
 | Web services as containers (Fargate, ECS Express Mode) with a database that has no public address | Built 2026-11-17; the generated configuration passes `tofu validate` against the pinned provider and offline request tests. **Verified live 2026-11-19 (us-east-1)** by one passing run of the `aws-engine` [live profile](provider-conformance.md) on a new environment: one apply creates the cluster, database, storage, web service, workers and scheduled job; the web service answers over HTTPS and uses the database, which has no public address and does not answer a connection from outside; a release, an update and a teardown. Three faults were found and fixed on the way: a zero build limit on a new account, the database login created after the services that read it, and a release reported unfinished while AWS still listed the old configuration. **Not yet run live**: rollback and the move of an existing Lambda environment are unverified |
 | On-demand worker and cron (Fargate) | Built; verified live (demo app) while web ran on Lambda: generated secret, storage with the runtime role, worker woken by the next-due timer while Aurora was paused, no drift after releases. The waker's web-request check now reads load balancer metrics and is not yet run live |
 | Environment teardown (`hv_plan scope="teardown"`) | Built; verified live (demo and billforge `aws`): a read-only sweep found nothing left |
+| Removing Hypervibe's setup from the account (`hv_connections provider="aws" action="remove-project"`) | Built 2026-11-22; offline tests only against a stand-in account that answers in the shapes of AWS's API reference. **Never run against AWS.** See [removing the setup](#removing-hypervibes-setup-from-the-account) |
 | `hv_launch` for testing environments (one reviewed plan: registry and build project in their own state, the first image built inside the apply, then everything else) | Built; verified live (demo app, 2026-11-14): one round, no sign-in (account access reused), web health-checked, database, secret, storage and cron working, worker jobs done 87 s (cold start) and 0.7 s after due, empty plan after |
 | Runtime settings copy (`hv_migrate`) | Built; not yet run live |
 | Production-profile database (RDS `db.t4g.micro`) | Not built; planning blocks it |
@@ -63,6 +64,10 @@ readiness for an environment without a database either.
     IAM writes, and the deploy role is denied changing it or removing it from a role.
   - `hypervibe-local` (user): can only assume deploy roles. Its key is stored
     encrypted on the computer; the engine gets one-hour role credentials.
+  - `hypervibe-web-infrastructure` (role): only Amazon ECS can use it, to manage
+    the load balancer, certificate and scaling of web services (AWS's own policy).
+  - GitHub sign-in for AWS (an IAM identity provider for
+    `token.actions.githubusercontent.com`), only when the account has none.
 - **Trust uses the account principal plus `aws:PrincipalArn`.** A user created
   seconds earlier is rejected as an "invalid principal"; the account never is.
 - **One sign-in per account.** Access is saved per GitHub owner (`<owner>/*`), so
@@ -186,7 +191,66 @@ action; for an environment already torn down, it plans just that deletion.
 Cleanup confirms the environment's roles are gone (`iam:ListRoles` on
 `/hypervibe/app/`). Hypervibe's
 account access (deploy role, boundary, local key) stays, for the project's other
-environments.
+environments. Remove it separately once every environment in the account is gone.
+
+## Removing Hypervibe's setup from the account
+
+`hv_connections provider="aws" action="remove-project"` with `project` and the
+exact `awsAccountId` removes what one-time setup created. It signs in the way
+setup does (the administrator session stays in memory; nothing new is stored).
+It is a preview until it is called again with the preview's `previewId` and
+`confirm=true`. A preview lasts ten minutes, is used once, and lists exactly what
+confirming deletes. Every check is made again on confirm; if the list differs
+from the preview, nothing is deleted.
+
+Deleted, in this order, each only when it is what setup made:
+
+1. `hypervibe-local` (user): its access keys, its one policy, then the user. It
+   must be under `/hypervibe/`, carry the `managed-by=hypervibe` tag, and have no
+   other permissions or groups.
+2. `hypervibe-deploy` (role): under `/hypervibe/`, tagged, trusted only by this
+   computer's user and by GitHub owners (`repo:<owner>/*`), with no policy other
+   than `hypervibe-deploy`.
+3. `hypervibe-web-infrastructure` (role): under `/hypervibe/`, tagged, trusted
+   only by Amazon ECS, with no policy other than AWS's own.
+4. `hypervibe-deploy` and `hypervibe-app-boundary` (policies): older versions,
+   then the policy. Setup does not tag policies, so the evidence is the
+   `/hypervibe/` path and Hypervibe's description, and that nothing else uses it.
+5. The GitHub sign-in for AWS, only when it carries Hypervibe's tag (setup
+   created it) and no remaining role signs in through it.
+
+Then Hypervibe removes the AWS access saved on this computer for that account.
+
+It refuses, and deletes nothing, when:
+
+- Hypervibe records an environment in the account, in any Hypervibe project.
+- AWS still shows a role under `/hypervibe/app/` (every environment has some,
+  in any region and from any computer), a per-project deploy role from an
+  earlier version, or a database named `hv-*` or tagged by Hypervibe.
+- Any read failed, was cut short or did not have the expected shape. Only AWS's
+  "no such entity" answer counts as absent.
+- The sign-in is for a different account.
+
+Left in place and reported with a link:
+
+- Anything with an expected name that fails the checks above, and whatever it
+  still uses. For example, a deploy role given another policy stays, and so do
+  the deploy policy attached to it and the GitHub sign-in it trusts.
+- Final database snapshots. They hold data and are never deleted here; delete
+  them in the AWS console, or with `deleteFinalSnapshot=true` on a teardown plan
+  before removing the setup.
+
+If AWS does not confirm a delete, the removal stops there and reports what was
+and was not removed. The saved access stays until a later run finishes;
+preview again to continue.
+
+Limits: databases and snapshots are looked for only in regions Hypervibe has a
+local record of (saved access, and torn-down environments' snapshots); the
+result names them. Other regional leftovers (Parameter Store settings, log
+groups, images) are not looked for; teardown removes those. Checks for a login
+profile, MFA device or SSH key on `hypervibe-local` are not made, so AWS would
+refuse that user's deletion after its keys are gone. The AWS console links are
+unverified.
 
 ## Waking on-demand workers
 

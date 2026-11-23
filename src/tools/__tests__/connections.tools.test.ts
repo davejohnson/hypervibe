@@ -31,10 +31,12 @@ vi.mock('../../domain/services/gcp-bootstrap.service.js', async (original) => {
 });
 
 vi.mock('../../application/gcp-project-removal.js', () => ({ runGcpProjectRemoval: vi.fn() }));
+vi.mock('../../application/aws-setup-removal.js', () => ({ runAwsSetupRemoval: vi.fn() }));
 // The command reaches it only through the per-cloud registry.
 
 import { runGcpBootstrap } from '../../domain/services/gcp-bootstrap.service.js';
 import { runGcpProjectRemoval } from '../../application/gcp-project-removal.js';
+import { runAwsSetupRemoval } from '../../application/aws-setup-removal.js';
 import * as cloudPrepare from '../../domain/services/cloud-prepare.execute.js';
 import { registerConnectionsTools } from '../connections.tools.js';
 import { createToolContext } from '../../application/context.js';
@@ -63,6 +65,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.mocked(runGcpBootstrap).mockReset();
   vi.mocked(runGcpProjectRemoval).mockReset();
+  vi.mocked(runAwsSetupRemoval).mockReset();
   delete process.env.HV_TEST_RAILWAY_TOKEN;
   for (const name of githubTokenEnvironmentNames) {
     const original = originalGitHubTokenEnvironment[name];
@@ -430,6 +433,45 @@ describe('hv_connections', () => {
     expect(result.ok).toBe(false);
     expect(runGcpProjectRemoval).not.toHaveBeenCalled();
     expect(runGcpBootstrap).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it('previews an AWS setup removal through the same action, sends the decision to the user, and reports a stopped removal', async () => {
+    const project = new ProjectRepository().create({ name: 'aws-removal-app', defaultPlatform: 'aws', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    const previewId = '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10';
+    vi.mocked(runAwsSetupRemoval).mockResolvedValue({ success: true, mode: 'preview', awsAccountId: '123456789012', previewId, willDelete: ['Role hypervibe-deploy, which Hypervibe deploys with'] });
+    const t = await makeClient();
+    const input = { provider: 'aws', action: 'remove-project', project: project.name, awsAccountId: '123456789012' };
+    const result = await t.call('hv_connections', input);
+    expect(result.ok).toBe(true);
+    expect(result.data).toMatchObject({ project: { id: project.id, name: project.name }, previewId, willDelete: ['Role hypervibe-deploy, which Hypervibe deploys with'] });
+    expect(result.data.confirmCall).toBeUndefined();
+    expect(result.agentInstruction).toMatchObject({ action: 'ask_user', message: expect.stringContaining('AWS account 123456789012') });
+    expect(runAwsSetupRemoval).toHaveBeenCalledWith({ project, awsAccountId: '123456789012', previewId: undefined, confirm: false });
+
+    vi.mocked(runAwsSetupRemoval).mockResolvedValue({ success: false, mode: 'confirm', status: 'pending', error: 'The removal stopped', removed: ['User hypervibe-local'], notRemoved: ['Policy hypervibe-deploy'] });
+    const stopped = await t.call('hv_connections', { ...input, previewId, confirm: true });
+    expect(runAwsSetupRemoval).toHaveBeenLastCalledWith({ project, awsAccountId: '123456789012', previewId, confirm: true });
+    expect(stopped.ok).toBe(false);
+    expect(stopped.error).toMatchObject({ code: 'PROVIDER_ERROR', message: 'The removal stopped', details: { removed: ['User hypervibe-local'], notRemoved: ['Policy hypervibe-deploy'] } });
+    expect(runGcpProjectRemoval).not.toHaveBeenCalled();
+    await t.close();
+  });
+
+  it.each([
+    ['no account id', { awsAccountId: undefined }],
+    ['a Google project id', { gcpProjectId: 'hv-demo-12345678' }],
+    ['a Google administrator sign-in option', { adminAuth: 'default' }],
+    ['no project', { project: undefined }],
+    ['a region from another action', { region: 'us-east-1' }],
+    ['a preview id on connect', { action: 'connect', previewId: '6f1c2b1e-8f0a-4c56-9d55-0d1f3a6f6a10' }],
+  ])('never starts an AWS setup removal with %s', async (_what, change) => {
+    const project = new ProjectRepository().create({ name: 'aws-removal-guard', defaultPlatform: 'aws', gitRemoteUrl: 'git@github.com:owner/repo.git' });
+    const t = await makeClient();
+    const result = await t.call('hv_connections', { provider: 'aws', action: 'remove-project', project: project.name, awsAccountId: '123456789012', ...change });
+    expect(result.ok).toBe(false);
+    expect(runAwsSetupRemoval).not.toHaveBeenCalled();
+    expect(runGcpProjectRemoval).not.toHaveBeenCalled();
     await t.close();
   });
 
