@@ -30,6 +30,7 @@ import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-dedicated-database.js';
+import { gcpDatabaseLocation, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
 import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -105,7 +106,6 @@ export const ENGINE_WORKER_ACCESS_BLOCKER = 'On-demand workers need one more Goo
 /** Hypervibe-owned runtime secret holding the complete database connection URL. */
 import { ENGINE_DATABASE_URL_KEY, engineSecretId } from '../domain/services/engine-secret-id.js';
 export { ENGINE_DATABASE_URL_KEY, engineSecretId };
-import { gcpDatabaseLocation, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
 /** Google's public sample container, pinned by digest; serves until the first release. */
 export const ENGINE_HOLDING_IMAGE = 'us-docker.pkg.dev/cloudrun/container/hello@sha256:1fde53e0b892bff3072b3cac1c0e37178e9c0b98cf0b01e83956915e02b828c7';
 const DEFAULT_REGION = 'us-central1';
