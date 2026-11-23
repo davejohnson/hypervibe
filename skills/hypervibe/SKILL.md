@@ -162,7 +162,9 @@ cleanup and any soft-delete period. This result covers only direct file access.
 For a prepared Railway-to-GCP file move, select one declared data bucket via
 `migrationAccess="prepare-bucket-copy"` and `migrationStorage` on the same
 `hv_connections` prepare workflow. Share its browser review. This approval
-prepares the unscheduled job and its bucket permissions. Passing source
+prepares the unscheduled job and its bucket permissions. If its final check
+is interrupted or fails after creation, resume the original approved plan
+ID to verify the job and grants. Passing source
 credentials and running a copy require their own reviewed workflow.
 
 Use `hv_migrate` with `inspectSource=true` to review one query of the running

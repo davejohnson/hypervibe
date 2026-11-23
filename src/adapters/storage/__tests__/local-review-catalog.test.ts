@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
+import { gcpReviewPlans } from '../local-review-gcp.js';
 import { saveSetupReport, setupPlansDirectory, setupReportChecksum } from '../gcp-setup-report.js';
 import { setupDataDigest, recordSetupReviewExecution, reviewDigest } from '../review-authorization.js';
 import { OPENTOFU_VERSION } from '../../engine/opentofu/versions.js';
@@ -118,6 +119,33 @@ describe('local review catalog', () => {
     recordSetupReviewExecution(dir,'p','review-project',planId,digest,'failed');
     expect(catalog.get(planId)).toMatchObject({status:'Failed'});
     expect(catalog.get(planId)?.approval).toBeUndefined();
+  });
+
+  it.each(['failed', 'running'] as const)('keeps the %s setup attempt visible when a later check verifies it was applied', status => {
+    const scope = {projectId:'p',gcpProjectId:'review-project',dataDir:dir};
+    const planId = 'setup-'+randomUUID();
+    saveSetupReport(scope, {planId, projectName:'Example', setupPurpose:'railway-bucket-copy', configuration:{}, planned:{actions:document.actions}});
+    const attempt = {projectId:scope.projectId,targetId:scope.gcpProjectId,planId,digest:'1'.repeat(64),status,
+      updatedAt:'2026-11-01T02:00:00Z',verification:{verifiedAt:'2026-11-01T03:00:00Z',jobUid:randomUUID()}};
+    const reportFile = path.join(setupPlansDirectory(scope),planId+'.report.json');
+    const snapshot = JSON.parse(fs.readFileSync(reportFile,'utf8'));
+    const approvals = [{planId,digest:attempt.digest,displayDigest:setupDataDigest(snapshot.report),approvedAt:'2026-11-01T01:00:00Z'}];
+    const history = {setups:[attempt],approvals};
+    const [item] = gcpReviewPlans(dir, history, planId);
+    expect(item).toMatchObject({ status:'Applied',previouslyApproved:true });
+    expect(item?.approval).toBeUndefined();
+    const details = item!.details.join(' ');
+    expect(details).toContain(status);
+    expect(details).toContain(attempt.updatedAt);
+    expect(details).toContain(attempt.verification.verifiedAt);
+    expect(details).toContain('idle');
+    snapshot.report.actions[0].name = 'different destination';
+    snapshot.checksum = setupReportChecksum(scope.projectId,snapshot.report);
+    fs.writeFileSync(reportFile,JSON.stringify(snapshot));
+    const [changed] = gcpReviewPlans(dir, history, planId);
+    expect(changed?.status).toBe('Review unavailable');
+    expect(changed?.previouslyApproved).toBeUndefined();
+    expect(changed?.report).toBeUndefined();
   });
 
   it('uses the saved confirmation receipt only for the matching historical setup and never to authorize execution', () => {

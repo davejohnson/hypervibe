@@ -97,16 +97,30 @@ function knownFields(mask: unknown, allowed: Set<string>, path = ''): boolean {
   return !!fields && Object.entries(fields).every(([key, value]) => knownFields(value, allowed, path ? path + '.' + key : key));
 }
 
+// The provider writes these optional booleans into state after applying an
+// unconfigured job. Other false-valued fields still need an explicit review.
+const disabledJobOptions = new Set([
+  'template.delay_execution',
+  'template.template.gpu_zonal_redundancy_disabled',
+  'template.template.containers.sandbox_launcher',
+]);
+
 /** Provider defaults add empty blocks and computed metadata. Every configured input
  * must match the immutable program, including all arguments, env and nested blocks. */
-function exactInputs(expected: unknown, observed: unknown, outputs = new Set<string>()): boolean {
+function exactInputs(expected: unknown, observed: unknown, outputs = new Set<string>(), path = ''): boolean {
   if (Array.isArray(expected)) return Array.isArray(observed) && expected.length === observed.length
-    && expected.every((item, i) => exactInputs(item, observed[i]));
+    && expected.every((item, i) => exactInputs(item, observed[i], undefined, path));
   const fields = object(expected);
   if (!fields) return equal(expected, observed);
   const values = object(observed);
-  return !!values && Object.entries(fields).every(([key, value]) => exactInputs(value, values[key]))
-    && Object.entries(values).every(([key, value]) => Object.hasOwn(fields, key) || outputs.has(key) || empty(value));
+  if (!values) return false;
+  const child = (key: string) => path ? path + '.' + key : key;
+  return Object.entries(fields).every(([key, value]) => exactInputs(value, values[key], undefined, child(key)))
+    && Object.entries(values).every(([key, value]) => {
+      if (Object.hasOwn(fields, key) || outputs.has(key)) return true;
+      if (disabledJobOptions.has(child(key))) return value == null || value === false;
+      return empty(value);
+    });
 }
 
 function expectedCount(address: string, job: Job, evidence: TransferBucketJobEvidence): number {

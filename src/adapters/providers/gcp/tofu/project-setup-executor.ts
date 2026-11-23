@@ -20,6 +20,7 @@ import {
 
 import { assertIsolationReview, assertOriginalIsolationOwners, hasDeposedIsolationGrant, isolationGrants, isolationRecoveryRequired, isIsolationContribution, matchesIsolationState, retainedIsolations,
   verifyIsolationPlan, type TransferIsolationEvidence } from './transfer-isolation.js';
+import { bucketJobRecovery } from './bucket-copy-recovery.js';
 import { matchesBucketCopyActions, reviewedBucketJob, type TransferBucketJobReview } from './bucket-copy-review.js';
 import { matchesTransferBucketJobState, verifyTransferBucketJobPlan, type TransferBucketJobEvidence } from './transfer-bucket-job.js';
 import type { TransferSlotEvidence } from '../gcp-transfer-slot-evidence.js';
@@ -75,8 +76,8 @@ export interface GcpProjectSetupResult {
   projectRecovery?: GcpProjectRecovery;
   requiresPlanId?: true;
 }
-interface SetupManifest { contributions: Record<string, EngineConfiguration> }
-interface SetupPreview {
+export interface SetupManifest { contributions: Record<string, EngineConfiguration> }
+export interface SetupPreview {
   planId: string; baseline: string; intent: string; planned: EnginePlanResult;
   reviewContributionId?: string;
   setupPurpose?: PlanReport['setupPurpose'];
@@ -339,13 +340,16 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
         configuration.resources[grant.address] = { ...configuration.resources[grant.address]!, name: grant.name, requiresConfirm: true };
       }
     }
-    const intent = digest({ gcpProjectId: params.gcpProjectId, contribution: params.contribution,
+    const intentFor = (jobReview?: TransferBucketJobReview) => digest({ gcpProjectId: params.gcpProjectId, contribution: params.contribution,
       ...(review ? { transferSlotReview: review } : {}),
-      ...(bucketReview ? { transferBucketJobReview: bucketReview } : {}),
+      ...(jobReview ? { transferBucketJobReview: jobReview } : {}),
       ...(isolation ? { transferIsolationReview: isolation } : {}),
       authenticationScope: params.authenticationScope ?? 'google-project-admin',
       destroy: params.allowDestroyAddresses ?? [], imports: params.allowImportAddresses ?? [], existing: params.existingResourceAddresses ?? [],
       ...(params.allowReplaceAddresses?.length ? { replace: params.allowReplaceAddresses } : {}) });
+    const intent = intentFor(bucketReview);
+    const verification = params.confirm && bucketReview && bucketJob
+      ? bucketJobRecovery(params, dataDir, paths, existing, configuration, bucketJob, bucketReview, intentFor) : undefined;
     const previewFile = path.join(paths.plans, `setup-${intent}.json`);
     const bootstrap = params.contribution.id === 'bootstrap';
     const observed = bootstrap ? params.observedUnlinkedProject : undefined;
@@ -360,7 +364,8 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
     }
     let saved: SetupPreview;
     let originalReviewDigest: string | undefined;
-    if (params.confirm) {
+    if (verification) saved = verification.saved;
+    else if (params.confirm) {
       const preview = readJson<SetupPreview | undefined>(previewFile, undefined);
       if (!preview) return fail('Preview this exact Google Cloud setup before confirming it. No infrastructure was changed.');
       originalReviewDigest = reviewDigest('setup', params.projectId, params.gcpProjectId, preview.planId, preview);
@@ -426,8 +431,9 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       if (!bucketJob) return false;
       const observed = await engine.inspectState?.({ backend, configuration, auth: params.auth, state,
         project: raw => matchesTransferBucketJobState(raw, bucketJob, evidence) });
-      return observed?.ok && observed.present && observed.value === true;
+      return observed?.ok === true && observed.present && observed.value === true;
     };
+    if (verification) return await verification.verify(inspectBucketJob);
     if (bucketReview && !await inspectBucketJob(bucketReview.evidence)) {
       return fail('The observed copy job and bucket permissions do not match the original private project state.');
     }
@@ -596,10 +602,12 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       try { recordSetupReviewExecution(dataDir, params.projectId, params.gcpProjectId, saved.planId, executionDigest, outcome); return true; }
       catch { return false; }
     };
-    fs.unlinkSync(previewFile);
+    // The bucket verifier needs the original envelope if the terminal journal write is interrupted.
+    if (!bucketJob) fs.unlinkSync(previewFile);
     if (saved.requiresPlanId && hardenPrivateFile(marker)) fs.unlinkSync(marker);
     if (!params.reviewAfterVerification) recordSetupReviewExecution(dataDir, params.projectId, params.gcpProjectId, saved.planId, executionDigest, 'applied');
     executing = undefined;
+    if (bucketJob) fs.unlinkSync(previewFile);
     return { success: true, mode, planId: saved.planId, actions: saved.planned.actions, ...report,
       ...(params.reviewAfterVerification && { finishReview }) };
   } catch (error) {

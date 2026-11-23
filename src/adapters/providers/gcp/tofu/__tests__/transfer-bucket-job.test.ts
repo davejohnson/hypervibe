@@ -115,6 +115,31 @@ describe('reviewed Railway bucket copy job', () => {
     expect(verifyTransferBucketJobPlan({ ...doc, resource_changes: rows() }, job, absent, known)).toBe(false);
     expect(verifyTransferBucketJobPlan({ ...doc, resource_drift: [drift, drift] }, job, absent, known)).toBe(false);
   });
+  it('matches the disabled job options written by the Google provider after creation', () => {
+    const native = rows(true);
+    const jobRow = native.find(row => row.address === job.addresses.job)!;
+    const template = jobRow.change.after.template[0];
+    const task = template.template[0];
+    const container = task.containers[0];
+    template.delay_execution = false;
+    task.gpu_zonal_redundancy_disabled = false;
+    container.sandbox_launcher = false;
+    const matchesState = () => matchesTransferBucketJobState({ values: { root_module: {
+      resources: native.map(({ change, ...row }) => ({ ...row, values: change.after })),
+    } } }, job, owned);
+    expect(matchesState()).toBe(true);
+    expect(verifyTransferBucketJobPlan({ resource_changes: native }, job, owned)).toBe(true);
+    for (const [block, key] of [[template, 'delay_execution'], [task, 'gpu_zonal_redundancy_disabled'], [container, 'sandbox_launcher']] as const) {
+      for (const value of [true, 'false', {}, []]) {
+        block[key] = value;
+        expect(matchesState()).toBe(false);
+        expect(verifyTransferBucketJobPlan({ resource_changes: native }, job, owned)).toBe(false);
+      }
+      block[key] = false;
+    }
+    task.sandbox_launcher = false;
+    expect(matchesState()).toBe(false);
+  });
   it('requires original native state and rejects a recreated job or mismatched, deposed or unowned bindings', () => {
     const resources = rows(true).map(({ change, ...row }) => ({ ...row, values: change.after }));
     const state = (resources: unknown[]) => ({ values: { root_module: { resources } } });

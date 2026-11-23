@@ -1,4 +1,5 @@
-import { readReviewHistory, recordReviewApproval, reviewDigest } from '../../../adapters/storage/review-authorization.js';
+import * as reviewJournal from '../../../adapters/storage/review-authorization.js';
+import { readReviewHistory, recordReviewApproval, reviewDigest, setupDataDigest } from '../../../adapters/storage/review-authorization.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +14,7 @@ import { transferSlot } from '../../../adapters/providers/gcp/tofu/transfer-slot
 import { buildCiReleaseConfiguration } from '../../../adapters/providers/gcp/tofu/gcp-ci.backend.js';
 import type { EngineConfiguration } from '../../ports/infrastructure-engine.port.js';
 import type { EnginePlanResult } from '../../../adapters/engine/opentofu/engine.js';
-import { engineStatePaths, ensureEngineStateDirectories } from '../../../adapters/engine/opentofu/workspace.js';
+import { backupState, configurationDigest, engineStatePaths, ensureEngineStateDirectories } from '../../../adapters/engine/opentofu/workspace.js';
 import { findSavedSetupReport } from '../../../adapters/storage/gcp-setup-report.js';
 
 let directory: string;
@@ -104,7 +105,7 @@ describe('one saved project setup plan', () => {
     expect(await runGcpProjectSetup(confirm, { engine: managed })).toMatchObject({ success: true, planId: id });
     expect(readReviewHistory(directory).setups).toEqual([expect.objectContaining({ planId: id, status: 'applied', digest })]);
   });
-  it('requires browser approval for the exact bucket job even when the caller confirms directly', async () => {
+  it.each(['normal', 'failed', 'running', 'interrupted terminal write'] as const)('requires exact bucket job approval and verifies its %s execution', async status => {
     const target = { projectId: 'example-project', targetRegion: 'us-central1', sourceEnvironmentId: 'source',
       sourceRailwayEnvironmentId: 'rail-env', sourceRailwayProjectId: 'rail-project', targetEnvironmentId: 'dest' };
     const scope = { target, storageName: 'documents', sourceBucketId: 'native-source', sourceBucketName: 'source-documents',
@@ -140,7 +141,15 @@ describe('one saved project setup plan', () => {
     const plan = managed.plan.getMockImplementation()!;
     managed.plan.mockImplementation(async (input: Parameters<typeof plan>[0] & { verifyPlannedChanges?: (raw: unknown) => boolean }) => {
       expect(input.verifyPlannedChanges?.({ resource_changes: rows })).toBe(true);
-      return plan({ ...input, configuration: job.configuration });
+      const native = await plan({ ...input, configuration: job.configuration });
+      const bytes = 'synthetic native plan';
+      const segment = { ...native.segment, id: 'opentofu:' + input.planId, configurationDigest: configurationDigest(input.configuration),
+        planDigest: createHash('sha256').update(bytes).digest('hex') };
+      fs.writeFileSync(path.join(paths.plans, input.planId + '.tfplan'), bytes);
+      fs.writeFileSync(path.join(paths.plans, input.planId + '.config.json'), JSON.stringify(input.configuration));
+      return { ...native, segment, segmentId: segment.id, actions: native.actions.map(action => ({ ...action, metadata: {
+        engineSegment: { ...segment, addresses: (action.metadata!.engineSegment as {addresses:string[]}).addresses },
+      } })) };
     });
     const deps = { engine: { ...managed, inspectState: async <T>(input: { project: (raw: unknown) => T }) => ({
       ok: true as const, present: true as const,
@@ -161,14 +170,84 @@ describe('one saved project setup plan', () => {
     const file = fs.readdirSync(paths.plans).find(name => /^setup-[a-f0-9]{64}\.json$/.test(name))!;
     const saved = JSON.parse(fs.readFileSync(path.join(paths.plans, file), 'utf8'));
     const digest = reviewDigest('setup', params.projectId, params.gcpProjectId, planId, saved);
-    recordReviewApproval(directory, planId, digest, digest, () => true);
+    const display = JSON.parse(fs.readFileSync(path.join(paths.plans, planId + '.report.json'), 'utf8')).report;
+    recordReviewApproval(directory, planId, digest, setupDataDigest(display), () => true);
     const changed = await runGcpProjectSetup({ ...confirm, transferBucketJobReview: { scope, evidence: {
       ...before, bucketTimeCreated: '2026-01-03T00:00:00Z',
     } } }, deps);
     expect(changed.success).toBe(false);
     expect(managed.apply).not.toHaveBeenCalled();
+    if (status !== 'normal') {
+      const retry = { ...confirm, transferBucketJobReview: { scope, evidence: after } };
+      expect((await runGcpProjectSetup(retry, deps)).success).toBe(false);
+      expect(managed.apply).not.toHaveBeenCalled();
+
+      fs.writeFileSync(paths.statePath, 'original encrypted state');
+      const apply = managed.apply.getMockImplementation()!;
+      const journal = path.join(directory, 'local-reviews.sqlite');
+      const interrupted = path.join(directory, 'interrupted.sqlite');
+      managed.apply.mockImplementation(async input => {
+        // Preserve exactly the running record that would survive a process exit after the native state write.
+        if (status === 'running') fs.copyFileSync(journal, interrupted);
+        backupState(paths, planId);
+        fs.writeFileSync(paths.statePath, 'resulting encrypted state');
+        return apply(input);
+      });
+      if (status === 'interrupted terminal write') {
+        const write = reviewJournal.recordSetupReviewExecution;
+        const interrupt = vi.spyOn(reviewJournal, 'recordSetupReviewExecution').mockImplementation((...args) => {
+          if (args[5] === 'applied') throw new Error('Terminal journal write interrupted');
+          return write(...args);
+        });
+        try { expect(await runGcpProjectSetup(confirm, deps)).toMatchObject({ success: false }); }
+        finally { interrupt.mockRestore(); }
+        expect(fs.existsSync(path.join(paths.plans, file))).toBe(true);
+      } else {
+        params.observeBucketJobAfterApply.mockRejectedValueOnce(new Error('Readiness unavailable after native apply'));
+        expect(await runGcpProjectSetup(confirm, deps)).toMatchObject({ success: false });
+      }
+      if (status === 'running') fs.copyFileSync(interrupted, journal);
+      const [original] = readReviewHistory(directory).setups;
+      expect(original).toMatchObject({ planId, digest, status: status === 'running' ? 'running' : 'failed' });
+
+      for (const evidence of [{ ...after, viewer: false }, { ...after, creator: false }, { ...after, bucketTimeCreated: '2026-05-01T00:00:00Z' },
+        { ...after, jobUid: '76d6ee00-846b-4a52-b63e-a80f93412a36' }]) {
+        expect((await runGcpProjectSetup({ ...retry, transferBucketJobReview: { scope, evidence } }, deps)).success).toBe(false);
+      }
+      expect((await runGcpProjectSetup(confirm, deps)).success).toBe(false);
+      expect(managed.apply).toHaveBeenCalledOnce();
+      const missingGrant = rows.pop()!;
+      expect((await runGcpProjectSetup(retry, deps)).success).toBe(false);
+      rows.push(missingGrant);
+      // A damaged review, incomplete native artifact or later project apply cannot finish this approval.
+      for (const artifact of [path.join(paths.plans, file), path.join(paths.plans, planId + '.report.json'),
+        path.join(paths.plans, planId + '.config.json'), path.join(paths.plans, planId + '.tfplan'), path.join(paths.root, 'setup-manifest.json')]) {
+        const bytes = fs.readFileSync(artifact);
+        fs.writeFileSync(artifact, '{}');
+        expect((await runGcpProjectSetup(retry, deps)).success).toBe(false);
+        fs.writeFileSync(artifact, bytes);
+      }
+      const laterBackup = path.join(paths.backups, '2099-01-01T00-00-00-000Z-another-setup.tfstate');
+      fs.writeFileSync(laterBackup, 'a later pre-apply snapshot');
+      expect((await runGcpProjectSetup(retry, deps)).success).toBe(false);
+      fs.unlinkSync(laterBackup);
+      params.observeBucketJobAfterApply.mockResolvedValueOnce({ ...after, creator: false });
+      expect((await runGcpProjectSetup(retry, deps)).success).toBe(false);
+      expect(readReviewHistory(directory).setups).toEqual([original]);
+      const result = await runGcpProjectSetup(retry, deps);
+      expect(result, result.error).toMatchObject({ success: true, planId, actions: [] });
+      const receipt = readReviewHistory(directory).setups;
+      expect(receipt).toEqual([{ ...original, verification: { jobUid: after.jobUid, verifiedAt: expect.any(String) } }]);
+      expect((await runGcpProjectSetup(retry, deps)).success).toBe(true);
+      expect(readReviewHistory(directory).setups).toEqual(receipt);
+      expect(managed.apply).toHaveBeenCalledOnce();
+      expect(managed.plan).toHaveBeenCalledOnce();
+      return;
+    }
     const approved = await runGcpProjectSetup(confirm, deps);
     expect(approved, approved.error).toMatchObject({ success: true, planId });
+    expect(fs.existsSync(path.join(paths.plans, file))).toBe(false);
+    expect((await runGcpProjectSetup({ ...confirm, transferBucketJobReview: { scope, evidence: after } }, deps)).success).toBe(false);
     expect(managed.apply).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       planId, approvedAddresses: expect.arrayContaining(Object.values(job.addresses)),
     }));
