@@ -431,7 +431,7 @@ export class OpenTofuEngine {
         if (outcomes[address] === 'failed') outcomes[address] = 'unknown';
       }
       if (Object.values(outcomes).includes('unknown') && networkInterruptedAddresses(applied.stdout).size) {
-        diagnostics.unshift('The network connection to Google dropped during the apply. Nothing was duplicated; run the same command again once the connection is stable.');
+        diagnostics.unshift('The network connection dropped during the apply, for example because the computer went to sleep. Nothing was duplicated; run the same command again once the connection is stable.');
       }
       return { outcomes, diagnostics };
     } finally {
@@ -440,17 +440,29 @@ export class OpenTofuEngine {
   }
 }
 
-const NETWORK_ERROR = /error while retrieving operation|no such host|can't assign requested address|connection reset|connection refused|i\/o timeout|TLS handshake timeout|network is unreachable|EOF$|broken pipe|context deadline exceeded/i;
+const NETWORK_ERROR = /error while retrieving operation|no such host|can't assign requested address|connection reset|connection refused|i\/o timeout|TLS handshake timeout|network is unreachable|EOF$|broken pipe|context deadline exceeded|client connection lost/i;
 
-/** Addresses whose apply error is a local network failure rather than a provider decision. */
+/**
+ * Addresses whose apply error is a local network failure rather than a provider decision.
+ * OpenTofu names no resource in the error for one that has left the configuration, which is
+ * every delete in a teardown. Those errors belong to the deletes that failed, and count as a
+ * network failure only when every one of them is, so a refusal is never reported as a dropped connection.
+ */
 export function networkInterruptedAddresses(stdout: string): Set<string> {
   const result = new Set<string>();
+  const failedDeletes: string[] = [];
+  const unnamed: boolean[] = [];
   for (const line of stdout.split('\n')) {
     try {
-      const event = JSON.parse(line) as { type?: string; diagnostic?: { severity?: string; summary?: string; address?: string } };
-      if (event.type === 'diagnostic' && event.diagnostic?.severity === 'error' && event.diagnostic.address
-        && NETWORK_ERROR.test(event.diagnostic.summary ?? '')) result.add(event.diagnostic.address);
+      const event = JSON.parse(line) as { type?: string; hook?: { action?: string; resource?: { addr?: string } };
+        diagnostic?: { severity?: string; summary?: string; address?: string } };
+      if (event.type === 'apply_errored' && event.hook?.action === 'delete' && event.hook.resource?.addr) failedDeletes.push(event.hook.resource.addr);
+      if (event.type !== 'diagnostic' || event.diagnostic?.severity !== 'error') continue;
+      const network = NETWORK_ERROR.test(event.diagnostic.summary ?? '');
+      if (!event.diagnostic.address) unnamed.push(network);
+      else if (network) result.add(event.diagnostic.address);
     } catch { /* not an event line */ }
   }
+  if (unnamed.length && unnamed.every(Boolean)) for (const address of failedDeletes) result.add(address);
   return result;
 }
