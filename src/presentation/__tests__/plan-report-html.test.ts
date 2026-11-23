@@ -38,12 +38,12 @@ describe('standalone infrastructure plan report', () => {
     expect(html).toContain('<span class="node-title">Secret permissions</span>');
     expect(html).toContain('<span class="node-title">Secrets</span>');
     expect(html).toContain('<code>' + grant.id + '</code>');
-    expect(html).toContain('Confirmation required');
+    expect(html).toContain('Needs your OK');
 
     const mixed = renderPlanReportHtml(report([{ ...stored, type: 'create' }, { ...grant, type: 'destroy' }]));
     expect(mixed).toContain('data-type="create"><strong>1</strong>');
     expect(mixed).toContain('data-type="revoke"><strong>1</strong>');
-    expect(mixed).toContain('<span class="status">Revoke access</span>');
+    expect(mixed).toContain('<span class="status">Remove access</span>');
   });
 
   it.each(['azure', 'aws'])('distinguishes the bundled %s app identity from a service named runtime', provider => {
@@ -76,7 +76,8 @@ describe('standalone infrastructure plan report', () => {
     expect(html).toContain('Google Cloud · 2 actions');
     expect(html).toContain('serviceAccount:build roles/run.admin');
     expect(html).toContain('<code>unresolved-id</code>');
-    expect(html).toContain('<a href="#action-0"><code>project-setup:google_project_service:run</code></a>');
+    // A prerequisite is named like its own row; only one the plan does not list shows its id.
+    expect(html).toContain('<a href="#action-0">Cloud Run API</a>');
     expect(html.match(/class="action-row"/g)).toHaveLength(4);
   });
 
@@ -84,12 +85,35 @@ describe('standalone infrastructure plan report', () => {
     const html = renderPlanReportHtml(report([action('db', 'Catalog', {
       type: 'replace', requiresConfirm: true, billable: true, dataBearing: true, verified: false, fields: ['size'],
     })], { blocked: ['Choose target'], warnings: ['Check backup'] }));
-    for (const text of ['Replace', 'May incur charges', 'Confirmation required', 'Contains data',
-      'Unverified at planning time', '<code>size</code>', 'Choose target', 'Check backup', 'No recorded prerequisites']) {
+    for (const text of ['Replace', 'Costs money', 'Needs your OK', 'Holds data',
+      'Not confirmed with the provider when this plan was made', '<code>size</code>', 'Choose target', 'Check backup']) {
       expect(html).toContain(text);
     }
     expect(html).toContain('data-type="replace"><strong>1</strong>');
     expect(html).toContain('data-type="create"><strong>0</strong>');
+  });
+
+  it('opens with one plain sentence and always says whether anything is deleted', () => {
+    const sentence = (actions: PlanReportAction[]) => /<p class="headline">([^<]*)<\/p>/.exec(renderPlanReportHtml(report(actions)))?.[1];
+    expect(sentence([action('a', 'A'), action('b', 'B'), action('c', 'C', { type: 'update' })])).toBe('This plan adds 2 things and changes 1 thing. Nothing is deleted.');
+    expect(sentence([action('a', 'A'), action('d', 'D', { type: 'destroy' })])).toBe('This plan adds 1 thing and deletes 1 thing.');
+    expect(sentence([action('r', 'R', { type: 'replace' })])).toBe('This plan replaces 1 thing. Replacing removes the old one; nothing else is deleted.');
+    expect(sentence([action('n', 'N', { type: 'noop' })])).toBe('Nothing needs to change. Everything already matches.');
+    expect(sentence([])).toBe('This plan has nothing in it.');
+  });
+
+  it('keeps ids and raw timestamps out of the reading path', () => {
+    const html = renderPlanReportHtml(report([action('service:web', 'web', { addresses: ['google_cloud_run_v2_service.web'] })], { createdAt: '2026-11-23T22:42:10.123Z' }));
+    // The time is written for the reader's own clock, with a short readable fallback.
+    expect(html).toContain('<time datetime="2026-11-23T22:42:10.123Z" data-local>Nov 23, 10:42 PM UTC</time>');
+    expect(html.replace(/<time[^>]*>/g, '')).not.toContain('2026-11-23T22:42');
+    // Ids and engine addresses are still on the page for whoever needs them, folded away.
+    const reading = html.replace(/<details class="technical[\s\S]*?<\/details>/g, '');
+    for (const technical of ['saved-id', 'service:web', 'google_cloud_run_v2_service.web', 'Plan ID', 'Action ID']) {
+      expect(html).toContain(technical);
+      expect(reading).not.toContain(technical);
+    }
+    expect(renderPlanReportHtml(report([], { createdAt: 'not a date"><script>' }))).not.toContain('<script>not');
   });
 
   it('keeps real risks visible and leaves traffic changes in the scope of their plan', () => {

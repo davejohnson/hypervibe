@@ -1,6 +1,8 @@
 // Only static program text is embedded in the report. User data stays in escaped
 // HTML, and selectors and fragment identifiers use generated numeric indexes.
-export const planReportBrowser = `
+import { localTimeScript } from './local-time.js';
+
+export const planReportBrowser = localTimeScript + `
 (() => {
   const rows = [...document.querySelectorAll('.action-row')];
   const search = document.getElementById('search');

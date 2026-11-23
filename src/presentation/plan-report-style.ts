@@ -136,4 +136,9 @@ input, select { width: 100%; font-size: .92rem; }
   .action-row { break-inside: avoid; }
   section { margin-top: 14px; }
 }
+.headline { font-size: 1.15rem; margin: 14px 0 4px; max-width: 60ch }
+.technical { margin-top: 12px; font-size: .88rem }
+.technical > summary { cursor: pointer; width: fit-content; opacity: .75 }
+.technical[open] > summary { margin-bottom: 8px }
+.plan-technical { margin-top: 32px }
 `;

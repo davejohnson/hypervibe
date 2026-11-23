@@ -89,7 +89,7 @@ describe('shared engine plan recording', () => {
     expect(result.confirmActions).toEqual(['secret:A', 'service:web', 'service:worker']);
     const saved = createCommandContext().repos.runs.findById(result.planRunId)!;
     expect(saved.plan).toMatchObject({ reviewConfirmActions: result.confirmActions });
-    expect(readFileSync(runPlanReportPath(saved.id), 'utf8')).toContain('Confirmation required <b>3</b>');
+    expect(readFileSync(runPlanReportPath(saved.id), 'utf8')).toContain('Need your OK <b>3</b>');
   });
 
   it.each([
@@ -145,7 +145,7 @@ describe('shared engine plan recording', () => {
       expect(links.some(link => link.includes(target))).toBe(true);
       if (provider === 'azure') expect(links.some(link => link.includes(target) && link.includes('test-group'))).toBe(true);
       const confirmed = [...html.matchAll(/<li id="action-\d+"[\s\S]*?<\/details><\/li>/g)]
-        .map(([row]) => row).filter(row => row.includes('Confirmation required'))
+        .map(([row]) => row).filter(row => row.includes('Needs your OK'))
         .map(row => /<dt>Action ID<\/dt><dd><code>([^<]+)<\/code>/.exec(row)?.[1]);
       expect(confirmed).toEqual(expected);
     }
