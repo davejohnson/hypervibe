@@ -210,6 +210,7 @@
                     "railway"
                   ]
                 },
+                "privateMigrationSourceInspection": "railway-postgres-ssh",
                 "databaseInitializationTasks": {
                   "variableMode": "references",
                   "execution": "temporary-workload",
@@ -640,6 +641,7 @@
                     "railway"
                   ]
                 },
+                "privateMigrationSourceInspection": "railway-postgres-ssh",
                 "databaseInitializationTasks": {
                   "variableMode": "references",
                   "execution": "temporary-workload",
@@ -1901,6 +1903,7 @@
                     "railway"
                   ]
                 },
+                "privateMigrationSourceInspection": "railway-postgres-ssh",
                 "databaseInitializationTasks": {
                   "variableMode": "references",
                   "execution": "temporary-workload",
@@ -2331,6 +2334,7 @@
                     "railway"
                   ]
                 },
+                "privateMigrationSourceInspection": "railway-postgres-ssh",
                 "databaseInitializationTasks": {
                   "variableMode": "references",
                   "execution": "temporary-workload",

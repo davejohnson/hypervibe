@@ -14,6 +14,7 @@ import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import { engineSegmentOf, type EngineActionSegment, type EngineSegmentResult } from '../ports/infrastructure-engine.port.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
+import { migrationVersionActionSchema } from './migration-version.contract.js';
 import { requiresActionConfirmation, type PlanAction } from './plan.types.js';
 import { isManagedCiCredentialAction } from './plan-stage.js';
 import { isScopedSecretAction } from './scoped-secrets.js';
@@ -235,6 +236,7 @@ export const planRunDocumentSchema = z.object({
     'database-bindings',
     'database-initialization',
     'database-bootstrap',
+    'migration-source-version',
     'backup-policy',
     'backup-provisioning',
     'backup-readiness',
@@ -274,6 +276,17 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  if (document.scope === 'migration-source-version') {
+    const fields = ['kind', 'scope', 'environmentName', 'specRevision', 'observedFingerprint', 'actions', 'reviewBlockers'];
+    if (Object.keys(document).some(key => !fields.includes(key)) || document.observedFingerprint !== null
+      || document.actions.length !== 1 || !migrationVersionActionSchema.safeParse(document.actions[0]).success) {
+      ctx.addIssue({ code: 'custom', message: 'A source version plan must contain only its exact reviewed inspection.' });
+    }
+    return;
+  }
+  if (document.actions.some(action => action.metadata?.operation === 'migrationSourceVersion')) {
+    ctx.addIssue({ code: 'custom', message: 'Private source version inspection requires its own plan.' });
+  }
   if (document.scope === 'domain-registration') {
     const [action] = document.actions;
     if (document.actions.length !== 1 || !action || action.resource.kind !== 'domain' || action.resource.provider !== 'cloudflare'

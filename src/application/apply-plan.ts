@@ -8,6 +8,8 @@ import { applyDatabaseCredentialAliases, verifyDatabaseCredentialAliases } from 
 import { applyDatabaseFreshInitialization } from '../domain/services/database-fresh-initialization.service.js';
 import { hasPendingDatabaseInitialization } from '../domain/plan/database-initialization.contract.js';
 import { databaseSeedGeneration } from '../domain/services/database-seed-generation.js';
+import { migrationVersionActionSchema } from '../domain/plan/migration-version.contract.js';
+import { applyMigrationSourceVersion } from './migration-version-inspection.js';
 import { databaseBootstrapActionSchema, hasPendingDatabaseBootstrap, matchesDatabaseBootstrapObservationOrCleanup } from '../domain/plan/database-bootstrap.contract.js';
 import { applyDatabaseBootstrap } from '../domain/services/database-bootstrap.service.js';
 import { applyScheduleActivation } from '../domain/services/schedule-activation.service.js';
@@ -921,6 +923,15 @@ export async function executePlanApply(ctx: CommandContext, params: {
       : { kind: 'env_missing', envName };
   }
 
+  if (planScope === 'migration-source-version') {
+    const reviewed = migrationVersionActionSchema.safeParse(loaded.document.actions[0]);
+    if (!reviewed.success || !environment || params.alwaysRunBootstrap || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'railway', reason: 'The saved private version check belongs to a different environment or workflow.' }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: action => applyMigrationSourceVersion(ctx, { project, spec, source: environment, targetName: reviewed.data.metadata.targetEnvironment }, planId, action) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
   if (planScope === 'database-bootstrap') {
     const reviewedAction = databaseBootstrapActionSchema.safeParse(loaded.document.actions[0]);
     if (loaded.document.databaseBootstrapReady !== true || !environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id

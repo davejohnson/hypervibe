@@ -165,9 +165,17 @@ For a prepared Railway-to-GCP file move, select one declared data bucket via
 prepares the unscheduled job and its bucket permissions. Passing source
 credentials and running a copy require their own reviewed workflow.
 
-`hv_migrate` prepares a separate OpenTofu-managed GCP target. Railway database
-and bucket transfers require a planned private credential handoff that is still
-unavailable. A fresh comparison of private Railway and Cloud SQL databases also
+Use `hv_migrate` with `inspectSource=true` to review one query of the running
+Railway PostgreSQL database. The connection needs its pre-registered SSH
+identity and trusted host keys. Show the saved action before applying it.
+The result includes the server version, user-table count and estimated live
+rows. The destination can be on any cloud or can be undeclared.
+
+`hv_migrate` proposes an OpenTofu-managed Google Cloud environment for a new
+destination. It can import runtime settings into an existing AWS environment.
+Guided migration to Azure is unavailable. Railway database and bucket transfers
+still require a planned private credential handoff. A fresh comparison of
+private Railway and Cloud SQL databases also
 requires reviewed verification jobs. Historical receipts record what matched at
 the time of the copy. Report these limits before requesting a maintenance window.
 For supported operations the workflow also stops at
