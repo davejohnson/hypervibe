@@ -376,12 +376,11 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     const stuck = adminServer((session) => ({
       query: async (text, values) => {
         if (/count\(\*\)::int AS remaining/.test(text)) { checks++; return { rows: [{ remaining: 3 }] }; }
-        if (/pg_sleep/.test(text)) return { rows: [] };
         return session.query(text, values);
       },
     }));
-    expect(await retireTenantLogin(stuck, { ...identity(target), login: target.names.logins[1] })).toEqual({ remainingSessions: 3 });
-    expect(checks).toBe(50);
+    expect(await retireTenantLogin({ ...stuck, sessionWaitMs: 300 }, { ...identity(target), login: target.names.logins[1] })).toEqual({ remainingSessions: 3 });
+    expect(checks).toBeGreaterThan(1);
     expect(await dropTenant(server, identity(target))).toEqual({ database: 'dropped', remainingRoles: [] });
   });
 
@@ -401,7 +400,7 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     expect(shown).toContain('57014');
     expect(shown).not.toContain(secret);
     expect(shown).not.toContain('SCRAM-SHA-256');
-    expect(statements.some((statement) => /ALTER ROLE "app_two_b" PASSWORD 'SCRAM-SHA-256\$/.test(statement))).toBe(true);
+    expect(statements.some((statement) => /ALTER ROLE "app_two_b" LOGIN PASSWORD 'SCRAM-SHA-256\$/.test(statement))).toBe(true);
     expect(statements.join('\n')).not.toContain(secret);
     expect(await setTenantLoginPassword(server, { ...identity(two), login: two.names.logins[1], password: secret })).toBeUndefined();
     await retireTenantLogin(server, { ...identity(two), login: two.names.logins[1] });
@@ -498,7 +497,7 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
       await client.query(`REVOKE ALL ON DATABASE ${target.names.database} FROM ${ADMIN}`).catch(() => {});
     }
     await close(client);
-    await boot.query(`ALTER ROLE ${login} PASSWORD NULL`);
+    await boot.query(`ALTER ROLE ${login} NOLOGIN PASSWORD NULL`);
     expect(await row(), label).toEqual(before);
     expect(before[0]!.datdba, label).toBe(await scalar(boot, `SELECT oid FROM pg_roles WHERE rolname = $1`, [ADMIN]));
     return true;
@@ -529,7 +528,7 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
       const database = (await boot.query(`SELECT datconnlimit, datacl::text AS acl, pg_get_userbyid(datdba) AS owner, shobj_description(oid, 'pg_database') AS comment FROM pg_database WHERE datname = $1`, [target.names.database])).rows
         .map((row) => ({ ...row, acl: swap(row.acl), comment: swap(row.comment) }));
       const roles = (await boot.query(
-        `SELECT r.rolname, r.rolcanlogin, r.rolconnlimit, r.rolconfig::text AS config, shobj_description(r.oid, 'pg_authid') AS comment,
+        `SELECT r.rolname, r.rolconnlimit, r.rolconfig::text AS config, shobj_description(r.oid, 'pg_authid') AS comment,
            (SELECT array_agg(DISTINCT g.rolname::text ORDER BY g.rolname::text) FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.roleid WHERE m.member = r.oid) AS member_of,
            (SELECT array_agg(DISTINCT g.rolname::text ORDER BY g.rolname::text) FROM pg_auth_members m JOIN pg_roles g ON g.oid = m.member WHERE m.roleid = r.oid) AS members
          FROM pg_roles r WHERE r.rolname = ANY($1) ORDER BY 1`, [[target.names.owner, ...target.names.logins]])).rows
@@ -644,13 +643,12 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
 
     // 3. While a session of the old logins will not end, even an explicit allocation is refused and nothing is created.
     // (Sessions that will not end cannot be produced on demand, so the session's answers are replaced for this check.)
-    const stuck = adminServer((session) => ({
+    const stuck: TenantServer = { ...adminServer((session) => ({
       query: async (text, values) => {
         if (/count\(\*\)::int AS remaining/.test(text)) return { rows: [{ remaining: 1 }] };
-        if (/pg_sleep/.test(text)) return { rows: [] };
         return session.query(text, values);
       },
-    }));
+    })), sessionWaitMs: 300 };
     expect(await refusal(ensureTenant(stuck, { ...identity(target), connectionLimit: 10, allocate: true }))).toBe('partial');
     expect(await refusal(dropTenant(stuck, identity(target)))).toBe('partial');
     expect(await databaseExists(target.names.database)).toBe(false);
@@ -1113,6 +1111,129 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
     expect(attempts).toEqual(['busy', 'busy', 'busy']);
     expect(await inventory()).toEqual(['app_steady:ready', 'app_two:ready']);
     await dropTenant(server, identity(steady));
+  });
+
+  it('third pass 1. a session that shows up after a first zero count is not missed', async () => {
+    // A connection that passed the login check just before the login was switched off can appear late. That cannot be
+    // timed on demand, so the session counts the module reads are replaced here.
+    const scripted = (counts: (statements: string[]) => number) => {
+      const statements: string[] = [];
+      const scriptedServer: TenantServer = { ...adminServer((session) => ({
+        query: async (text, values) => {
+          statements.push(text);
+          if (/count\(\*\)::int AS remaining/.test(text)) return { rows: [{ remaining: counts(statements) }] };
+          return session.query(text, values);
+        },
+      })), sessionWaitMs: 400 };
+      return { server: scriptedServer, statements };
+    };
+    const reads = (statements: string[]) => statements.filter((text) => /AS remaining/.test(text)).length;
+    const ends = (statements: string[]) => statements.filter((text) => /pg_terminate_backend/.test(text)).length;
+
+    // Zero, then a late session, then zero twice: the first zero alone is not believed, and the late session is ended.
+    const late = await ready('late');
+    const first = scripted((statements) => reads(statements) === 2 ? 1 : 0);
+    expect(await dropTenant(first.server, identity(late))).toEqual({ database: 'dropped', remainingRoles: [] });
+    const firstDrop = first.statements.findIndex((text) => /^DROP DATABASE/.test(text));
+    expect(reads(first.statements.slice(0, firstDrop))).toBe(4);
+    expect(ends(first.statements.slice(0, firstDrop))).toBeGreaterThanOrEqual(3);
+
+    // A session that keeps coming back: nothing is deleted.
+    const haunted = await ready('haunted');
+    const second = scripted((statements) => reads(statements) % 2);
+    expect(await refusal(dropTenant(second.server, identity(haunted)))).toBe('partial');
+    expect(second.statements.some((text) => /^DROP/.test(text))).toBe(false);
+    expect(await databaseExists(haunted.names.database)).toBe(true);
+
+    // A session that appears only after the database is gone: that login is ended again and, while it stays, not dropped.
+    const third = { statements: [] as string[] };
+    const afterDrop = adminServer((session) => ({ query: (text, values) => {
+      third.statements.push(text);
+      const forA = Array.isArray(values) && values[0] === haunted.names.logins[0];
+      if (/AS remaining/.test(text)) return Promise.resolve({ rows: [{ remaining: forA && third.statements.some((entry) => /^DROP DATABASE/.test(entry)) ? 1 : 0 }] });
+      return session.query(text, values);
+    } }));
+    expect(await dropTenant({ ...afterDrop, sessionWaitMs: 400 }, identity(haunted))).toEqual({ database: 'dropped', remainingRoles: [haunted.names.logins[0]] });
+    const dropped = third.statements.findIndex((text) => /^DROP DATABASE/.test(text));
+    expect(ends(third.statements.slice(dropped))).toBeGreaterThanOrEqual(2);
+    expect(await roleNames(haunted)).toEqual([haunted.names.logins[0]]);
+    expect(await dropTenant(server, identity(haunted))).toEqual({ database: 'absent', remainingRoles: [] });
+  }, 60_000);
+
+  it('third pass 2. ensure never switches a login back on', async () => {
+    // a. A login an administrator switched off on purpose, password intact, stays off through a maintenance run.
+    const target = await ready('offduty');
+    await boot.query(`ALTER ROLE ${target.names.logins[0]} NOLOGIN`);
+    for (const allocate of [false, true]) await ensureTenant(server, { ...identity(target), connectionLimit: 10, allocate });
+    expect(await scalar(boot, 'SELECT rolcanlogin FROM pg_roles WHERE rolname = $1', [target.names.logins[0]])).toBe(false);
+    expect(await attempt(target.names.logins[0], PASSWORD('offduty-a'), target.names.database)).toBe('28000');
+    // Giving it a password is the one thing that switches it on.
+    await setTenantLoginPassword(server, { ...identity(target), login: target.names.logins[0], password: PASSWORD('offduty-new') });
+    expect(await attempt(target.names.logins[0], PASSWORD('offduty-new'), target.names.database)).toBe('ok');
+
+    // b. Re-allocating over old roles: from before the database is created until the call returns, no login can log in.
+    await boot.query(`DROP DATABASE ${target.names.database} WITH (FORCE)`);
+    const seen: boolean[] = [];
+    let creating = false;
+    const watching = adminServer((session) => ({
+      query: async (text, values) => {
+        if (/^CREATE DATABASE/.test(text)) creating = true;
+        if (creating) seen.push(await scalar(boot, 'SELECT bool_or(rolcanlogin) FROM pg_roles WHERE rolname = ANY($1)', [[...target.names.logins]]) as boolean);
+        return session.query(text, values);
+      },
+    }));
+    expect(await ensureTenant(watching, { ...identity(target), connectionLimit: 10, allocate: true })).toEqual({ database: 'created' });
+    expect(seen.length).toBeGreaterThan(5);
+    expect(seen.every((canLogin) => canLogin === false)).toBe(true);
+    expect((await boot.query('SELECT rolcanlogin FROM pg_roles WHERE rolname = ANY($1)', [[...target.names.logins]])).rows).toEqual([{ rolcanlogin: false }, { rolcanlogin: false }]);
+    expect((await observeTenant(server, identity(target))).state).toBe('ready');
+    expect(DENIED).toContain(await attempt(target.names.logins[0], PASSWORD('offduty-new'), target.names.database));
+    await dropTenant(server, identity(target));
+  });
+
+  it('third pass 3. reads the caller\'s options once', async () => {
+    const target = tenant('once');
+    const reads: Record<string, number> = {};
+    const shifting = (values: Record<string, unknown[]>) => new Proxy({}, {
+      get: (_, property: string) => {
+        if (!(property in values)) return undefined;
+        reads[property] = (reads[property] ?? 0) + 1;
+        return values[property]![Math.min(reads[property]!, values[property]!.length) - 1];
+      },
+    }) as never;
+    // The first answers say "do not create"; a caller object that changes its mind later must not be believed.
+    expect(await refusal(ensureTenant(server, shifting({ names: [target.names], tenantId: [target.tenantId], connectionLimit: [5, 9000], allocate: [false, true] })))).toBe('absent');
+    expect(await databaseExists(target.names.database)).toBe(false);
+    expect(reads).toEqual({ names: 1, tenantId: 1, connectionLimit: 1, allocate: 1 });
+  });
+
+  it('third pass 4. waits end at a wall-clock deadline, however slow the server answers', async () => {
+    const holder = await connect(ADMIN, ADMIN_PASSWORD, 'postgres');
+    await holder.query(`SELECT pg_advisory_lock(${TENANT_WRITER_LOCK[0]}, ${TENANT_WRITER_LOCK[1]})`);
+    let tries = 0;
+    const slow = (pattern: RegExp, count: () => void, answer?: Record<string, unknown>) => adminServer((session) => ({
+      query: async (text, values) => {
+        if (!pattern.test(text)) return session.query(text, values);
+        count();
+        await new Promise((done) => setTimeout(done, 400));
+        return answer ? { rows: [answer] } : session.query(text, values);
+      },
+    }), sessionForSlow);
+    const sessionForSlow = await connect(ADMIN, ADMIN_PASSWORD, 'postgres');
+    const started = Date.now();
+    await expect(observeTenant({ ...slow(/try_advisory_lock/, () => { tries++; }), lockWaitMs: 500 }, identity(tenant('slow')))).rejects.toBeInstanceOf(TenantBusyError);
+    // Each try takes 0.4 s against a 0.5 s limit: two tries, never a third after the deadline.
+    expect(tries).toBe(2);
+    expect(Date.now() - started).toBeLessThan(1500);
+    await holder.query(`SELECT pg_advisory_unlock(${TENANT_WRITER_LOCK[0]}, ${TENANT_WRITER_LOCK[1]})`);
+
+    const target = await ready('slowend');
+    let counts = 0;
+    const began = Date.now();
+    expect(await retireTenantLogin({ ...slow(/AS remaining/, () => { counts++; }, { remaining: 1 }), sessionWaitMs: 500 }, { ...identity(target), login: target.names.logins[0] })).toEqual({ remainingSessions: 1 });
+    expect(counts).toBe(2);
+    expect(Date.now() - began).toBeLessThan(2500);
+    await dropTenant(server, identity(target));
   });
 
   it('leaves the surviving tenant intact after everything above', async () => {
