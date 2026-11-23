@@ -45,4 +45,46 @@ describe('storage spec', () => {
       },
     }).success).toBe(false);
   });
+  // Auto-tiering is off unless asked for, and is never accepted where it would be silently ignored.
+  describe('autoTiering', () => {
+    const environment = (hosting: string, provider: string, extra: Record<string, unknown> = {}) => environmentSpecSchema.safeParse({
+      hosting: { provider: hosting }, services: { api: {} },
+      storage: { files: { provider, type: 'bucket', region: provider === 'railway' ? 'sjc' : 'us-west1', injectInto: ['api'], ...extra } },
+    });
+    const message = (result: ReturnType<typeof environment>) => result.success ? '' : result.error.issues.map(issue => issue.message).join('\n');
+
+    it('is accepted for a Google Cloud bucket on Google Cloud and an S3 bucket on AWS', () => {
+      expect(environment('cloudrun', 'gcs', { autoTiering: true }).success).toBe(true);
+      expect(environment('aws', 's3', { autoTiering: true, versioning: true }).success).toBe(true);
+    });
+
+    it('is off by default and may be written as false for any provider', () => {
+      for (const [hosting, provider] of [['cloudrun', 'gcs'], ['aws', 's3'], ['azure', 'azureblob'], ['railway', 'railway']] as const) {
+        expect(environment(hosting, provider).success).toBe(true);
+        expect(environment(hosting, provider, { autoTiering: false }).success).toBe(true);
+      }
+      const parsed = storageSpecSchema.parse({ provider: 'gcs', type: 'bucket', region: 'us-west1', injectInto: [] });
+      expect(parsed).not.toHaveProperty('autoTiering');
+      expect(storageSpecSchema.safeParse({ provider: 'gcs', type: 'bucket', region: 'us-west1', injectInto: [], autoTiering: 'yes' }).success).toBe(false);
+    });
+
+    it('is refused on Azure, where last-read tracking belongs to the whole storage account and reading cooled files costs extra', () => {
+      const result = environment('azure', 'azureblob', { autoTiering: true });
+      expect(result.success).toBe(false);
+      expect(message(result)).toMatch(/Storage files: autoTiering is not available on Azure/);
+      expect(message(result)).toMatch(/Remove autoTiering/);
+    });
+
+    it('is refused for a provider with no storage tiers, instead of being ignored', () => {
+      const result = environment('railway', 'railway', { autoTiering: true });
+      expect(result.success).toBe(false);
+      expect(message(result)).toMatch(/Storage files: autoTiering is available only for Google Cloud Storage \("gcs"\) and Amazon S3 \("s3"\) buckets/);
+    });
+
+    it.each([['railway', 'gcs'], ['railway', 's3'], ['aws', 'gcs'], ['cloudrun', 's3']])('is refused when %s hosting would leave a %s bucket outside the engine that applies it', (hosting, provider) => {
+      const result = environment(hosting, provider, { autoTiering: true });
+      expect(result.success).toBe(false);
+      expect(message(result)).toMatch(/Storage files: autoTiering needs/);
+    });
+  });
 });

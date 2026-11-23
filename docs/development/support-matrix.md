@@ -49,6 +49,7 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Database size (`database.size`), deletion protection | yes | blocked (#625) | blocked (#625) |
 | File storage | yes (`gcs`) | yes (`s3`) | yes (`azureblob`, native access only) |
 | File versioning (30 days), browser uploads straight to storage | yes | S3 versioning, 30-day noncurrent expiry and signed uploads | Blob soft delete (30 days) and SAS uploads. All containers in an environment share these account settings. |
+| Automatic storage tiering (`storage.<name>.autoTiering`, off unless set) | yes: Cloud Storage Autoclass, changed in place, coldest class Nearline, so files stay instantly readable. Kept beside versioning and its 30-day cleanup. Turning it on or off is reviewed as a cost change with its own approval. Offline verification, no live run | yes: a lifecycle rule moves files to S3 Intelligent-Tiering (automatic instant-access tiers only; the delayed archive tiers are never enabled). Offline verification, no live run | refused by the spec: last-read tracking is a storage account setting that every container in the environment shares, and Azure charges for reading cooled files |
 | Always-on web service (`alwaysOn`) | yes | blocked (#625) | blocked (#625) |
 | Redis | yes (`memorystore`) | blocked (#628) | blocked (#628) |
 | Queues | yes | blocked (#628) | blocked (#628) |

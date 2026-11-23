@@ -114,6 +114,11 @@ change needed, before deploying:
 
 - Files saved to a local folder (uploads, media, generated reports) are lost on
   restart. Store them in a bucket declared in the spec.
+  For a bucket whose files are rarely read again, `autoTiering: true` on that
+  storage entry (Google Cloud and AWS only, off unless set) lets the cloud move
+  unread files to cheaper storage and back when read. Files stay instantly
+  readable; the cloud charges a small management fee instead of read fees. The
+  plan explains the change and asks for its own approval.
 - A SQLite or other file database is lost the same way. Use the managed
   database.
 - Work started in the web process (background threads, in-process schedulers,

@@ -193,10 +193,19 @@ export interface GcpStorageInput {
   versioning?: boolean;
   /** Allow browsers to send files straight to the bucket with a one-time upload address. */
   browserUploads?: boolean;
+  /** Autoclass: Google moves files not read for 30 days to Nearline and back to Standard when read. */
+  autoTiering?: boolean;
 }
 
 /** How long a replaced or deleted object stays recoverable in a versioned bucket. */
 export const STORAGE_VERSION_RETENTION_DAYS = 30;
+/**
+ * The coldest class Autoclass may use. Nearline (the Autoclass default) is the conservative choice: every
+ * class is read instantly, but if tiering is later turned off files keep their class and ordinary charges
+ * return, and Nearline has the smallest read fee and the shortest minimum storage time (30 days) of the
+ * colder classes. Archive would save more on files never read and cost far more to read or delete afterwards.
+ */
+export const STORAGE_AUTOCLASS_TERMINAL_CLASS = 'NEARLINE';
 
 /** Variables S3-SDK apps read, pointed at Cloud Storage's S3-compatible endpoint. */
 export const S3_COMPATIBLE_SECRET_KEYS = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] as const;
@@ -663,6 +672,10 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
         versioning: [{ enabled: true }],
         lifecycle_rule: [{ action: [{ type: 'Delete' }], condition: [{ days_since_noncurrent_time: STORAGE_VERSION_RETENTION_DAYS, with_state: 'ARCHIVED' }] }],
       } : {}),
+      // Autoclass is changed in place (the provider never recreates the bucket for it). Google allows it beside the
+      // Delete rule above, and requires the bucket's default class to stay Standard, which it is when unset.
+      // When the setting is absent the block is omitted: the provider then turns Autoclass off on a bucket that had it.
+      ...(bucket.autoTiering ? { autoclass: [{ enabled: true, terminal_storage_class: STORAGE_AUTOCLASS_TERMINAL_CLASS }] } : {}),
       // Any origin may attempt an upload, but the bucket is private: a request succeeds only with
       // the one-time upload address (or signature) the app issued. CORS here is not access control.
       ...(bucket.browserUploads ? { cors: [{

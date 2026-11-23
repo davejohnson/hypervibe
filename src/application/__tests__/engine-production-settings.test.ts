@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { engineEnvironmentProblems } from '../../domain/services/infrastructure-engine-selection.js';
 import { buildCloudRunConfiguration, planWithCloudRunRevisionMinimums } from '../../adapters/providers/gcp/tofu/gcp-engine.backend.js';
-import { buildEngineInput } from '../infrastructure-engine.js';
+import { buildEngineInput, gcpStorageSettings } from '../infrastructure-engine.js';
+import { describeStorageAutoTieringChanges } from '../engine-shared.js';
 import { buildAwsEngineInput } from '../infrastructure-engine-aws.js';
 import { buildAwsConfiguration } from '../../adapters/providers/aws/tofu/aws-engine.config.js';
 import { parseEnginePlan, translateEnginePlan } from '../../adapters/engine/opentofu/plan-mapping.js';
@@ -239,5 +240,169 @@ describe('production settings on Google Cloud', () => {
   it('rejects alwaysOn on anything but a web service', () => {
     expect(() => projectSpecSchema.parse({ version: 1, project: 'studio', environments: { staging: {
       hosting: { provider: 'cloudrun' }, services: { worker: { workloadKind: 'worker', alwaysOn: true } } } } })).toThrow(/alwaysOn applies only to web services/);
+  });
+});
+
+// Contract: hashicorp/google 8.9.0 google_storage_bucket.autoclass (updated in place, never ForceNew) and
+// https://docs.cloud.google.com/storage/docs/autoclass (allowed with Delete lifecycle rules; the bucket's default class stays Standard).
+describe('storage auto-tiering', () => {
+  const runtime = 'runtime@demo-project.iam.gserviceaccount.com';
+  const gcpSpec = (media: Record<string, unknown>) => projectSpecSchema.parse({ version: 1, project: 'studio', environments: { staging: {
+    hosting: { provider: 'cloudrun' }, services: { web: {} },
+    storage: { media: { provider: 'gcs', type: 'bucket', region: 'us-west1', injectInto: ['web'], ...media } },
+  } } });
+  const gcpConfiguration = (media: Record<string, unknown>) => {
+    const spec = gcpSpec(media);
+    return buildCloudRunConfiguration({ ...engineInput(spec), runtimeServiceAccountEmail: runtime,
+      storage: Object.entries(spec.environments.staging!.storage ?? {}).map(([name, storage]) => ({
+        name, bucketName: `demo-${name}`, location: storage.region, injectInto: storage.injectInto, ...gcpStorageSettings(storage) })) });
+  };
+  const bucket = (media: Record<string, unknown>) => (gcpConfiguration(media).files as Record<string, any>)['storage.tf.json'].resource.google_storage_bucket.storage_media;
+  const segment = { id: 'test', engine: 'opentofu' as const, planDigest: 'p', configurationDigest: 'c', engineVersion: '1', providerVersions: {} };
+  const autoclass = [{ enabled: true, terminal_storage_class: 'NEARLINE' }];
+  const versionCleanup = [{ action: [{ type: 'Delete' }], condition: [{ days_since_noncurrent_time: 30, with_state: 'ARCHIVED' }] }];
+  const today = {
+    name: 'demo-media', project: 'demo-project', location: 'US-WEST1', uniform_bucket_level_access: true, public_access_prevention: 'enforced', force_destroy: false,
+    labels: { 'managed-by': 'hypervibe', 'hv-storage': 'media' },
+  };
+
+  it('is off unless asked for: the bucket is written exactly as before, byte for byte', () => {
+    expect(bucket({})).toEqual(today);
+    expect(bucket({ versioning: true })).toEqual({ ...today, versioning: [{ enabled: true }], lifecycle_rule: versionCleanup });
+    for (const settings of [{}, { versioning: true, browserUploads: true }]) {
+      expect(JSON.stringify(gcpConfiguration({ ...settings, autoTiering: false }).files)).toBe(JSON.stringify(gcpConfiguration(settings).files));
+    }
+    expect(gcpStorageSettings(gcpSpec({ versioning: true }).environments.staging!.storage!.media!)).toEqual({ versioning: true });
+    expect(JSON.stringify(gcpConfiguration({}).files)).not.toMatch(/autoclass|storage_class/);
+  });
+
+  it('turns on Autoclass with Nearline as the coldest class, so files stay instantly readable', () => {
+    expect(gcpStorageSettings(gcpSpec({ autoTiering: true }).environments.staging!.storage!.media!)).toEqual({ autoTiering: true });
+    expect(bucket({ autoTiering: true })).toEqual({ ...today, autoclass });
+  });
+
+  it('keeps versioning and the 30-day cleanup of old versions, and adds no lifecycle rule Autoclass forbids', () => {
+    const tiered = bucket({ autoTiering: true, versioning: true });
+    expect(tiered).toEqual({ ...today, versioning: [{ enabled: true }], lifecycle_rule: versionCleanup, autoclass });
+    // Google rejects a bucket that has Autoclass and a SetStorageClass action or a matchesStorageClass condition.
+    expect(JSON.stringify(tiered)).not.toMatch(/SetStorageClass|matches_storage_class/);
+    // Autoclass requires the bucket's default class to stay Standard, which is the provider default when unset.
+    expect(tiered).not.toHaveProperty('storage_class');
+  });
+
+  it('changes only the autoclass setting, never a field that would recreate the bucket', () => {
+    for (const settings of [{}, { versioning: true, browserUploads: true }]) {
+      const { autoclass: added, ...rest } = bucket({ ...settings, autoTiering: true });
+      expect(added).toEqual(autoclass);
+      expect(rest).toEqual(bucket(settings));
+    }
+    const on = gcpConfiguration({ autoTiering: true });
+    const off = gcpConfiguration({});
+    expect(Object.keys(on.resources).sort()).toEqual(Object.keys(off.resources).sort());
+    expect(on.resources['google_storage_bucket.storage_media']).toEqual(off.resources['google_storage_bucket.storage_media']);
+  });
+
+  const review = (media: Record<string, unknown>, change: Record<string, unknown>) => {
+    const spec = gcpSpec(media);
+    const translated = translateEnginePlan({ provider: 'gcp', configuration: gcpConfiguration(media), segment,
+      parsed: parseEnginePlan(JSON.stringify({ resource_changes: [{ address: 'google_storage_bucket.storage_media', type: 'google_storage_bucket', mode: 'managed', change }] })) });
+    describeStorageAutoTieringChanges(translated.actions, spec.environments.staging!, 'gcp');
+    return translated;
+  };
+  const before = { name: 'demo-media', location: 'US-WEST1', versioning: [{ enabled: true }], lifecycle_rule: versionCleanup, autoclass: [] as unknown[] };
+
+  it('reviews turning it on for an existing bucket as an in-place, separately approved cost change with a plain explanation', () => {
+    const { actions, blockers } = review({ versioning: true, autoTiering: true }, { actions: ['update'], before, after: { ...before, autoclass } });
+    expect(blockers).toEqual([]);
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ id: 'storage:media', type: 'update', requiresConfirm: true, billable: true });
+    expect(actions[0]).not.toHaveProperty('dataBearing');
+    expect(actions[0]!.diff).toEqual([{ field: 'google_storage_bucket.autoclass.0.enabled' }, { field: 'google_storage_bucket.autoclass.0.terminal_storage_class' }]);
+    expect(actions[0]!.reason).toMatch(/^Hypervibe will turn on automatic storage tiering \(Google Cloud Storage Autoclass\) for this existing bucket in place: the bucket and its files are not recreated, moved or deleted\./);
+    expect(actions[0]!.reason).toMatch(/not read for 30 days move to cheaper Nearline storage/);
+    expect(actions[0]!.reason).toMatch(/stay instantly readable/);
+    expect(actions[0]!.reason).toMatch(/no retrieval or early-deletion fees/);
+    expect(actions[0]!.reason).toMatch(/management fee/);
+    expect(actions[0]!.reason).toMatch(/one-time enablement charge/);
+    expect(actions[0]!.reason).toMatch(/OpenTofu will update google_storage_bucket\.storage_media\.$/);
+  });
+
+  it('never presents a bucket replacement as a tiering change: it stays a data-bearing replacement that needs its own approval', () => {
+    const { actions } = review({ autoTiering: true }, { actions: ['delete', 'create'], before, after: { ...before, autoclass } });
+    expect(actions[0]).toMatchObject({ type: 'replace', dataBearing: true, requiresConfirm: true });
+    expect(actions[0]!.reason).not.toMatch(/in place/);
+  });
+
+  it('reviews turning it off deliberately: files stay where they are and ordinary Nearline charges return', () => {
+    const { actions } = review({ versioning: true }, { actions: ['update'], before: { ...before, autoclass }, after: before });
+    expect(actions[0]).toMatchObject({ id: 'storage:media', type: 'update', requiresConfirm: true });
+    expect(actions[0]!.reason).toMatch(/^Hypervibe will turn off automatic storage tiering \(Autoclass\) for this bucket\. Nothing is deleted or moved: each file stays in the storage class it has now\./);
+    expect(actions[0]!.reason).toMatch(/cannot be turned back on for one day/);
+  });
+
+  it('says nothing about tiering when a plan changes something else on the bucket, and describes a new tiered bucket without calling it existing', () => {
+    const unrelated = review({ autoTiering: true }, { actions: ['update'], before: { ...before, autoclass, labels: {} }, after: { ...before, autoclass, labels: { a: 'b' } } });
+    expect(unrelated.actions[0]!.reason).toBe('OpenTofu will update google_storage_bucket.storage_media.');
+    expect(unrelated.actions[0]).not.toHaveProperty('requiresConfirm');
+    const created = review({ autoTiering: true }, { actions: ['create'], before: null, after: { ...before, autoclass } });
+    expect(created.actions[0]!.reason).toMatch(/^This bucket uses automatic storage tiering \(Google Cloud Storage Autoclass\)\./);
+    expect(created.actions[0]!.reason).not.toMatch(/existing bucket/);
+    const plain = review({}, { actions: ['create'], before: null, after: before });
+    expect(plain.actions[0]!.reason).toBe('OpenTofu will create google_storage_bucket.storage_media.');
+  });
+
+  describe('on AWS', () => {
+    const awsSpec = (docs: Record<string, unknown>) => projectSpecSchema.parse({ version: 1, project: 'studio', environments: { test: {
+      hosting: { provider: 'aws' }, services: { web: {} },
+      storage: { docs: { provider: 's3', type: 'bucket', region: 'us-west-2', injectInto: ['web'], ...docs } },
+    } } });
+    const awsReview = (docs: Record<string, unknown>, changes: Array<Record<string, unknown>>) => {
+      const spec = awsSpec(docs);
+      const translated = translateEnginePlan({ provider: 'aws', segment,
+        configuration: buildAwsConfiguration({ accountId: '111122223333', region: 'us-west-2', prefix: 'hv-app', environmentId: 'ENV1', parameterPath: '/hypervibe/env1/',
+          storage: [{ name: 'docs', bucket: 'hv-app-docs', ...(docs.versioning ? { versioning: true } : {}), ...(docs.autoTiering ? { autoTiering: true } : {}) }] }),
+        parsed: parseEnginePlan(JSON.stringify({ resource_changes: changes.map(change => ({ mode: 'managed', type: String(change.address).split('.')[0], ...change })) })) });
+      describeStorageAutoTieringChanges(translated.actions, spec.environments.test!, 'aws');
+      return translated.actions[0]!;
+    };
+    const tieringRule = { id: 'auto-tiering', transition: [{ days: 0, storage_class: 'INTELLIGENT_TIERING' }], noncurrent_version_expiration: [] };
+    const versionsRule = { id: 'expire-old-versions', transition: [], noncurrent_version_expiration: [{ noncurrent_days: 30 }] };
+    const lifecycle = 'aws_s3_bucket_lifecycle_configuration.docs';
+
+    it('explains what turning it on does when the lifecycle configuration is created or its tiering rule is added', () => {
+      const created = awsReview({ autoTiering: true }, [{ address: lifecycle, change: { actions: ['create'], before: null, after: { rule: [tieringRule] } } }]);
+      expect(created.reason).toMatch(/^Automatic storage tiering: files of 128 KB or more in this bucket move to S3 Intelligent-Tiering/);
+      expect(created.reason).toMatch(/stay instantly readable/);
+      expect(created.reason).toMatch(/monitoring fee/);
+      expect(created.reason).toMatch(/not recreated or deleted/);
+      expect(created).toMatchObject({ requiresConfirm: true, billable: true });
+      const added = awsReview({ autoTiering: true, versioning: true }, [{ address: lifecycle, change: { actions: ['update'], before: { rule: [versionsRule] }, after: { rule: [tieringRule, versionsRule] } } }]);
+      expect(added).toMatchObject({ type: 'update', requiresConfirm: true });
+      expect(added.reason).toMatch(/^Automatic storage tiering:/);
+    });
+
+    it('explains turning it off, and stays quiet when only versioning changes', () => {
+      const removed = awsReview({ versioning: true }, [{ address: lifecycle, change: { actions: ['update'], before: { rule: [tieringRule, versionsRule] }, after: { rule: [versionsRule] } } }]);
+      expect(removed.reason).toMatch(/^Hypervibe will stop moving files to S3 Intelligent-Tiering\. Files already moved stay there/);
+      expect(removed).toMatchObject({ type: 'update', requiresConfirm: true });
+      const deleted = awsReview({}, [{ address: lifecycle, change: { actions: ['delete'], before: { rule: [tieringRule] }, after: null } }]);
+      expect(deleted.reason).toMatch(/^Hypervibe will stop moving files to S3 Intelligent-Tiering\./);
+      const versioningOff = awsReview({}, [
+        { address: lifecycle, change: { actions: ['delete'], before: { rule: [versionsRule] }, after: null } },
+        { address: 'aws_s3_bucket_versioning.docs', change: { actions: ['delete'], before: {}, after: null } }]);
+      expect(versioningOff.reason).not.toMatch(/Intelligent-Tiering/);
+      const versioningOn = awsReview({ autoTiering: true, versioning: true }, [
+        { address: lifecycle, change: { actions: ['update'], before: { rule: [tieringRule] }, after: { rule: [tieringRule, versionsRule] } } },
+        { address: 'aws_s3_bucket_versioning.docs', change: { actions: ['create'], before: null, after: {} } }]);
+      expect(versioningOn.reason).not.toMatch(/Intelligent-Tiering/);
+      expect(versioningOn).not.toHaveProperty('requiresConfirm');
+    });
+
+    it('reaches the AWS engine input only when asked for', () => {
+      const context = { connection: { accountId: '111122223333', region: 'us-west-2' }, prefix: 'hv-app', parameterPath: '/hypervibe/env1/', environment: { id: 'ENV1', platformBindings: {} },
+        shared: { clusterArn: 'arn', clusterIdentifier: 'c' }, database: { name: 'db' } } as never;
+      expect(buildAwsEngineInput(awsSpec({ autoTiering: true }), 'test', context, { secretKeys: [] }).storage).toEqual([{ name: 'docs', bucket: 'hv-app-docs-111122223333', autoTiering: true }]);
+      expect(buildAwsEngineInput(awsSpec({}), 'test', context, { secretKeys: [] }).storage).toEqual([{ name: 'docs', bucket: 'hv-app-docs-111122223333' }]);
+    });
   });
 });

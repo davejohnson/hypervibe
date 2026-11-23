@@ -2,6 +2,8 @@ import { RunRepository } from '../adapters/db/repositories/run.repository.js';
 import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
+import { storageEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+import { awsKey } from '../adapters/providers/aws/tofu/aws-engine.config.js';
 import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan.types.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
@@ -48,6 +50,66 @@ export function describeFixedWorkerCountChanges(actions: PlanAction[], environme
       const effect = worker.workerPaused ? 'pause this worker by setting its instance count to zero' : 'run one instance of this worker';
       action.reason = `Hypervibe will ${effect}. ${action.reason}`;
     }
+  }
+}
+
+/** Plain-language review text for storage auto-tiering. Costs are described, never quoted: the clouds change their rates. */
+export const storageAutoTieringNotes = {
+  gcp: {
+    onExisting: 'Hypervibe will turn on automatic storage tiering (Google Cloud Storage Autoclass) for this existing bucket in place: the bucket and its files are not recreated, moved or deleted.',
+    onNew: 'This bucket uses automatic storage tiering (Google Cloud Storage Autoclass).',
+    effect: 'Files of 128 KiB or more that are not read for 30 days move to cheaper Nearline storage and return to Standard storage when read; smaller files stay in Standard. '
+      + 'Files stay instantly readable, and Google charges no retrieval or early-deletion fees while tiering is on. '
+      + 'In exchange Google charges a monthly Autoclass management fee, and a one-time enablement charge when tiering is turned on for a bucket that already holds files. '
+      + 'Versioning and the 30-day cleanup of replaced files are unchanged.',
+    off: 'Hypervibe will turn off automatic storage tiering (Autoclass) for this bucket. Nothing is deleted or moved: each file stays in the storage class it has now. '
+      + 'Files left in Nearline are then billed at Google\'s ordinary Nearline rates, which add a fee for reading them and for deleting them within 30 days. '
+      + 'The management fee stops, and tiering cannot be turned back on for one day.',
+  },
+  aws: {
+    on: 'Automatic storage tiering: files of 128 KB or more in this bucket move to S3 Intelligent-Tiering, which shifts each file to cheaper tiers after 30 and 90 days without being read, and back when it is read. '
+      + 'Files stay instantly readable and AWS charges no retrieval fee. In exchange AWS charges a small monthly monitoring fee for each file, and a one-time request charge to move existing files. '
+      + 'Smaller files stay as they are. The bucket and its files are not recreated or deleted.',
+    off: 'Hypervibe will stop moving files to S3 Intelligent-Tiering. Files already moved stay there, instantly readable and still charged the monitoring fee, until they are replaced or deleted. Nothing is deleted or moved back.',
+  },
+} as const;
+
+/**
+ * Explains, on the storage action that changes it, what turning auto-tiering on or off does and costs, and
+ * makes that action need its own approval. Plans that leave tiering alone are untouched, and a replacement
+ * is never described as a tiering change.
+ */
+export function describeStorageAutoTieringChanges(actions: PlanAction[], environment: EnvironmentSpec, cloud: 'gcp' | 'aws'): void {
+  for (const action of actions) {
+    const storage = action.resource.kind === 'storage' ? environment.storage?.[action.resource.name] : undefined;
+    if (!storage || action.type === 'noop' || action.type === 'replace') continue;
+    const changing: string[] = (action.metadata?.engineSegment as { addresses?: string[] } | undefined)?.addresses ?? [];
+    const fields = (action.diff ?? []).map(change => change.field);
+    let note: string | undefined;
+    if (cloud === 'gcp') {
+      const address = `google_storage_bucket.${storageEngineKey(action.resource.name)}`;
+      if (fields.some(field => field.startsWith('google_storage_bucket.autoclass'))) {
+        note = storage.autoTiering ? `${storageAutoTieringNotes.gcp.onExisting} ${storageAutoTieringNotes.gcp.effect}` : storageAutoTieringNotes.gcp.off;
+      } else if (storage.autoTiering && changing.includes(address) && !fields.some(field => field.startsWith('google_storage_bucket.'))) {
+        // The bucket itself is created or adopted with the setting.
+        note = `${storageAutoTieringNotes.gcp.onNew} ${storageAutoTieringNotes.gcp.effect}`;
+      }
+    } else {
+      const key = awsKey(action.resource.name);
+      const lifecycle = `aws_s3_bucket_lifecycle_configuration.${key}`;
+      const ruleChanged = fields.some(field => field.startsWith('aws_s3_bucket_lifecycle_configuration.rule.0.transition'));
+      // Without a field list the bucket's one lifecycle configuration is itself created or deleted.
+      const whole = changing.includes(lifecycle) && !fields.some(field => field.startsWith('aws_s3_bucket_lifecycle_configuration.'));
+      if (storage.autoTiering && (ruleChanged || (whole && action.type !== 'destroy'))) note = storageAutoTieringNotes.aws.on;
+      // A configuration deleted while versioning stays as it was existed only for tiering.
+      else if (!storage.autoTiering && (ruleChanged || (whole && action.type === 'destroy' && !storage.versioning
+        && !changing.includes(`aws_s3_bucket_versioning.${key}`) && !changing.includes(`aws_s3_bucket.${key}`)))) note = storageAutoTieringNotes.aws.off;
+    }
+    if (!note) continue;
+    action.reason = `${note} ${action.reason}`;
+    // Tiering changes what the cloud bills for these files, so turning it on or off is approved by itself.
+    action.requiresConfirm = true;
+    if (storage.autoTiering) action.billable = true;
   }
 }
 

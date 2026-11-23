@@ -22,7 +22,7 @@ import {
 } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { createStorageHmacKey, deleteBucketObject, listBucketObjects, readBucket, readPubsubTopic, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
-import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan, forgetTornDownEnvironment } from './engine-shared.js';
+import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, describeStorageAutoTieringChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan, forgetTornDownEnvironment } from './engine-shared.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
@@ -303,6 +303,15 @@ function serviceResourceName(context: EngineContext, environmentName: string, se
   const binding = (context.environment.platformBindings as { services?: Record<string, { serviceId?: string; jobName?: string; workerPoolName?: string }> }).services?.[serviceName];
   const bound = binding?.serviceId ?? binding?.jobName ?? binding?.workerPoolName;
   return bound ?? resourceName(serviceName, { maxLength: 49, scope: [context.gcpProjectId, environmentName] });
+}
+
+/** The optional bucket settings a storage entry asks for; absent settings add nothing to the engine input. */
+export function gcpStorageSettings(storage: { versioning?: boolean; browserUploads?: boolean; autoTiering?: boolean }): { versioning?: true; browserUploads?: true; autoTiering?: true } {
+  return {
+    ...(storage.versioning ? { versioning: true as const } : {}),
+    ...(storage.browserUploads ? { browserUploads: true as const } : {}),
+    ...(storage.autoTiering ? { autoTiering: true as const } : {}),
+  };
 }
 
 export function buildEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'runtimeServiceAccountEmail'> & {
@@ -1207,8 +1216,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     storage: Object.entries(environmentSpec!.storage ?? {}).map(([name, storage]) => ({
       name, bucketName: engineBucketName(context.gcpProjectId, environmentName, name), location: storage.region, injectInto: storage.injectInto,
       ...(storage.access === 's3' ? { s3: { wired: s3Ready.includes(name) } } : {}),
-      ...(storage.versioning ? { versioning: true } : {}),
-      ...(storage.browserUploads ? { browserUploads: true } : {}),
+      ...gcpStorageSettings(storage),
     })),
     retiredStorage: (engineBinding.storage ?? []).filter((name) => !environmentSpec!.storage?.[name]),
   });
@@ -1363,6 +1371,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const ordinary = [...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const actions = options.teardown ? gcpTeardownActions(ordinary, context, environmentName, engineBinding) : ordinary;
   describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
+  describeStorageAutoTieringChanges(serviceActions, environmentSpec!, 'gcp');
   const warnings = [
     ...secretScope.warnings,
     gcpInfrastructureNotes.release,

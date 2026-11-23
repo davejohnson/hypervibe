@@ -40,6 +40,44 @@ describe('AWS engine configuration', () => {
     }
   });
 
+  // Contract: hashicorp/aws 6.70.0 aws_s3_bucket_lifecycle_configuration (one configuration per bucket; transition.storage_class INTELLIGENT_TIERING).
+  describe('auto-tiering', () => {
+    const storage = (buckets: Array<Record<string, unknown>>) => (buildAwsConfiguration({ ...base, storage: buckets as never }).files['storage.tf.json'] as { resource: Record<string, Record<string, any>> }).resource;
+    const tiering = { id: 'auto-tiering', status: 'Enabled', filter: [{}], transition: [{ days: 0, storage_class: 'INTELLIGENT_TIERING' }] };
+    const versions = { id: 'expire-old-versions', status: 'Enabled', filter: [{}], noncurrent_version_expiration: [{ noncurrent_days: 30 }] };
+
+    it('moves files into S3 Intelligent-Tiering only for the bucket that asked, and never opts into the delayed archive tiers', () => {
+      const resource = storage([{ name: 'docs', bucket: 'example-docs', autoTiering: true }, { name: 'scratch', bucket: 'example-scratch' }]);
+      expect(resource.aws_s3_bucket_lifecycle_configuration).toEqual({ docs: { bucket: '${aws_s3_bucket.docs.id}', rule: [tiering] } });
+      expect(resource).not.toHaveProperty('aws_s3_bucket_versioning');
+      expect(resource).not.toHaveProperty('aws_s3_bucket_intelligent_tiering_configuration');
+      expect(JSON.stringify(resource)).not.toMatch(/GLACIER|DEEP_ARCHIVE|ARCHIVE_ACCESS/);
+    });
+
+    // The tiering rule is first so adding or removing it always shows as a change to rule 0's transition.
+    it('keeps the 30-day version expiry beside the tiering rule in the bucket’s one lifecycle configuration', () => {
+      const resource = storage([{ name: 'docs', bucket: 'example-docs', versioning: true, autoTiering: true }]);
+      expect(resource.aws_s3_bucket_lifecycle_configuration!.docs).toEqual({ bucket: '${aws_s3_bucket.docs.id}', depends_on: ['aws_s3_bucket_versioning.docs'], rule: [tiering, versions] });
+    });
+
+    it('changes nothing about the bucket itself, and writes today’s exact configuration when the setting is absent or false', () => {
+      const plain = [{ name: 'docs', bucket: 'example-docs', versioning: true, browserUploads: true }, { name: 'scratch', bucket: 'example-scratch' }];
+      const today = storage(plain);
+      expect(today.aws_s3_bucket).toEqual({ docs: { bucket: 'example-docs', force_destroy: false }, scratch: { bucket: 'example-scratch', force_destroy: false } });
+      expect(today.aws_s3_bucket_lifecycle_configuration).toEqual({ docs: { bucket: '${aws_s3_bucket.docs.id}', depends_on: ['aws_s3_bucket_versioning.docs'], rule: [versions] } });
+      expect(JSON.stringify(storage(plain.map(bucket => ({ ...bucket, autoTiering: false }))))).toBe(JSON.stringify(today));
+      const tiered = storage(plain.map(bucket => ({ ...bucket, autoTiering: true })));
+      expect(tiered.aws_s3_bucket).toEqual(today.aws_s3_bucket);
+      expect(Object.keys(tiered).sort()).toEqual(Object.keys(today).sort());
+    });
+
+    it('leaves the bucket’s resource mapping exactly as it is without the setting', () => {
+      const on = buildAwsConfiguration({ ...base, storage: [{ name: 'docs', bucket: 'example-docs', versioning: true, autoTiering: true }] });
+      const off = buildAwsConfiguration({ ...base, storage: [{ name: 'docs', bucket: 'example-docs', versioning: true }] });
+      expect(on.resources).toEqual(off.resources);
+    });
+  });
+
   it('caps the runtime role with the setup boundary and scopes secrets to the environment', () => {
     const config = buildAwsConfiguration({ ...base, secretKeys: ['API_KEY'], storage: [{ name: 'documents', bucket: 'hv-app-aws-documents' }] });
     const role = (config.files['base.tf.json'] as { resource: { aws_iam_role: { runtime: Record<string, string> }; aws_iam_role_policy: { runtime: { policy: string } } } }).resource;
