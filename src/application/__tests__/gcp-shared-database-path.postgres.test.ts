@@ -64,6 +64,8 @@ vi.mock('../infrastructure-engine-database.js', async (original) => {
 const google = {
   servers: [] as Array<{ name: string; region: string; state: string; settings: { userLabels: Record<string, string>; deletionProtectionEnabled: boolean } }>,
   listWarning: false,
+  /** The next secret version is stored, and its answer never arrives. */
+  loseNextAnswer: false,
   secrets: new Map<string, { labels: Record<string, string>; versions: string[] }>(),
   /** Cloud Run service name -> the DATABASE_URL secret version it runs. */
   services: new Map<string, string>(),
@@ -79,6 +81,7 @@ async function answer(input: string | URL, init?: RequestInit): Promise<Response
     const name = `projects/${GCP}/secrets/${secret[1]}`;
     if (secret[2] === ':addVersion' && method === 'POST' && held) {
       held.versions.push(Buffer.from((JSON.parse(String(init!.body)) as { payload: { data: string } }).payload.data, 'base64').toString('utf8'));
+      if (google.loseNextAnswer) { google.loseNextAnswer = false; throw new TypeError('fetch failed'); }
       return json({ name: `${name}/versions/${held.versions.length}` });
     }
     if (method !== 'GET') throw new Error(`Unexpected ${method} ${url.pathname}`);
@@ -272,9 +275,25 @@ describe.runIf(major >= 15)('a shared database through plan, the saved-plan chec
     const allocate = saved.actions.find((action) => action.id === 'shared-database:allocate')!;
     const withAction = (action: PlanAction) => planRunDocumentSchema.safeParse({ ...saved, actions: [action] });
     expect(withAction(allocate).success).toBe(true);
+    const issues = (action: PlanAction) => { const checked = withAction(action); return checked.success ? [] : checked.error.issues.map((issue) => issue.message); };
     for (const metadata of [{ ...allocate.metadata, step: 'server' }, { ...allocate.metadata, operation: 'gcpDatabaseCredentialEnsure' }]) {
-      const refused = withAction({ ...allocate, metadata });
-      expect(refused.success ? [] : refused.error.issues.map((issue) => issue.message)).toContain('database creation must be marked billable');
+      expect(issues({ ...allocate, metadata })).toContain('database creation must be marked billable');
+    }
+    // An engine-made database cannot borrow the exemption by carrying this step's label.
+    expect(issues({ ...allocate, metadata: { ...allocate.metadata, engineSegment: { id: 'opentofu:x', engine: 'opentofu', planDigest: 'a', configurationDigest: 'b', engineVersion: '1', providerVersions: {}, addresses: ['google_sql_database_instance.db'] } } }))
+      .toContain('database creation must be marked billable');
+    // What a step is shown as must be what it does.
+    const server = saved.actions.find((action) => action.id === 'shared-database:server')!;
+    expect(issues(server)).toEqual([]);
+    const shape = 'A shared database step must be shown as what it does.';
+    expect(issues({ ...server, requiresConfirm: false })).toContain(shape);
+    expect(issues({ ...server, billable: false })).toContain(shape);
+    expect(issues({ ...allocate, type: 'destroy' })).toContain(shape);
+    const release: PlanAction = { ...allocate, id: 'shared-database:release', type: 'destroy', dataBearing: true, requiresConfirm: true, metadata: { ...allocate.metadata, step: 'release' } };
+    expect(issues(release)).toEqual([]);
+    for (const tampered of [{ ...release, type: 'update' as const }, { ...release, requiresConfirm: false }, { ...release, dataBearing: false }, { ...release, metadata: { ...release.metadata, step: 'remove-server' }, requiresConfirm: undefined },
+      { ...release, type: 'update' as const, dataBearing: false, metadata: { ...release.metadata, step: 'unprotect-server' }, requiresConfirm: false }, { ...release, metadata: { ...release.metadata, step: 'drop-everything' } }]) {
+      expect(issues(tampered as PlanAction)).toContain(shape);
     }
   });
 
@@ -297,6 +316,14 @@ describe.runIf(major >= 15)('a shared database through plan, the saved-plan chec
     expect(await reach(urls('staging')[0]!)).toBe(record('staging')!.databaseName);
     expect(await reach(urls('production')[0]!)).toBe(record('production')!.databaseName);
     expect(await reach(urls('staging')[0]!, record('production')!.databaseName)).toBe('42501');
+  });
+
+  it('refuses a declared data copy out of a database that is on the shared server, even after "placement" left the spec', async () => {
+    ctx.repos.environments.create({ projectId: project.id, name: 'copy' });
+    const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: {
+      staging: { hosting: { provider: 'cloudrun', region: REGION }, services: { web: {} }, database: { provider: 'cloudsql' } },
+      copy: { hosting: { provider: 'cloudrun', region: REGION }, services: { web: {} }, database: { provider: 'cloudsql' }, dataMigration: { id: 'copy-1', fromEnvironment: 'staging', include: { database: true } } } } });
+    await expect(plan(spec, 'copy')).rejects.toThrow(/copies the database of staging, which is on the app's shared database server\. That is not available yet/);
   });
 
   it('plans nothing when Google\'s list of servers is incomplete', async () => {
@@ -338,6 +365,22 @@ describe.runIf(major >= 15)('a shared database through plan, the saved-plan chec
     expect(urls('production')).toHaveLength(1);
     expect(await reach(urls('production')[0]!)).toBe(record('production')!.databaseName);
     expect(changes(await plan(rotated, 'production'))).toEqual([]);
+  });
+
+  it('recovers through the planner when Google stored a secret version and the answer was lost', async () => {
+    const serving = urls('staging')[1]!;
+    const rotated = specFor({ production: {}, staging: { passwordGeneration: 3 } });
+    google.loseNextAnswer = true;
+    expect((await apply(await plan(rotated, 'staging'))).success).toBe(false);
+    expect(urls('staging')).toHaveLength(3);
+    // Nothing is known about the second version; the first still works and is what services run.
+    const recover = await plan(rotated, 'staging');
+    expect(changes(recover)).toEqual(['update shared-database:allocate']);
+    expect((await apply(recover)).success).toBe(true);
+    expect(urls('staging')).toHaveLength(4);
+    expect(await reach(urls('staging')[3]!)).toBe(record('staging')!.databaseName);
+    expect(await reach(serving)).toBe(record('staging')!.databaseName);
+    expect(await reach(urls('production')[0]!)).toBe(record('production')!.databaseName);
   });
 
   it('tearing staging down removes its database and secret after confirmation, and leaves production and the server', async () => {

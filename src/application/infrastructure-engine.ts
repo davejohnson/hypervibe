@@ -32,7 +32,7 @@ import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-dedicated-database.js';
-import { gcpDatabaseLocation, gcpDatabasePlanBlocker, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
+import { gcpDatabaseLocation, gcpDatabaseOnSharedServer, gcpDatabasePlanBlocker, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
 import { googleSharedDatabaseCloud, sharedDatabase, type SharedDatabaseEngine } from './shared-database/index.js';
 import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
@@ -451,6 +451,13 @@ export async function observeSecret(token: string, gcpProjectId: string, secretI
     ...(latestVersion && /^[1-9][0-9]*$/.test(latestVersion) ? { latestVersion } : {}) } };
 }
 
+/** The container alone: who owns it. Says nothing about its versions. */
+async function observeSecretContainer(token: string, gcpProjectId: string, secretId: string): Promise<Observed<ObservedSecret>> {
+  const read = await readSecretContainer(token, gcpProjectId, secretId);
+  if (read.state !== 'present') return read;
+  return { state: 'present', value: { resourceName: read.value.resourceName, labels: read.value.labels, containerLabels: read.value.labels, hasEnabledVersion: read.value.hasEnabledVersion } };
+}
+
 function listEngineSecrets(token: string, gcpProjectId: string, environmentId: string): Promise<Observed<string[]>> {
   return listSecretIds(token, gcpProjectId, `labels.managed-by=hypervibe AND labels.hv-environment=${labelValue(environmentId)}`);
 }
@@ -827,6 +834,7 @@ function sharedDatabaseTarget(context: EngineContext, project: Project, token: s
   return {
     project: { id: project.id, name: project.name }, environment: { id: context.environment.id, name: context.environment.name },
     gcpProjectId: context.gcpProjectId, region: context.region, engine: boundEngine(context.auth),
+    secret: { id: engineSecretId(context.environment.name, ENGINE_DATABASE_URL_KEY), labels: { 'managed-by': 'hypervibe', 'hv-environment': labelValue(context.environment.id) } },
     runningSecretVersions: () => pinnedDatabaseVersions(token, context),
     cloud: googleSharedDatabaseCloud({ token, credentials: () => JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown> }),
   };
@@ -1021,6 +1029,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (problems.length) return { blocked: problems };
   const context = await resolveEngineContext(ctx, project, spec, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
+  // The spec check above reads declarations; where the source database really is comes from its saved record.
+  const copy = environmentSpec!.dataMigration;
+  const copySource = copy?.include.database ? ctx.repos.environments.findByProjectAndName(project.id, copy.fromEnvironment) : undefined;
+  if (copySource && gcpDatabaseOnSharedServer((copySource.platformBindings as { engine?: EngineBinding }).engine)) {
+    return { blocked: [`dataMigration copies the database of ${copySource.name}, which is on the app's shared database server. That is not available yet.`] };
+  }
   const preparation = ctx.repos.projects.findById(project.id) ?? project;
   const environmentProjectId = environmentSpec!.hosting.gcpProjectId;
   if (Object.keys(environmentSpec!.storage ?? {}).length && !isCloudPreparedForStorage(preparation, environmentProjectId)) {
@@ -1082,7 +1096,6 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   // (actions, the connection for workloads, the secret version) and plans no instance, login or removal of its own.
   const placed = await sharedDatabase.plan({
     ...sharedDatabaseTarget(context, project, token), binding: engineBinding, desired: databaseSpec, ...(options.teardown ? { teardown: true } : {}),
-    secret: { id: databaseSecretId, labels },
   });
   if (placed && 'blocked' in placed) return { blocked: [placed.blocked] };
   const boundDatabase = placed ? undefined : gcpDatabaseLocation(context.gcpProjectId, engineBinding);
@@ -1174,7 +1187,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const containers: NonNullable<GcpCloudRunEngineInput['secrets']> = [];
   const adoptSecrets: string[] = [];
   for (const secretId of [...new Set([...desiredIds, ...retainedAliasIds, ...untrackedRetired, ...retiredSecrets])].sort()) {
-    const observed = await observeSecret(token, context.gcpProjectId, secretId);
+    // Only the container's ownership is decided here. What the versions of a placed database's secret hold, including one
+    // Google stored without Hypervibe hearing back, is for the module that writes them: it sets such a version aside.
+    const observed = placed && secretId === databaseSecretId ? await observeSecretContainer(token, context.gcpProjectId, secretId) : await observeSecret(token, context.gcpProjectId, secretId);
     if (observed.state === 'unknown') return { blocked: [observed.reason] };
     if (observed.state === 'present') {
       const ownership = observed.value.containerLabels ?? observed.value.labels;

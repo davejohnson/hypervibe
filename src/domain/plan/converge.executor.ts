@@ -56,7 +56,19 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
     );
   // A database made on the app's existing shared server is a create the person must see, yet it starts no new charge:
   // the server is the billable thing, and its own create is marked so. Only that exact step is exempt.
-  const onExistingSharedServer = action.resource.kind === 'database' && action.metadata?.operation === 'gcpSharedDatabase' && action.metadata?.step === 'allocate';
+  const sharedStep = action.metadata?.operation === 'gcpSharedDatabase' ? String(action.metadata.step) : undefined;
+  const onExistingSharedServer = action.resource.kind === 'database' && sharedStep === 'allocate' && action.metadata?.engineSegment === undefined;
+  if (sharedStep !== undefined) {
+    // Confirmation follows what an action is shown as, and apply runs its step: the two must agree, so a saved plan
+    // can never present a deletion as an update or a new server as free.
+    const destroys = sharedStep === 'release' || sharedStep === 'remove-server';
+    const types: Record<string, string[]> = { server: ['create'], allocate: ['create', 'update'], rotate: ['update'], retire: ['update'], release: ['destroy'], 'unprotect-server': ['update'], 'remove-server': ['destroy'] };
+    const honest = action.resource.kind === 'database' && action.metadata?.engineSegment === undefined && (types[sharedStep] ?? []).includes(action.type)
+      && (!destroys || (action.dataBearing === true && action.requiresConfirm === true))
+      && (sharedStep !== 'unprotect-server' || action.requiresConfirm === true)
+      && (sharedStep !== 'server' || (action.billable === true && action.requiresConfirm === true));
+    if (!honest) ctx.addIssue({ code: 'custom', path: ['metadata', 'step'], message: 'A shared database step must be shown as what it does.' });
+  }
   if (billableDataResource && action.type === 'create' && action.billable !== true && !onExistingSharedServer) {
     ctx.addIssue({
       code: 'custom',

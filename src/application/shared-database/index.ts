@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { GcpDatabaseConnection } from '../../adapters/providers/gcp/tofu/gcp-database-connection.js';
 import type { ActionResult } from '../../domain/plan/converge.executor.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
@@ -38,6 +39,8 @@ export interface SharedDatabaseRequest {
   region: string;
   /** The environment's saved engine binding, as it is now. */
   binding: GcpDatabaseBinding | undefined;
+  /** The environment's own connection secret (DATABASE_URL) and its ownership labels, worked out by the caller each time, never taken from a saved plan. */
+  secret: { id: string; labels: Record<string, string> };
   /** The connection secret version each of the environment's services and jobs runs now. Asked only when a rotation is finishing. */
   runningSecretVersions: RunningSecretVersions;
   engine: SharedDatabaseEngine;
@@ -48,8 +51,6 @@ export interface SharedDatabasePlanRequest extends SharedDatabaseRequest {
   /** The environment's database spec; absent when the database is being removed or the environment torn down. */
   desired: EnvironmentSpec['database'];
   teardown?: boolean;
-  /** The environment's own connection secret (DATABASE_URL) and its ownership labels. */
-  secret: { id: string; labels: Record<string, string> };
 }
 
 export interface SharedDatabasePlan {
@@ -256,7 +257,7 @@ async function planServerRemoval(request: SharedServerRequest): Promise<SharedSe
 }
 
 type Applying = Pick<SharedDatabaseApplyRequest, 'action' | 'reviewed' | 'project' | 'gcpProjectId' | 'region' | 'engine' | 'cloud'>
-  & Partial<Pick<SharedDatabaseApplyRequest, 'environment' | 'binding' | 'record' | 'runningSecretVersions'>>;
+  & Partial<Pick<SharedDatabaseApplyRequest, 'environment' | 'binding' | 'record' | 'runningSecretVersions' | 'secret'>>;
 
 async function run(request: Applying, serverSteps: boolean): Promise<ActionResult> {
   const metadata = request.action.metadata as unknown as StepMetadata | undefined;
@@ -266,6 +267,14 @@ async function run(request: Applying, serverSteps: boolean): Promise<ActionResul
   if (metadata?.operation !== SHARED_DATABASE_OPERATION || metadata.gcpProjectId !== scope.gcpProjectId || metadata.region !== scope.region
     || !reviewed || typeof reviewed !== 'object' || reviewed.instanceName !== metadata.instanceName || removal !== serverSteps) {
     return { success: false, status: 'blocked', message: 'The shared database target changed since this plan. Run hv_plan again.' };
+  }
+  // Where a login is published is decided now, from the environment itself. A saved action that names another secret or owner is refused.
+  if (metadata.secretId !== undefined || metadata.labels !== undefined) {
+    if (!request.secret || metadata.secretId !== request.secret.id || !isDeepStrictEqual(metadata.labels, request.secret.labels)) {
+      return { success: false, status: 'blocked', message: 'The secret this plan would publish to is not this environment\'s own. Nothing was changed. Run hv_plan again.' };
+    }
+    metadata.secretId = request.secret.id;
+    metadata.labels = request.secret.labels;
   }
   return runStep({ cloud: request.cloud, engine: request.engine, scope, environment: request.environment ?? { id: '', name: '' }, binding: request.binding,
     record: request.record ?? (() => {}), runningSecretVersions: request.runningSecretVersions ?? (async () => ({ blocked: 'No workloads to check.' })),

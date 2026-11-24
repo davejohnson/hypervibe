@@ -156,9 +156,8 @@ const cloud: SharedDatabaseCloud = {
 const bindings = new Map<string, GcpDatabaseBinding>();
 let running: string[] = [];
 const target = (environment: { id: string; name: string }) => ({ project, environment, gcpProjectId: GCP, region: REGION, binding: bindings.get(environment.id), engine, cloud,
-  runningSecretVersions: async () => ({ versions: running }) });
-const planFor = (environment: { id: string; name: string }, desired: SharedDatabasePlanRequest['desired'], more: Partial<SharedDatabasePlanRequest> = {}) => sharedDatabase.plan({
-  ...target(environment), desired, secret: { id: secretIdOf(environment), labels: labelsOf(environment) }, ...more });
+  secret: { id: secretIdOf(environment), labels: labelsOf(environment) }, runningSecretVersions: async () => ({ versions: running }) });
+const planFor = (environment: { id: string; name: string }, desired: SharedDatabasePlanRequest['desired'], more: Partial<SharedDatabasePlanRequest> = {}) => sharedDatabase.plan({ ...target(environment), desired, ...more });
 const shared = { provider: 'cloudsql', engine: 'postgres', placement: 'app' } as NonNullable<SharedDatabasePlanRequest['desired']>;
 const planned = async (work: ReturnType<typeof planFor>): Promise<SharedDatabasePlan> => {
   const result = await work;
@@ -420,8 +419,21 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     bindings.delete(intruder.id);
   });
 
+  it('publishes a login only to the environment\'s own secret, whatever the saved action says', async () => {
+    const rotate = await planned(planFor(staging, { ...shared, passwordGeneration: 4 }));
+    const action = rotate.actions[0]!;
+    const before = google.connectionSecrets.get(secretIdOf(production))!.versions.length;
+    for (const forged of [{ secretId: secretIdOf(production) }, { labels: labelsOf(production) }, { secretId: secretIdOf(production), labels: labelsOf(production) }]) {
+      const result = await applyOne(staging, { ...action, metadata: { ...action.metadata, ...forged } }, rotate.reviewed);
+      expect(result).toMatchObject({ success: false, status: 'blocked' });
+      expect(result.message).toMatch(/not this environment's own/);
+    }
+    expect(google.connectionSecrets.get(secretIdOf(production))!.versions).toHaveLength(before);
+    expect(record(staging).activeLogin).toBe(google.connectionSecrets.get(secretIdOf(staging))!.labels['hv-db-login']);
+  });
+
   it('refuses to move a database between its own server and the shared one, or to migrate one', async () => {
-    expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { database: { instanceName: 'hv-production-db-a1b2c3' } }, desired: shared, secret: { id: 'x', labels: {} } })))
+    expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { database: { instanceName: 'hv-production-db-a1b2c3' } }, desired: shared })))
       .toMatch(/already has a database server of its own\. Moving an existing database onto the app's shared server is not available yet/);
     expect(await refusal(planFor(production, { provider: 'cloudsql', engine: 'postgres' }))).toMatch(/Moving it to a server of its own is not available yet/);
     expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { ...bindings.get(production.id), migration: { copiedAt: 'now' } } as never, desired: shared,
