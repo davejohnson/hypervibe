@@ -23,7 +23,6 @@ export const ADMINISTRATOR_LOGIN = 'hv_admin';
 export const MAINTENANCE_DATABASE = 'postgres';
 export const SHARED_SERVER_MAJOR_VERSION = 16;
 const SERVER_ADDRESS = 'google_sql_database_instance.shared';
-const ADMINISTRATOR_SECRET_ADDRESS = 'google_secret_manager_secret.shared_administrator';
 /** Daily backups and days of point-in-time recovery a new server starts with: what a dedicated production database gets. */
 const RETAINED_BACKUPS = 14;
 const TRANSACTION_LOG_DAYS = 7;
@@ -44,10 +43,6 @@ export function newSharedServerName(projectName: string): string {
   return `hv-${slug}-shared-${crypto.randomBytes(3).toString('hex')}`;
 }
 
-export function administratorSecretId(instanceName: string): string {
-  return `hv-shared-database-admin-${instanceName}`;
-}
-
 export type FoundServer = { state: 'absent' } | { state: 'present'; server: SeenServer } | { state: 'unclear'; reason: string };
 
 /**
@@ -62,21 +57,19 @@ export function findSharedServer(servers: SeenServer[], scope: SharedServerScope
 }
 
 /**
- * The server and the empty container for its administrator password. The
- * password itself is generated and stored by Hypervibe outside OpenTofu.
- * Same network posture as an environment's own instance; deletion protection
- * is always on because other environments' data may be on it.
+ * The server, and nothing else: no login, password or database is ever in this
+ * configuration. Same network posture as an environment's own instance;
+ * deletion protection is on because other environments' data may be on it.
+ *
+ * `adopt` takes over a server Hypervibe itself began creating that saved state
+ * does not track: OpenTofu reads the import from its own file.
  */
-export function sharedServerConfiguration(params: { scope: SharedServerScope; instanceName: string; adopt?: { server?: boolean; administratorSecret?: boolean };
+export function sharedServerConfiguration(params: { scope: SharedServerScope; instanceName: string; adopt?: boolean;
   /** False only while an empty server is being removed. */
   protect?: boolean }): EngineConfiguration {
   const { scope, instanceName } = params;
   if (!/^[a-z][a-z0-9-]{0,96}[a-z0-9]$/.test(instanceName)) throw new Error('The shared database server name is invalid.');
-  const labels = sharedServerLabels(scope);
-  const secretId = administratorSecretId(instanceName);
-  const imports: Record<string, string> = {};
-  if (params.adopt?.server) imports[SERVER_ADDRESS] = `projects/${scope.gcpProjectId}/instances/${instanceName}`;
-  if (params.adopt?.administratorSecret) imports[ADMINISTRATOR_SECRET_ADDRESS] = `projects/${scope.gcpProjectId}/secrets/${secretId}`;
+  const imports = params.adopt ? { [SERVER_ADDRESS]: `projects/${scope.gcpProjectId}/instances/${instanceName}` } : undefined;
   return {
     files: {
       'shared-database.tf.json': {
@@ -95,25 +88,22 @@ export function sharedServerConfiguration(params: { scope: SharedServerScope; in
               ip_configuration: [{ ipv4_enabled: true }],
               backup_configuration: [{ enabled: true, point_in_time_recovery_enabled: true, transaction_log_retention_days: TRANSACTION_LOG_DAYS,
                 backup_retention_settings: [{ retained_backups: RETAINED_BACKUPS, retention_unit: 'COUNT' }] }],
-              user_labels: labels,
+              user_labels: sharedServerLabels(scope),
             }],
-          } },
-          google_secret_manager_secret: { shared_administrator: {
-            project: scope.gcpProjectId, secret_id: secretId, labels, replication: [{ auto: [{}] }], deletion_protection: false,
           } },
         },
       },
+      ...(imports ? { 'imports.tf.json': { import: Object.entries(imports).map(([to, id]) => ({ to, id })) } } : {}),
     },
     resources: {
-      [SERVER_ADDRESS]: { actionId: 'shared-database-server:instance', kind: 'database', name: instanceName, dataBearing: true, billable: true,
+      [SERVER_ADDRESS]: { actionId: SERVER_ENGINE_ACTION, kind: 'database', name: instanceName, dataBearing: true, billable: true,
         costAttributes: ['settings.*.tier', 'settings.*.disk_size', 'settings.*.disk_type', 'settings.*.availability_type', 'settings.*.edition'] },
-      [ADMINISTRATOR_SECRET_ADDRESS]: { actionId: 'shared-database-server:administrator-secret', kind: 'secret', name: secretId, dataBearing: true },
     },
-    ...(Object.keys(imports).length ? { imports } : {}),
+    ...(imports ? { imports } : {}),
   };
 }
 
-export const SERVER_ENGINE_ACTIONS = { server: 'shared-database-server:instance', administratorSecret: 'shared-database-server:administrator-secret' } as const;
+export const SERVER_ENGINE_ACTION = 'shared-database-server:instance';
 
 /** The server's price, said once for the whole app. The figure is the same approximate list price quoted for the smallest dedicated database. */
 export function sharedServerCost(): string {

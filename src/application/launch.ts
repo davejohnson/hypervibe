@@ -1,5 +1,5 @@
 import { browserApprovedRunActions } from './browser-approved-run.js';
-import { environmentDomains } from '../domain/services/infrastructure-engine-selection.js';
+import { environmentDomains, sharedDatabaseSpecProblems } from '../domain/services/infrastructure-engine-selection.js';
 import { effectiveBranchCiAutoDeploy } from '../domain/spec/spec.schema.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import { createHash } from 'node:crypto';
@@ -467,6 +467,10 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       if (connected.status !== 'connected') return { status: 'needs_connection', provider: 'cloudflare', ...(connected.url ? { url: connected.url } : {}), message: connected.message };
     }
   }
+
+  // Refused before any access is requested: a grant must never be approved for something the plan will then turn down.
+  const sharedDatabaseProblems = sharedDatabaseSpecProblems(params.spec, params.environmentName);
+  if (sharedDatabaseProblems.length) return { status: 'blocked', message: sharedDatabaseProblems.join(' ') };
 
   // Each access approval applies its saved engine preview; never refresh that
   // preview between the user's approval and application.

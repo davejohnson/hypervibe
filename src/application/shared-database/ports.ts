@@ -23,6 +23,11 @@ export interface SeenConnectionSecret {
   labels: Record<string, string>;
   hasEnabledVersion: boolean;
   latestVersion?: string;
+  /**
+   * The latest version is one Hypervibe has no record of: a write that Google accepted and Hypervibe never heard back
+   * about. Nothing is known about what it holds, so it is never treated as a working credential.
+   */
+  unrecorded?: boolean;
 }
 
 export interface SqlSession {
@@ -34,11 +39,8 @@ export interface SqlTarget { connectionName: string; user: string; password: str
 export interface SharedDatabaseCloud {
   /** Every database server in the Google project. Never a partial list: anything short of the whole answer is `unknown`. */
   listServers(gcpProjectId: string): Promise<{ state: 'listed'; servers: SeenServer[] } | { state: 'unknown'; reason: string }>;
-  /** Creates a built-in login on the server, or gives an existing one a new password. Undefined when done. */
+  /** Creates a built-in login on the server, or gives an existing one a new password. Undefined when done; `pending` when the server is busy with another change. */
   setServerLogin(gcpProjectId: string, instanceName: string, login: string, password: string): Promise<ActionResult | undefined>;
-  readAdministratorSecret(gcpProjectId: string, secretId: string): Promise<Seen<{ labels: Record<string, string>; value?: string }>>;
-  /** Undefined when stored. */
-  writeAdministratorSecret(gcpProjectId: string, secretId: string, value: string): Promise<ActionResult | undefined>;
   /** The environment's own connection secret (DATABASE_URL). */
   observeConnectionSecret(gcpProjectId: string, secretId: string): Promise<Seen<SeenConnectionSecret>>;
   /** Stores a new version with what Hypervibe records about it. Undefined when stored. */

@@ -32,7 +32,7 @@ import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-dedicated-database.js';
-import { gcpDatabaseLocation, gcpDatabaseOnSharedServer, gcpDatabasePlanBlocker, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
+import { gcpDatabaseLocation, gcpDatabasePlanBlocker, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
 import { googleSharedDatabaseCloud, sharedDatabase, type SharedDatabaseEngine } from './shared-database/index.js';
 import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
@@ -715,7 +715,9 @@ export async function planDatabaseCredential(params: {
 /** The DATABASE_URL secret version each bound service currently runs. */
 async function pinnedDatabaseVersions(token: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'environment'>): Promise<{ versions: string[] } | { blocked: string }> {
   const versions: string[] = [];
-  for (const workload of boundWorkloads(context.environment)) {
+  const releaseJob = (context.environment.platformBindings as { engine?: EngineBinding }).engine?.releaseJob;
+  // The release job runs migrations with the same connection secret, so it counts like any service.
+  for (const workload of [...boundWorkloads(context.environment), ...(releaseJob ? [{ name: 'release-command', kind: 'jobs' as const, resource: releaseJob }] : [])]) {
     const observed = await cloudRunGet(token, context.gcpProjectId, context.region, workload.resource, workload.kind);
     if (observed.state === 'unknown') return { blocked: observed.reason };
     if (observed.state === 'absent') continue;
@@ -825,6 +827,7 @@ function sharedDatabaseTarget(context: EngineContext, project: Project, token: s
   return {
     project: { id: project.id, name: project.name }, environment: { id: context.environment.id, name: context.environment.name },
     gcpProjectId: context.gcpProjectId, region: context.region, engine: boundEngine(context.auth),
+    runningSecretVersions: () => pinnedDatabaseVersions(token, context),
     cloud: googleSharedDatabaseCloud({ token, credentials: () => JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown> }),
   };
 }
@@ -894,9 +897,7 @@ export async function observeStorageS3Access(token: string, context: EngineConte
 /** Adds what only a teardown does to the ordinary plan: empty each bucket first, and finish by checking nothing is left. */
 function gcpTeardownActions(planned: PlanAction[], context: EngineContext, environmentName: string, binding: EngineBinding): PlanAction[] {
   // The cleanup confirms the instance this environment owns is gone, so it reads the environment's own project.
-  // A database on the app's shared server is not an instance of this environment's: that server stays, and the
-  // database's own removal step (which the cleanup waits for) is what proves it gone.
-  const boundDatabase = gcpDatabaseOnSharedServer(binding) ? undefined : gcpDatabaseLocation(context.gcpProjectId, binding);
+  const boundDatabase = gcpDatabaseLocation(context.gcpProjectId, binding);
   const bucketOf = (name: string) => engineBucketName(context.gcpProjectId, environmentName, name);
   const removed = planned.filter((action) => action.id.startsWith('storage:') && action.type === 'destroy');
   const empties: PlanAction[] = removed.map((action) => ({
@@ -1081,8 +1082,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   // (actions, the connection for workloads, the secret version) and plans no instance, login or removal of its own.
   const placed = await sharedDatabase.plan({
     ...sharedDatabaseTarget(context, project, token), binding: engineBinding, desired: databaseSpec, ...(options.teardown ? { teardown: true } : {}),
-    countsPendingWork: Object.values(environmentSpec!.services).some((service) => service.workloadKind === 'worker' && Boolean(service.onDemand)),
-    secret: { id: databaseSecretId, labels }, runningSecretVersions: () => pinnedDatabaseVersions(token, context),
+    secret: { id: databaseSecretId, labels },
   });
   if (placed && 'blocked' in placed) return { blocked: [placed.blocked] };
   const boundDatabase = placed ? undefined : gcpDatabaseLocation(context.gcpProjectId, engineBinding);
@@ -1484,7 +1484,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     metadata: { operation: 'gcpRetainDatabaseAliasImports', gcpProjectId: context.gcpProjectId, keys: importBinding.retainedDatabaseAliasImports },
   }];
   const ordinary = [...retireImports, ...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...placedActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
-  const actions = options.teardown ? gcpTeardownActions(ordinary, context, environmentName, engineBinding) : ordinary;
+  // A database placed elsewhere is not an instance of this environment's to find gone: its own removal step, which the
+  // cleanup waits for like every other change, is the proof.
+  const actions = options.teardown ? gcpTeardownActions(ordinary, context, environmentName, placed ? { ...engineBinding, database: undefined } : engineBinding) : ordinary;
   describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
   describeStorageAutoTieringChanges(serviceActions, environmentSpec!, 'gcp');
   const warnings = [
@@ -1796,13 +1798,10 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         return granted;
       }
       if (sharedDatabase.handles(action)) return applyToTarget(async () => {
+        // Read each time: the step records secret details on the same binding as it goes.
         const bindingNow = () => (ctx.repos.environments.findById(context.environment.id) ?? context.environment).platformBindings as { engine?: EngineBinding };
-        const applied = await sharedDatabase.apply({ ...sharedDatabaseTarget(context, params.project, token), binding: bindingNow().engine, action, reviewed: reviewed.sharedDatabase });
-        // Read again: the step itself may have recorded secret details on the binding.
-        if (applied.binding !== undefined) {
-          ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...bindingNow().engine, kind: 'opentofu', database: applied.binding ?? undefined } });
-        }
-        return applied.result;
+        return sharedDatabase.apply({ ...sharedDatabaseTarget(context, params.project, token), binding: bindingNow().engine, action, reviewed: reviewed.sharedDatabase,
+          record: (database) => ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...bindingNow().engine, kind: 'opentofu', database: database ?? undefined } }) });
       });
       return { success: false, status: 'blocked', message: `No engine-stage authority exists for ${action.id}.` };
     },

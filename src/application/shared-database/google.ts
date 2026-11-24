@@ -1,7 +1,8 @@
 import { sqlAdmin } from '../../adapters/providers/gcp/gcp-data.client.js';
-import { accessLatestSecretVersion, addSecretVersion, readSecretContainer } from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { readSecretContainer } from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { setCloudSqlLoginPassword, withCloudSqlSession } from '../infrastructure-engine-database.js';
 import { observeSecret, recordSecretVersionMetadata, writeSecretVersion } from '../infrastructure-engine.js';
+import { SERVER_BUSY } from './administrator.js';
 import type { SeenServer, SharedDatabaseCloud } from './ports.js';
 
 interface ListedInstance { name?: string; region?: string; state?: string; settings?: { userLabels?: Record<string, string>; deletionProtectionEnabled?: boolean } }
@@ -25,7 +26,9 @@ export function googleSharedDatabaseCloud(access: { token: string; credentials: 
           return { state: 'unknown', reason: 'Google could not be reached to list this project\'s database servers. Nothing was planned; try again.' };
         }
         if (!response.ok) return { state: 'unknown', reason: `Google did not list this project's database servers (HTTP ${response.status}). Nothing was planned.` };
-        const body = await response.json() as { items?: ListedInstance[]; nextPageToken?: string };
+        const body = await response.json() as { items?: ListedInstance[]; nextPageToken?: string; warnings?: unknown[] };
+        // Google answers 200 with warnings when a region could not be reached: the list is then not the whole list.
+        if (Array.isArray(body.warnings) && body.warnings.length) return { state: 'unknown', reason: 'Google could not reach every region while listing this project\'s database servers, so the list may be incomplete. Nothing was planned; try again.' };
         for (const item of body.items ?? []) {
           if (typeof item.name !== 'string' || typeof item.region !== 'string') return { state: 'unknown', reason: 'Google listed a database server without a name or region. Nothing was planned.' };
           servers.push({ instanceName: item.name, region: item.region, runnable: item.state === 'RUNNABLE', deletionProtection: item.settings?.deletionProtectionEnabled !== false, labels: item.settings?.userLabels ?? {} });
@@ -41,35 +44,28 @@ export function googleSharedDatabaseCloud(access: { token: string; credentials: 
       if (!users.ok) return { success: false, status: 'blocked', message: `Listing the shared database server's logins returned HTTP ${users.status}.` };
       const exists = ((await users.json() as { items?: Array<{ name?: string }> }).items ?? []).some((item) => item.name === login);
       const set = await setCloudSqlLoginPassword(token, gcpProjectId, instanceName, login, password, exists);
-      return set === 'done' ? undefined : set;
-    },
-
-    async readAdministratorSecret(gcpProjectId, secretId) {
-      const container = await readSecretContainer(token, gcpProjectId, secretId);
-      if (container.state !== 'present') return container;
-      if (!container.value.hasEnabledVersion) return { state: 'present', value: { labels: container.value.labels } };
-      const response = await accessLatestSecretVersion(token, gcpProjectId, secretId);
-      if (!response.ok) return { state: 'unknown', reason: `Reading the shared database server's administrator secret returned HTTP ${response.status}.` };
-      const data = (await response.json() as { payload?: { data?: string } }).payload?.data;
-      if (!data) return { state: 'unknown', reason: 'The shared database server\'s administrator secret came back empty.' };
-      return { state: 'present', value: { labels: container.value.labels, value: Buffer.from(data, 'base64').toString('utf8') } };
-    },
-
-    async writeAdministratorSecret(gcpProjectId, secretId, value) {
-      let added: Response;
-      try {
-        added = await addSecretVersion(token, gcpProjectId, secretId, value);
-      } catch {
-        return { success: false, status: 'pending', message: 'Saving the shared database server\'s administrator password has an unknown outcome. Run the same command again; a new one is set if it was not saved.' };
-      }
-      return added.ok ? undefined : { success: false, message: `Saving the shared database server's administrator password failed (HTTP ${added.status}).`, error: `HTTP ${added.status}` };
+      if (set === 'done') return undefined;
+      // Cloud SQL runs one change per server at a time; a second one is turned away, not queued.
+      return set.error === 'HTTP 409' ? { success: false, status: 'pending', message: SERVER_BUSY } : set;
     },
 
     async observeConnectionSecret(gcpProjectId, secretId) {
-      const seen = await observeSecret(token, gcpProjectId, secretId);
-      if (seen.state !== 'present') return seen;
-      const { labels, hasEnabledVersion, latestVersion } = seen.value;
-      return { state: 'present', value: { labels, hasEnabledVersion, ...(latestVersion ? { latestVersion } : {}) } };
+      const recorded = async () => {
+        const seen = await observeSecret(token, gcpProjectId, secretId);
+        if (seen.state !== 'present') return seen;
+        const { labels, hasEnabledVersion, latestVersion } = seen.value;
+        return { state: 'present' as const, value: { labels, hasEnabledVersion, ...(latestVersion ? { latestVersion } : {}) } };
+      };
+      const seen = await recorded();
+      if (seen.state !== 'unknown') return seen;
+      // "Unknown" also covers a version Google stored and Hypervibe never recorded. Tell that apart from a failed read:
+      // the container itself must be readable, and the recorded view must still be unknown when asked again.
+      const container = await readSecretContainer(token, gcpProjectId, secretId);
+      const version = container.state === 'present' ? container.value.latestVersionName : undefined;
+      if (container.state !== 'present' || !version || !/^[1-9][0-9]*$/.test(version)) return seen;
+      const again = await recorded();
+      if (again.state !== 'unknown') return again;
+      return { state: 'present', value: { labels: container.value.labels, hasEnabledVersion: container.value.hasEnabledVersion, latestVersion: version, unrecorded: true } };
     },
 
     publishConnectionSecret: (gcpProjectId, secretId, labels, value) => writeSecretVersion(token, gcpProjectId, secretId, labels, value),

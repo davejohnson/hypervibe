@@ -46,54 +46,54 @@ const labelsOf = (environment: { id: string }) => ({ 'managed-by': 'hypervibe', 
 /** What the fakes hold in place of Google. */
 const google = {
   servers: [] as SeenServer[],
-  administratorSecrets: new Map<string, { labels: Record<string, string>; value?: string }>(),
-  connectionSecrets: new Map<string, { labels: Record<string, string>; versions: string[] }>(),
+  connectionSecrets: new Map<string, { labels: Record<string, string>; versions: string[]; unrecorded?: boolean }>(),
   engineState: new Map<string, Set<string>>(),
   plans: new Map<string, { configuration: EngineConfiguration; destroy: boolean }>(),
+  enginePlans: 0,
   engineApplies: 0,
-  failNextPublish: false,
+  administratorPasswords: [] as string[],
+  /** 'refused': the write never reaches Google. 'lost': Google stores it and the answer is lost. */
+  nextPublish: undefined as 'refused' | 'lost' | undefined,
+  refuseAdministratorOnce: false,
   statements: [] as string[],
 };
 
 const stateKey = (state: { projectId: string; environmentId: string; partition: string }) => `${state.projectId}/${state.environmentId}/${state.partition}`;
-const instanceOf = (configuration: EngineConfiguration) => {
-  const file = Object.values(configuration.files)[0] as { resource: { google_sql_database_instance: { shared: { name: string; region: string; settings: Array<{ deletion_protection_enabled: boolean; user_labels: Record<string, string> }> } };
-    google_secret_manager_secret: { shared_administrator: { secret_id: string; labels: Record<string, string> } } } };
-  return { instance: file.resource.google_sql_database_instance.shared, secret: file.resource.google_secret_manager_secret.shared_administrator };
-};
+const instanceOf = (configuration: EngineConfiguration) => (configuration.files['shared-database.tf.json'] as { resource: { google_sql_database_instance: {
+  shared: { name: string; region: string; settings: Array<{ deletion_protection_enabled: boolean; user_labels: Record<string, string> }> } } } }).resource.google_sql_database_instance.shared;
+const ADDRESS = 'google_sql_database_instance.shared';
 
-/** Plans a create for each address not in saved state, a takeover for each import, and an update when protection differs. */
+/** Plans what OpenTofu would: a create when saved state has no server, a takeover for an import, an update when protection differs. */
 const engine: SharedDatabaseEngine = {
   async plan(configuration, state, planId, destroy) {
+    google.enginePlans++;
     const known = google.engineState.get(stateKey(state)) ?? new Set<string>();
     google.plans.set(planId, { configuration, destroy: destroy === true });
-    const { instance } = instanceOf(configuration);
+    const instance = instanceOf(configuration);
     const live = google.servers.find((server) => server.instanceName === instance.name);
-    const actions: PlanAction[] = Object.entries(configuration.resources).map(([address, mapping]) => {
-      const imported = Boolean(configuration.imports?.[address]);
-      const reprotect = address.startsWith('google_sql') && live !== undefined && live.deletionProtection !== instance.settings[0]!.deletion_protection_enabled;
-      const type = destroy ? (known.has(address) ? 'destroy' : 'noop') : !known.has(address) && !imported ? 'create' : imported || reprotect ? 'update' : 'noop';
-      return { id: mapping.actionId, type, resource: { kind: mapping.kind, name: mapping.name, provider: 'gcp' }, verified: true, reason: 'engine',
-        metadata: { engineSegment: { id: `opentofu:${planId}`, engine: 'opentofu', planDigest: 'digest', configurationDigest: 'digest', engineVersion: '1', providerVersions: {}, addresses: [address] } } };
-    });
-    return { ok: true, actions, blockers: [], segment: { id: `opentofu:${planId}`, engine: 'opentofu', planDigest: 'digest', configurationDigest: 'digest', engineVersion: '1', providerVersions: {} } };
+    // OpenTofu reads imports from the configuration's own file, not from Hypervibe's notes about it.
+    const imported = JSON.stringify(configuration.files['imports.tf.json'] ?? {}).includes(`"to":"${ADDRESS}"`);
+    const reprotect = live !== undefined && live.deletionProtection !== instance.settings[0]!.deletion_protection_enabled;
+    const mapping = configuration.resources[ADDRESS]!;
+    const type = destroy ? (known.has(ADDRESS) ? 'destroy' : 'noop') : !known.has(ADDRESS) && !imported ? 'create' : imported || reprotect ? 'update' : 'noop';
+    const segment = { id: `opentofu:${planId}`, engine: 'opentofu' as const, planDigest: 'digest', configurationDigest: 'digest', engineVersion: '1', providerVersions: {} };
+    return { ok: true, blockers: [], segment,
+      actions: [{ id: mapping.actionId, type, resource: { kind: mapping.kind, name: mapping.name, provider: 'gcp' }, verified: true, reason: 'engine', metadata: { engineSegment: { ...segment, addresses: [ADDRESS] } } }] };
   },
   async apply(state, planId, segment) {
     google.engineApplies++;
     const saved = google.plans.get(planId)!;
     const known = google.engineState.get(stateKey(state)) ?? new Set<string>();
     google.engineState.set(stateKey(state), known);
-    const { instance, secret } = instanceOf(saved.configuration);
+    const instance = instanceOf(saved.configuration);
     if (saved.destroy) {
       google.servers = google.servers.filter((server) => server.instanceName !== instance.name);
-      google.administratorSecrets.delete(secret.secret_id);
       known.clear();
     } else {
-      for (const address of segment.addresses) known.add(address);
+      known.add(ADDRESS);
       const live = google.servers.find((server) => server.instanceName === instance.name);
       const seen = { instanceName: instance.name, region: instance.region, runnable: true, deletionProtection: instance.settings[0]!.deletion_protection_enabled, labels: instance.settings[0]!.user_labels };
       if (live) Object.assign(live, seen); else google.servers.push(seen);
-      if (!google.administratorSecrets.has(secret.secret_id)) google.administratorSecrets.set(secret.secret_id, { labels: secret.labels });
     }
     return { outcomes: Object.fromEntries(segment.addresses.map((address) => [address, 'succeeded' as const])), diagnostics: [] };
   },
@@ -103,30 +103,28 @@ const cloud: SharedDatabaseCloud = {
   listServers: async () => ({ state: 'listed', servers: google.servers.map((server) => ({ ...server })) }),
   async setServerLogin(_project, _instance, login, password) {
     // Google's API creates a login that may create roles and databases but is no superuser.
+    google.administratorPasswords.push(password);
     const exists = (await boot.query('SELECT 1 FROM pg_roles WHERE rolname = $1', [login])).rows.length === 1;
     await boot.query(`${exists ? 'ALTER' : 'CREATE'} ROLE ${login} LOGIN CREATEROLE CREATEDB PASSWORD '${password}'`);
-    return undefined;
-  },
-  async readAdministratorSecret(_project, secretId) {
-    const secret = google.administratorSecrets.get(secretId);
-    return secret ? { state: 'present', value: { ...secret } } : { state: 'absent' };
-  },
-  async writeAdministratorSecret(_project, secretId, value) {
-    google.administratorSecrets.get(secretId)!.value = value;
     return undefined;
   },
   async observeConnectionSecret(_project, secretId) {
     const secret = google.connectionSecrets.get(secretId);
     if (!secret) return { state: 'absent' };
-    return { state: 'present', value: { labels: secret.labels, hasEnabledVersion: secret.versions.length > 0, ...(secret.versions.length ? { latestVersion: String(secret.versions.length) } : {}) } };
+    return { state: 'present', value: { labels: secret.unrecorded ? labelsOf({ id: secret.labels['hv-environment']! }) : secret.labels, hasEnabledVersion: secret.versions.length > 0,
+      ...(secret.versions.length ? { latestVersion: String(secret.versions.length) } : {}), ...(secret.unrecorded ? { unrecorded: true } : {}) } };
   },
   async publishConnectionSecret(_project, secretId, labels, value) {
-    if (google.failNextPublish) {
-      google.failNextPublish = false;
+    const secret = google.connectionSecrets.get(secretId)!;
+    const mode = google.nextPublish;
+    google.nextPublish = undefined;
+    if (mode === 'refused') return { success: false, status: 'pending', message: 'The value was not stored.' } satisfies ActionResult;
+    if (secret.unrecorded) return { success: false, status: 'blocked', message: 'The secret has an unrecognized version.' } satisfies ActionResult;
+    secret.versions.push(value);
+    if (mode === 'lost') {
+      secret.unrecorded = true;
       return { success: false, status: 'pending', message: 'The value write has an unknown outcome.' } satisfies ActionResult;
     }
-    const secret = google.connectionSecrets.get(secretId)!;
-    secret.versions.push(value);
     secret.labels = labels;
     return undefined;
   },
@@ -134,10 +132,15 @@ const cloud: SharedDatabaseCloud = {
     const secret = google.connectionSecrets.get(secretId)!;
     if (String(secret.versions.length) !== version) return false;
     secret.labels = labels;
+    secret.unrecorded = false;
     return true;
   },
   async withSession(target, work) {
     if (!google.servers.some((server) => target.connectionName === `${GCP}:${REGION}:${server.instanceName}`)) throw new Error(`no such server: ${target.connectionName}`);
+    if (target.user === 'hv_admin' && google.refuseAdministratorOnce) {
+      google.refuseAdministratorOnce = false;
+      throw Object.assign(new Error(`password authentication failed for user "hv_admin" (${target.password})`), { code: '28P01' });
+    }
     const client = new pg.Client({ host: socket, user: target.user, password: target.password, database: target.database, connectionTimeoutMillis: 10_000 });
     client.on('error', () => {});
     await client.connect();
@@ -151,12 +154,11 @@ const cloud: SharedDatabaseCloud = {
 
 /** The environment's saved binding, as the planner would keep it. */
 const bindings = new Map<string, GcpDatabaseBinding>();
-const target = (environment: { id: string; name: string }) => ({ project, environment, gcpProjectId: GCP, region: REGION, binding: bindings.get(environment.id), engine, cloud });
 let running: string[] = [];
+const target = (environment: { id: string; name: string }) => ({ project, environment, gcpProjectId: GCP, region: REGION, binding: bindings.get(environment.id), engine, cloud,
+  runningSecretVersions: async () => ({ versions: running }) });
 const planFor = (environment: { id: string; name: string }, desired: SharedDatabasePlanRequest['desired'], more: Partial<SharedDatabasePlanRequest> = {}) => sharedDatabase.plan({
-  ...target(environment), desired, countsPendingWork: false, secret: { id: secretIdOf(environment), labels: labelsOf(environment) },
-  runningSecretVersions: async () => ({ versions: running }), ...more,
-});
+  ...target(environment), desired, secret: { id: secretIdOf(environment), labels: labelsOf(environment) }, ...more });
 const shared = { provider: 'cloudsql', engine: 'postgres', placement: 'app' } as NonNullable<SharedDatabasePlanRequest['desired']>;
 const planned = async (work: ReturnType<typeof planFor>): Promise<SharedDatabasePlan> => {
   const result = await work;
@@ -164,21 +166,22 @@ const planned = async (work: ReturnType<typeof planFor>): Promise<SharedDatabase
   return result;
 };
 const refusal = async (work: Promise<unknown>) => ((await work) as { blocked?: string } | undefined)?.blocked ?? 'not blocked';
-/** Applies every action of a plan in order and records what the module says to save, as the planner does. */
+const applyOne = (environment: { id: string; name: string }, action: PlanAction, reviewed: unknown) => sharedDatabase.apply({ ...target(environment), action, reviewed,
+  record: (database) => { if (database) bindings.set(environment.id, { database }); else bindings.delete(environment.id); } });
+/** Applies every action of a plan in order, as the planner does. */
 async function applyAll(environment: { id: string; name: string }, plan: { actions: PlanAction[]; reviewed: Record<string, unknown> }): Promise<ActionResult[]> {
   const results: ActionResult[] = [];
   for (const action of plan.actions) {
     expect(sharedDatabase.handles(action)).toBe(true);
-    const applied = await sharedDatabase.apply({ ...target(environment), action, reviewed: plan.reviewed });
-    if (applied.binding === null) bindings.delete(environment.id);
-    else if (applied.binding) bindings.set(environment.id, { database: applied.binding });
-    results.push(applied.result);
-    if (!applied.result.success) break;
+    results.push(await applyOne(environment, action, plan.reviewed));
+    shown.push(results.at(-1));
+    if (!results.at(-1)!.success) break;
   }
   return results;
 }
+const record = (environment: { id: string }) => bindings.get(environment.id)!.database!;
 const latestUrl = (environment: { name: string }) => google.connectionSecrets.get(secretIdOf(environment))!.versions.at(-1)!;
-/** Connects the way a service would, with the URL in the environment's secret; resolves to the database it reached or the PostgreSQL error code. */
+/** Connects the way a service would, with a URL from the environment's secret; resolves to the database it reached or the PostgreSQL error code. */
 async function reach(url: string, database?: string): Promise<string> {
   const parsed = /^postgresql:\/\/([^:]+):([^@]+)@\/([^?]+)\?host=\/cloudsql\/(.+)$/.exec(url)!;
   const client = new pg.Client({ host: socket, user: parsed[1], password: decodeURIComponent(parsed[2]!), database: database ?? parsed[3], connectionTimeoutMillis: 10_000 });
@@ -192,10 +195,16 @@ async function reach(url: string, database?: string): Promise<string> {
     await client.end().catch(() => {});
   }
 }
+const DENIED = ['28P01', '28000'];
 const databases = async () => (await boot.query(`SELECT datname FROM pg_database WHERE datname LIKE 'app\\_%' ORDER BY 1`)).rows.map((row) => String(row.datname));
-const everySecretValue = () => [...[...google.administratorSecrets.values()].map((secret) => secret.value), ...[...google.connectionSecrets.values()].flatMap((secret) => secret.versions)
-  .map((url) => decodeURIComponent(/:([^:@]+)@/.exec(url)![1]!))].filter((value): value is string => Boolean(value));
+const everySecretValue = () => [...google.administratorPasswords, ...[...google.connectionSecrets.values()].flatMap((secret) => secret.versions).map((url) => decodeURIComponent(/:([^:@]+)@/.exec(url)![1]!))];
 const shown: unknown[] = [];
+const serverRequest = { project, gcpProjectId: GCP, region: REGION, engine, cloud };
+const removalStep = async () => {
+  const removal = await sharedDatabase.planServerRemoval(serverRequest);
+  if (!('action' in removal)) throw new Error(`expected a removal step, got ${JSON.stringify(removal)}`);
+  return removal;
+};
 
 beforeAll(async () => {
   directory = mkdtempSync('/tmp/hv-shared-');
@@ -232,10 +241,10 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     expect(await planFor(production, undefined)).toBeUndefined();
     expect(await planFor(production, { provider: 'cloudsql', engine: 'postgres' })).toBeUndefined();
     expect(await planFor(production, { provider: 'cloudsql', engine: 'postgres', placement: 'dedicated' })).toBeUndefined();
-    expect(google.statements).toEqual([]);
+    expect(google.enginePlans).toBe(0);
   });
 
-  it('plans the server once, as the only billable step, and production\'s database on it', async () => {
+  it('plans the server once, as the only billable step, and production\'s database on it, reading no database and setting no password', async () => {
     const plan = await planned(planFor(production, shared));
     shown.push(plan);
     expect(plan.actions.map((action) => [action.id, action.type, action.billable === true, action.requiresConfirm === true])).toEqual([
@@ -247,33 +256,47 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     expect(plan.credential).toEqual({ ready: false });
     expect(plan.warnings.join(' ')).toMatch(/shares one server with this app's other environments/);
     expect(google.statements).toEqual([]);
+    expect(google.administratorPasswords).toEqual([]);
   });
 
-  it('converges when an apply is interrupted after the database exists and before its secret is stored', async () => {
+  it('writes the database down before creating it, so an interrupted apply can be finished or torn down', async () => {
     const first = await planned(planFor(production, shared));
-    google.failNextPublish = true;
+    google.nextPublish = 'refused';
     const results = await applyAll(production, first);
     expect(results.map((result) => result.success)).toEqual([true, false]);
-    expect(bindings.has(production.id)).toBe(false);
-    expect(await databases()).toHaveLength(1);
+    expect(record(production)).toMatchObject({ placement: 'app', tenantId: production.id, allocation: 'started' });
+    expect(record(production).activeLogin).toBeUndefined();
+    expect(gcpDatabasePlanBlocker(GCP, bindings.get(production.id), production.id)).toBeUndefined();
+    expect(await databases()).toEqual([record(production).databaseName]);
 
+    // Torn down from exactly here: the half-made database is found and removed, and the record goes with it.
+    const teardown = await planned(planFor(production, undefined, { teardown: true }));
+    expect(teardown.actions.map((action) => action.id)).toEqual(['shared-database:release']);
+    expect((await applyAll(production, teardown)).map((result) => result.success)).toEqual([true]);
+    expect(await databases()).toEqual([]);
+    expect(bindings.has(production.id)).toBe(false);
+
+    // Started again and interrupted again, then simply run again: it converges on one database.
+    google.nextPublish = 'refused';
+    expect((await applyAll(production, await planned(planFor(production, shared)))).map((result) => result.success)).toEqual([false]);
     const again = await planned(planFor(production, shared));
-    // The server exists now: nothing billable, nothing to confirm.
+    // The server exists now: nothing billable, nothing to confirm, and the engine is not asked about it at all.
+    const enginePlans = google.enginePlans;
     expect(again.actions.map((action) => [action.id, action.type, action.billable === true])).toEqual([['shared-database:allocate', 'create', false]]);
     expect((await applyAll(production, again)).map((result) => result.success)).toEqual([true]);
     expect(await databases()).toHaveLength(1);
-    const record = bindings.get(production.id)!.database!;
-    expect(record).toMatchObject({ gcpProjectId: GCP, region: REGION, placement: 'app', tenantId: production.id, instanceName: google.servers[0]!.instanceName });
-    expect(record.activeLogin).toBe(`${record.databaseName}_a`);
-    expect(gcpDatabasePlanBlocker(GCP, bindings.get(production.id), production.id)).toBeUndefined();
+    expect(record(production)).toEqual({ gcpProjectId: GCP, region: REGION, placement: 'app', tenantId: production.id, instanceName: google.servers[0]!.instanceName,
+      databaseName: record(production).databaseName, activeLogin: `${record(production).databaseName}_a` });
     expect(google.engineApplies).toBe(1);
+    await planned(planFor(production, shared));
+    expect(google.enginePlans).toBe(enginePlans);
   });
 
   it('then has nothing to do, and hands workloads the literal connection and secret version', async () => {
     const plan = await planned(planFor(production, shared));
     expect(plan.actions).toEqual([]);
     expect(plan.connection).toEqual({ connectionName: `${GCP}:${REGION}:${google.servers[0]!.instanceName}`, wireServices: true,
-      workerQuery: { projectId: GCP, instanceName: google.servers[0]!.instanceName, databaseName: bindings.get(production.id)!.database!.databaseName } });
+      workerQuery: { projectId: GCP, instanceName: google.servers[0]!.instanceName, databaseName: record(production).databaseName } });
     expect(plan.credential).toEqual({ ready: true, version: '1' });
   });
 
@@ -286,22 +309,33 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     expect(google.servers).toHaveLength(1);
     expect(google.engineApplies).toBe(1);
     const limits = (await boot.query(`SELECT datname, datconnlimit FROM pg_database WHERE datname LIKE 'app\\_%' ORDER BY 1`)).rows.map((row) => [row.datname, row.datconnlimit]);
-    expect(limits).toEqual([[bindings.get(production.id)!.database!.databaseName, 15], [bindings.get(staging.id)!.database!.databaseName, 5]].sort());
+    expect(limits).toEqual([[record(production).databaseName, 15], [record(staging).databaseName, 5]].sort());
   });
 
   it('each environment\'s secret opens its own database and not the other\'s', async () => {
-    const productionDatabase = bindings.get(production.id)!.database!.databaseName!;
-    const stagingDatabase = bindings.get(staging.id)!.database!.databaseName!;
-    expect(productionDatabase).not.toBe(stagingDatabase);
-    expect(await reach(latestUrl(production))).toBe(productionDatabase);
-    expect(await reach(latestUrl(staging))).toBe(stagingDatabase);
-    expect(await reach(latestUrl(staging), productionDatabase)).toBe('42501');
-    expect(await reach(latestUrl(production), stagingDatabase)).toBe('42501');
+    expect(record(production).databaseName).not.toBe(record(staging).databaseName);
+    expect(await reach(latestUrl(production))).toBe(record(production).databaseName);
+    expect(await reach(latestUrl(staging))).toBe(record(staging).databaseName);
+    expect(await reach(latestUrl(staging), record(production).databaseName)).toBe('42501');
+    expect(await reach(latestUrl(production), record(staging).databaseName)).toBe('42501');
   });
 
-  it('always works as the same administrator, on the maintenance database, with a bounded lock wait', () => {
-    expect([...google.administratorSecrets.keys()]).toEqual([`hv-shared-database-admin-${google.servers[0]!.instanceName}`]);
+  it('keeps no administrator password: each use sets a fresh one, and an older one stops working', async () => {
+    expect(google.administratorPasswords.length).toBeGreaterThan(2);
+    expect(new Set(google.administratorPasswords).size).toBe(google.administratorPasswords.length);
+    const connect = (password: string) => reach(`postgresql://hv_admin:${encodeURIComponent(password)}@/postgres?host=/cloudsql/x`);
+    expect(DENIED).toContain(await connect(google.administratorPasswords[0]!));
+    expect(await connect(google.administratorPasswords.at(-1)!)).toBe('postgres');
     expect(google.statements.some((text) => /set_config\('lock_timeout'/.test(text))).toBe(true);
+  });
+
+  it('reports "run again", not damage, when another apply replaced the administrator password first', async () => {
+    google.refuseAdministratorOnce = true;
+    const rotate = await planned(planFor(staging, { ...shared, passwordGeneration: 2 }));
+    const results = await applyAll(staging, rotate);
+    expect(results[0]).toMatchObject({ success: false, status: 'pending' });
+    expect(results[0]!.message).toMatch(/Another change to the app's shared database server is in progress.*run the same command again/);
+    expect(google.connectionSecrets.get(secretIdOf(staging))!.versions).toHaveLength(1);
   });
 
   it('rotates staging\'s password in two steps without touching production\'s login', async () => {
@@ -313,56 +347,85 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     const after = latestUrl(staging);
     expect(after).not.toBe(before);
     // Both of staging's logins work until its services have moved.
-    expect(await reach(before)).toBe(bindings.get(staging.id)!.database!.databaseName);
-    expect(await reach(after)).toBe(bindings.get(staging.id)!.database!.databaseName);
-    expect(bindings.get(staging.id)!.database!.activeLogin).toBe(`${bindings.get(staging.id)!.database!.databaseName}_b`);
+    expect(await reach(before)).toBe(record(staging).databaseName);
+    expect(await reach(after)).toBe(record(staging).databaseName);
+    expect(record(staging).activeLogin).toBe(`${record(staging).databaseName}_b`);
 
     running = ['1'];
     expect((await planned(planFor(staging, { ...shared, passwordGeneration: 2 }))).actions).toEqual([]);
-    running = ['2'];
+    running = ['2', '2'];
     const retire = await planned(planFor(staging, { ...shared, passwordGeneration: 2 }));
     expect(retire.actions.map((action) => action.id)).toEqual(['shared-database:retire']);
+    // Between review and apply a job is found still on the old version: the old login is left on.
+    running = ['2', '1'];
+    const early = await applyAll(staging, retire);
+    expect(early[0]).toMatchObject({ success: false, status: 'blocked' });
+    expect(early[0]!.message).toMatch(/Not every service and job of staging uses the new database password yet/);
+    expect(await reach(before)).toBe(record(staging).databaseName);
+    running = ['2', '2'];
     expect((await applyAll(staging, retire)).map((result) => result.success)).toEqual([true]);
-    expect(['28P01', '28000']).toContain(await reach(before));
-    expect(await reach(after)).toBe(bindings.get(staging.id)!.database!.databaseName);
+    expect(DENIED).toContain(await reach(before));
+    expect(await reach(after)).toBe(record(staging).databaseName);
     expect((await planned(planFor(staging, { ...shared, passwordGeneration: 2 }))).actions).toEqual([]);
     // Production never noticed.
     expect(latestUrl(production)).toBe(productionUrl);
-    expect(await reach(productionUrl)).toBe(bindings.get(production.id)!.database!.databaseName);
+    expect(await reach(productionUrl)).toBe(record(production).databaseName);
     expect((await planned(planFor(production, shared))).actions).toEqual([]);
   });
 
-  it('blocks a record that is incomplete or was made for another environment', async () => {
-    const record = bindings.get(staging.id)!.database!;
-    expect(gcpDatabasePlanBlocker(GCP, { database: record }, staging.id)).toBeUndefined();
-    expect(gcpDatabasePlanBlocker(GCP, { database: record }, production.id)).toMatch(/different environment/);
-    expect(gcpDatabasePlanBlocker(GCP, { database: record })).toMatch(/different environment/);
-    for (const damaged of [{ ...record, activeLogin: undefined }, { ...record, activeLogin: 'app_other_a' }, { ...record, tenantId: undefined }, { ...record, region: undefined },
-      { ...record, gcpProjectId: 'another-project' }, { ...record, databaseName: 'app' }, { ...record, placement: 'account' as never }]) {
-      expect(gcpDatabasePlanBlocker(GCP, { database: damaged }, staging.id)).toMatch(/incomplete/);
-    }
-    // Handing production's entry staging's record never reaches staging's database.
-    const plan = await planned(planFor(staging, shared));
-    bindings.set('env-intruder', { database: record });
-    const intruder = { id: 'env-intruder', name: 'intruder' };
-    google.connectionSecrets.set(secretIdOf(intruder), { labels: labelsOf(intruder), versions: [] });
-    const applied = await sharedDatabase.apply({ ...target(intruder), action: { id: 'shared-database:release', type: 'destroy', resource: { kind: 'database', name: 'postgres', provider: 'gcp' }, verified: true, reason: '',
-      metadata: { operation: 'gcpSharedDatabase', step: 'release', gcpProjectId: GCP, region: REGION, instanceName: record.instanceName, databaseName: record.databaseName, tenantId: 'env-intruder' } }, reviewed: plan.reviewed });
-    expect(applied.result).toMatchObject({ success: false, status: 'blocked' });
+  it('recovers when Google stored a new secret version and Hypervibe never heard back', async () => {
+    const serving = latestUrl(staging);
+    google.nextPublish = 'lost';
+    const rotate = await planned(planFor(staging, { ...shared, passwordGeneration: 3 }));
+    expect((await applyAll(staging, rotate))[0]).toMatchObject({ success: false, status: 'pending' });
+    // The services still run the version before the lost one, and it still works.
+    expect(await reach(serving)).toBe(record(staging).databaseName);
+    const recover = await planned(planFor(staging, { ...shared, passwordGeneration: 3 }));
+    expect(recover.actions.map((action) => [action.id, action.type])).toEqual([['shared-database:allocate', 'update']]);
+    expect(recover.connection!.wireServices).toBe(false);
+    expect((await applyAll(staging, recover)).map((result) => result.success)).toEqual([true]);
+    expect(await reach(latestUrl(staging))).toBe(record(staging).databaseName);
+    expect(await reach(serving)).toBe(record(staging).databaseName);
     expect(await databases()).toHaveLength(2);
-    bindings.delete('env-intruder');
+    // The login the services were on is switched off only after they have all moved.
+    running = [String(google.connectionSecrets.get(secretIdOf(staging))!.versions.length)];
+    const retire = await planned(planFor(staging, { ...shared, passwordGeneration: 3 }));
+    expect(retire.actions.map((action) => action.id)).toEqual(['shared-database:retire']);
+    expect((await applyAll(staging, retire)).map((result) => result.success)).toEqual([true]);
+    expect(DENIED).toContain(await reach(serving));
+    expect((await planned(planFor(staging, { ...shared, passwordGeneration: 3 }))).actions).toEqual([]);
+    expect(await reach(latestUrl(production))).toBe(record(production).databaseName);
   });
 
-  it('refuses to move a database between its own server and the shared one, and everything not supported yet', async () => {
-    const own = { ...target(production), binding: { database: { instanceName: 'hv-production-db-a1b2c3' } } };
-    expect(await refusal(sharedDatabase.plan({ ...own, desired: shared, countsPendingWork: false, secret: { id: 'x', labels: {} }, runningSecretVersions: async () => ({ versions: [] }) })))
+  it('blocks a record that is incomplete or was made for another environment', async () => {
+    const kept = record(staging);
+    expect(gcpDatabasePlanBlocker(GCP, { database: kept }, staging.id)).toBeUndefined();
+    expect(gcpDatabasePlanBlocker(GCP, { database: kept }, production.id)).toMatch(/different environment/);
+    expect(gcpDatabasePlanBlocker(GCP, { database: kept })).toMatch(/different environment/);
+    for (const damaged of [{ ...kept, tenantId: undefined }, { ...kept, region: undefined }, { ...kept, gcpProjectId: 'another-project' }, { ...kept, databaseName: '' }, { ...kept, placement: 'account' as never }]) {
+      expect(gcpDatabasePlanBlocker(GCP, { database: damaged }, staging.id)).toMatch(/incomplete/);
+    }
+    // What only the module can judge: a database name and a login that do not belong together, or a record neither started nor finished.
+    for (const damaged of [{ ...kept, activeLogin: undefined }, { ...kept, activeLogin: 'app_other_a' }, { ...kept, allocation: 'started' as const }, { ...kept, databaseName: 'app' }, { ...kept, databaseName: 'App_X' }]) {
+      expect(await refusal(sharedDatabase.plan({ ...target(staging), binding: { database: damaged }, desired: shared, secret: { id: secretIdOf(staging), labels: labelsOf(staging) } }))).toMatch(/incomplete/);
+    }
+    // Handing another environment staging's record never reaches staging's database.
+    const plan = await planned(planFor(staging, shared));
+    const intruder = { id: 'env-intruder', name: 'intruder' };
+    bindings.set(intruder.id, { database: kept });
+    const applied = await applyOne(intruder, { id: 'shared-database:release', type: 'destroy', resource: { kind: 'database', name: 'postgres', provider: 'gcp' }, verified: true, reason: '',
+      metadata: { operation: 'gcpSharedDatabase', step: 'release', gcpProjectId: GCP, region: REGION, instanceName: kept.instanceName, databaseName: kept.databaseName, tenantId: intruder.id } }, plan.reviewed);
+    expect(applied).toMatchObject({ success: false, status: 'blocked' });
+    expect(await databases()).toHaveLength(2);
+    bindings.delete(intruder.id);
+  });
+
+  it('refuses to move a database between its own server and the shared one, or to migrate one', async () => {
+    expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { database: { instanceName: 'hv-production-db-a1b2c3' } }, desired: shared, secret: { id: 'x', labels: {} } })))
       .toMatch(/already has a database server of its own\. Moving an existing database onto the app's shared server is not available yet/);
     expect(await refusal(planFor(production, { provider: 'cloudsql', engine: 'postgres' }))).toMatch(/Moving it to a server of its own is not available yet/);
-    expect(await refusal(planFor(production, shared, { countsPendingWork: true }))).toMatch(/on-demand worker that counts pending work/);
-    expect(await refusal(planFor(production, { ...shared, size: 'medium' }))).toMatch(/database\.size cannot be set/);
-    expect(await refusal(planFor(production, { ...shared, version: 17 }))).toMatch(/database\.version cannot be set/);
-    expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { ...bindings.get(production.id), migration: { copiedAt: 'now' } } as never, desired: shared, countsPendingWork: false,
-      secret: { id: secretIdOf(production), labels: labelsOf(production) }, runningSecretVersions: async () => ({ versions: [] }) }))).toMatch(/Migration is not available yet/);
+    expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { ...bindings.get(production.id), migration: { copiedAt: 'now' } } as never, desired: shared,
+      secret: { id: secretIdOf(production), labels: labelsOf(production) } }))).toMatch(/Migration is not available yet/);
   });
 
   it('blocks instead of guessing when the server cannot be listed, or the recorded one is not there', async () => {
@@ -376,88 +439,108 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     expect(results[0]!.message).toMatch(/nothing on it is treated as removed/);
     expect(bindings.has(staging.id)).toBe(true);
     google.servers = kept;
-    const unknown: SharedDatabaseCloud = { ...cloud, listServers: async () => ({ state: 'unknown', reason: 'Google did not list this project\'s database servers (HTTP 503). Nothing was planned.' }) };
-    expect(await refusal(sharedDatabase.plan({ ...target(production), cloud: unknown, desired: shared, countsPendingWork: false, secret: { id: secretIdOf(production), labels: labelsOf(production) },
-      runningSecretVersions: async () => ({ versions: [] }) }))).toMatch(/HTTP 503/);
+    const unknown: SharedDatabaseCloud = { ...cloud, listServers: async () => ({ state: 'unknown', reason: 'Google could not reach every region while listing this project\'s database servers.' }) };
+    expect(await refusal(sharedDatabase.plan({ ...target(production), cloud: unknown, desired: shared, secret: { id: secretIdOf(production), labels: labelsOf(production) } }))).toMatch(/could not reach every region/);
+    const fresh = { id: 'env-fresh-1', name: 'fresh' };
+    expect(await refusal(sharedDatabase.plan({ ...target(fresh), cloud: unknown, desired: shared, secret: { id: secretIdOf(fresh), labels: labelsOf(fresh) } }))).toMatch(/could not reach every region/);
     expect(await databases()).toHaveLength(2);
   });
 
-  it('will not offer to remove the server while any environment\'s database is on it', async () => {
-    const removal = await sharedDatabase.planServerRemoval({ project, gcpProjectId: GCP, region: REGION, engine, cloud });
-    expect(removal).toEqual({ blocked: expect.stringMatching(/still holds 2 databases .*the server is never deleted with data on it/) });
+  it('refuses, at the moment of removal, to touch a server with any environment\'s database on it', async () => {
+    const removal = await removalStep();
+    expect([removal.action.id, removal.action.type, removal.action.requiresConfirm]).toEqual(['shared-database:unprotect-server', 'update', true]);
+    expect(removal.action.reason).toMatch(/changed only if its own list shows no database on it at that moment/);
+    const applies = google.engineApplies;
+    const refused = await sharedDatabase.applyServerRemoval({ ...serverRequest, action: removal.action, reviewed: removal.reviewed });
+    expect(refused).toMatchObject({ success: false, status: 'blocked' });
+    expect(refused.message).toMatch(/still holds 2 databases/);
+    expect(google.engineApplies).toBe(applies);
+    expect(google.servers[0]!.deletionProtection).toBe(true);
+    // The step cannot be smuggled into an environment's plan, nor an environment's step into the removal.
+    expect(await applyOne(production, removal.action, removal.reviewed)).toMatchObject({ success: false, status: 'blocked' });
+    const allocate = (await planned(planFor(staging, { ...shared, passwordGeneration: 9 }))).actions[0]!;
+    expect(await sharedDatabase.applyServerRemoval({ ...serverRequest, action: allocate, reviewed: removal.reviewed })).toMatchObject({ success: false, status: 'blocked' });
   });
 
   it('tearing down staging deletes only staging\'s database, after confirmation, and never the server', async () => {
     const productionUrl = latestUrl(production);
-    const stagingDatabase = bindings.get(staging.id)!.database!.databaseName!;
+    const stagingDatabase = record(staging).databaseName!;
     const release = await planned(planFor(staging, undefined, { teardown: true }));
     shown.push(release);
     expect(release.actions.map((action) => [action.id, action.type, action.dataBearing === true, action.requiresConfirm === true, action.billable === true])).toEqual([['shared-database:release', 'destroy', true, true, false]]);
     expect(release.actions[0]!.reason).toMatch(/The server itself and every other environment's database stay/);
     expect(release.connection).toBeUndefined();
     const applies = google.engineApplies;
-    const results = await applyAll(staging, release);
+
+    // Something elsewhere on the server still depends on one of staging's roles: the database goes, the record stays until the role can go too.
+    await boot.query(`CREATE TABLE public.leftover (); ALTER TABLE public.leftover OWNER TO ${stagingDatabase}_owner`);
+    const partial = await applyAll(staging, release);
+    expect(partial[0]).toMatchObject({ success: false, status: 'pending' });
+    expect(partial[0]!.message).toMatch(/could not be deleted yet \(they are switched off\)\. Run the same command again/);
+    expect(bindings.has(staging.id)).toBe(true);
+    expect(await databases()).toEqual([record(production).databaseName]);
+    await boot.query('DROP TABLE public.leftover');
+    const again = await planned(planFor(staging, undefined, { teardown: true }));
+    const results = await applyAll(staging, again);
     expect(results.map((result) => result.success)).toEqual([true]);
-    expect(results[0]!.message).toMatch(/The server and the other environments' databases were not touched/);
     expect(bindings.has(staging.id)).toBe(false);
-    expect(await databases()).toEqual([bindings.get(production.id)!.database!.databaseName]);
     expect((await boot.query('SELECT 1 FROM pg_roles WHERE rolname LIKE $1', [`${stagingDatabase}%`])).rows).toEqual([]);
     expect(google.engineApplies).toBe(applies);
     expect(google.servers).toHaveLength(1);
     expect(google.servers[0]!.deletionProtection).toBe(true);
-    expect(await reach(productionUrl)).toBe(bindings.get(production.id)!.database!.databaseName);
-    expect(await sharedDatabase.planServerRemoval({ project, gcpProjectId: GCP, region: REGION, engine, cloud })).toEqual({ blocked: expect.stringMatching(/still holds a database/) });
+    expect(await reach(productionUrl)).toBe(record(production).databaseName);
   });
 
-  it('never replaces a recorded database that has gone missing with an empty one', async () => {
-    const record = bindings.get(production.id)!.database!;
+  it('never replaces a finished database that has gone missing with an empty one', async () => {
     const lost = { id: 'env-lost-1', name: 'lost' };
     google.connectionSecrets.set(secretIdOf(lost), { labels: labelsOf(lost), versions: [] });
-    bindings.set(lost.id, { database: { ...record, databaseName: 'app_lost_0123456789ab', tenantId: lost.id, activeLogin: 'app_lost_0123456789ab_a' } });
+    bindings.set(lost.id, { database: { ...record(production), databaseName: 'app_lost_0123456789ab', tenantId: lost.id, activeLogin: 'app_lost_0123456789ab_a' } });
     const plan = await planned(planFor(lost, shared));
     expect(plan.actions.map((action) => [action.id, action.type])).toEqual([['shared-database:allocate', 'update']]);
     const results = await applyAll(lost, plan);
     expect(results[0]).toMatchObject({ success: false, status: 'blocked' });
     expect(results[0]!.message).toMatch(/will not put an empty database in its place/);
-    expect(await databases()).toEqual([record.databaseName]);
+    expect(await databases()).toEqual([record(production).databaseName]);
     bindings.delete(lost.id);
   });
 
-  it('offers the server\'s removal once it is empty, checks again at the last moment, and removes it in two confirmed steps', async () => {
-    const release = await planned(planFor(production, undefined));
-    expect((await applyAll(production, release)).map((result) => result.success)).toEqual([true]);
+  it('removes the empty server in two confirmed steps, and not while any database at all is on it', async () => {
+    expect((await applyAll(production, await planned(planFor(production, undefined)))).map((result) => result.success)).toEqual([true]);
     expect(await databases()).toEqual([]);
     expect(google.servers).toHaveLength(1);
 
-    const request = { project, gcpProjectId: GCP, region: REGION, engine, cloud };
-    const unprotect = await sharedDatabase.planServerRemoval(request) as { actions: PlanAction[]; reviewed: Record<string, unknown> };
-    expect(unprotect.actions.map((action) => [action.id, action.type, action.requiresConfirm === true])).toEqual([['shared-database:unprotect-server', 'update', true]]);
-    // A database arrives after the offer was made: the reviewed step refuses.
-    expect((await applyAll(staging, await planned(planFor(staging, shared)))).map((result) => result.success)).toEqual([true]);
-    const refused = await sharedDatabase.apply({ ...target(production), action: unprotect.actions[0]!, reviewed: unprotect.reviewed });
-    expect(refused.result).toMatchObject({ success: false, status: 'blocked' });
-    expect(google.servers[0]!.deletionProtection).toBe(true);
-    expect((await applyAll(staging, await planned(planFor(staging, undefined)))).map((result) => result.success)).toEqual([true]);
+    // A database nobody marked is still someone's data.
+    await boot.query('CREATE DATABASE made_by_hand');
+    const unprotect = await removalStep();
+    const refused = await sharedDatabase.applyServerRemoval({ ...serverRequest, action: unprotect.action, reviewed: unprotect.reviewed });
+    expect(refused).toMatchObject({ success: false, status: 'blocked' });
+    expect(refused.message).toMatch(/still holds a database \(made_by_hand\)/);
+    await boot.query('DROP DATABASE made_by_hand');
 
-    const applied = await sharedDatabase.apply({ ...target(production), action: unprotect.actions[0]!, reviewed: unprotect.reviewed });
-    expect(applied.result.success).toBe(true);
-    expect(applied.binding).toBeUndefined();
+    expect((await sharedDatabase.applyServerRemoval({ ...serverRequest, action: unprotect.action, reviewed: unprotect.reviewed })).success).toBe(true);
     expect(google.servers[0]!.deletionProtection).toBe(false);
-    const remove = await sharedDatabase.planServerRemoval(request) as { actions: PlanAction[]; reviewed: Record<string, unknown> };
-    expect(remove.actions.map((action) => [action.id, action.type, action.dataBearing === true, action.requiresConfirm === true])).toEqual([['shared-database:remove-server', 'destroy', true, true]]);
-    expect((await sharedDatabase.apply({ ...target(production), action: remove.actions[0]!, reviewed: remove.reviewed })).result.success).toBe(true);
+    const remove = await removalStep();
+    expect([remove.action.id, remove.action.type, remove.action.dataBearing, remove.action.requiresConfirm]).toEqual(['shared-database:remove-server', 'destroy', true, true]);
+    expect((await sharedDatabase.applyServerRemoval({ ...serverRequest, action: remove.action, reviewed: remove.reviewed })).success).toBe(true);
     expect(google.servers).toEqual([]);
-    expect(await sharedDatabase.planServerRemoval(request)).toEqual({ blocked: expect.stringMatching(/has no shared database server/) });
+    expect(await sharedDatabase.planServerRemoval(serverRequest)).toEqual({ none: true });
   });
 
-  it('takes over a server whose creation was interrupted instead of creating a second one', async () => {
-    // Google has the labelled server; saved engine state and the administrator secret do not exist.
+  it('never changes a server that exists from an environment\'s plan, and takes over an interrupted create only when removing it', async () => {
+    // Google has the labelled server; saved engine state does not (the create was cut off).
     google.servers.push({ instanceName: 'hv-demo-app-shared-0a0b0c', region: REGION, runnable: true, deletionProtection: true, labels: { 'managed-by': 'hypervibe', 'hv-shared-database': 'project-1' } });
     google.engineState.clear();
+    const enginePlans = google.enginePlans;
     const plan = await planned(planFor(production, shared));
-    expect(plan.actions.map((action) => [action.id, action.type, action.billable === true])).toEqual([['shared-database:server', 'update', false], ['shared-database:allocate', 'create', false]]);
+    expect(plan.actions.map((action) => [action.id, action.type, action.billable === true])).toEqual([['shared-database:allocate', 'create', false]]);
     expect(plan.connection!.connectionName).toBe(`${GCP}:${REGION}:hv-demo-app-shared-0a0b0c`);
-    // Someone else's server with the same name pattern but no label is never taken.
+    expect(google.enginePlans).toBe(enginePlans);
+    // Removal takes it over through OpenTofu's own import file, as an update, never as a second create.
+    const takeover = await removalStep();
+    expect([takeover.action.id, takeover.action.type]).toEqual(['shared-database:unprotect-server', 'update']);
+    const reviewed = takeover.reviewed as { server: { planId: string } };
+    expect(google.plans.get(reviewed.server.planId)!.configuration.files['imports.tf.json']).toEqual({ import: [{ to: ADDRESS, id: `projects/${GCP}/instances/hv-demo-app-shared-0a0b0c` }] });
+    // Someone else's server with the same name pattern but no label is never used.
     google.servers[0]!.labels = { 'managed-by': 'hypervibe' };
     const fresh = await planned(planFor(production, shared));
     expect(fresh.actions[0]).toMatchObject({ id: 'shared-database:server', type: 'create', billable: true });
@@ -465,11 +548,20 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     google.servers = [];
   });
 
-  it('never shows a password in a plan or a result', () => {
+  it('never shows a password in a plan, a result or a statement, even when an error quotes one', () => {
     const text = JSON.stringify(shown);
     const secrets = everySecretValue();
-    expect(secrets.length).toBeGreaterThan(2);
+    expect(secrets.length).toBeGreaterThan(8);
     for (const secret of secrets) expect(text).not.toContain(secret);
     expect(google.statements.filter((statement) => secrets.some((secret) => statement.includes(secret)))).toEqual([]);
+  });
+
+  it('reports an unexpected error by its kind and code only', async () => {
+    google.servers.push({ instanceName: 'hv-demo-app-shared-0a0b0c', region: REGION, runnable: true, deletionProtection: true, labels: { 'managed-by': 'hypervibe', 'hv-shared-database': 'project-1' } });
+    const loud: SharedDatabaseCloud = { ...cloud, withSession: async (session) => { throw Object.assign(new Error(`driver said: password=${session.password}`), { code: '53300' }); } };
+    const plan = await planned(planFor(production, shared));
+    const result = await sharedDatabase.apply({ ...target(production), cloud: loud, action: plan.actions[0]!, reviewed: plan.reviewed, record: () => {} });
+    expect(result).toEqual({ success: false, error: 'Error 53300', message: 'A step on the app\'s shared database server failed (Error 53300). The app keeps using its current login.' });
+    google.servers = [];
   });
 });

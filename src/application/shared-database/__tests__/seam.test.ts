@@ -12,6 +12,7 @@ import { buildCloudRunConfiguration, type GcpCloudRunEngineInput } from '../../.
 import { acquireManagedDatabaseAccess } from '../../../domain/services/database-access.service.js';
 import { engineEnvironmentProblems } from '../../../domain/services/infrastructure-engine-selection.js';
 import { databaseSpecSchema, projectSpecSchema } from '../../../domain/spec/spec.schema.js';
+import { sharedDatabaseSpecProblems } from '../../../domain/services/infrastructure-engine-selection.js';
 import { sharedServerConfiguration, sharedServerState } from '../server.js';
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -40,6 +41,7 @@ describe('nothing outside the module knows how the shared server works', () => {
     const planner = read('application/infrastructure-engine.ts');
     const uses = [...planner.matchAll(/sharedDatabase\.([A-Za-z]+)/g)].map((match) => match[1]);
     expect([...new Set(uses)].sort()).toEqual(['apply', 'handles', 'plan']);
+    expect(planner).not.toMatch(/[.']placement\b/);
     expect(planner.match(/from '\.\/shared-database\/[^']+'/g)).toEqual([`from './shared-database/index.js'`]);
   });
 
@@ -94,9 +96,21 @@ describe('the server\'s own configuration', () => {
       user_labels: { 'managed-by': 'hypervibe', 'hv-shared-database': 'project-1' } });
   });
 
-  it('holds no login, password or database: only the server and an empty secret container', () => {
-    expect(Object.keys(file.resource).sort()).toEqual(['google_secret_manager_secret', 'google_sql_database_instance']);
-    expect(JSON.stringify(configuration)).not.toMatch(/password|google_sql_user|google_sql_database"|secret_data/);
+  it('holds the server and nothing else: no login, password, database or secret of any kind', () => {
+    expect(Object.keys(file.resource)).toEqual(['google_sql_database_instance']);
+    expect(Object.keys(configuration.files)).toEqual(['shared-database.tf.json']);
+    expect(JSON.stringify(configuration)).not.toMatch(/password|google_sql_user|google_sql_database"|secret/);
+  });
+
+  it('takes over an interrupted create through the import file OpenTofu reads, exactly as a dedicated instance is adopted', () => {
+    const adopting = sharedServerConfiguration({ scope, instanceName: 'hv-demo-shared-a1b2c3', adopt: true });
+    expect(adopting.files['imports.tf.json']).toEqual({ import: [{ to: 'google_sql_database_instance.shared', id: 'projects/demo-project/instances/hv-demo-shared-a1b2c3' }] });
+    expect(adopting.imports).toEqual({ 'google_sql_database_instance.shared': 'projects/demo-project/instances/hv-demo-shared-a1b2c3' });
+    expect(adopting.files['shared-database.tf.json']).toEqual(configuration.files['shared-database.tf.json']);
+    // Same shape the environment generator writes for an instance of its own.
+    const dedicated = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [], database: { instanceName: 'hv-own-db-a1', databaseName: 'app', wireServices: false },
+      adopt: { databaseInstance: 'hv-own-db-a1' } });
+    expect(dedicated.files['imports.tf.json']).toEqual({ import: [{ to: 'google_sql_database_instance.db', id: 'projects/demo-project/instances/hv-own-db-a1' }] });
   });
 
   it('is saved apart from every environment, once per app, Google project and region', () => {
@@ -132,5 +146,34 @@ describe('what is not available on the shared server yet', () => {
     const result = await acquireManagedDatabaseAccess({ id: 'project-1', name: 'demo' } as never, environment as never);
     expect(result).toMatchObject({ ok: false, code: 'no_external_access', resourceCreated: false, cleanup: 'not_needed' });
     expect((result as { error: string }).error).toMatch(/not available yet for production, whose database is on the app's shared database server/);
+  });
+});
+
+describe('what the spec alone shows is refused where specs are checked', () => {
+  const spec = (database: Record<string, unknown>, more: Record<string, unknown> = {}) => projectSpecSchema.parse({ version: 1, project: 'demo', environments: {
+    production: { hosting: { provider: 'cloudrun', region: 'us-central1' }, services: { web: {} }, database: { provider: 'cloudsql', placement: 'app', ...database }, ...more },
+    staging: { hosting: { provider: 'cloudrun', region: 'us-central1' }, services: { web: {} }, database: { provider: 'cloudsql', placement: 'app' } } } });
+
+  it('accepts the plain case, and an explicit deletionProtection: false', () => {
+    expect(sharedDatabaseSpecProblems(spec({}), 'production')).toEqual([]);
+    expect(sharedDatabaseSpecProblems(spec({ deletionProtection: false }), 'production')).toEqual([]);
+  });
+
+  it.each([
+    ['size', { size: 'medium' }, {}, /database\.size cannot be set/],
+    ['version', { version: 17 }, {}, /database\.version cannot be set/],
+    ['deletion protection turned on', { deletionProtection: true }, {}, /deletionProtection cannot be turned on.*always asks for confirmation/],
+    ['an on-demand worker', {}, { services: { web: {}, jobs: { workloadKind: 'worker', onDemand: { pendingWorkQuery: 'SELECT count(*) FROM jobs' } } } }, /on-demand worker that counts pending work/],
+    ['a declared data migration into it', {}, { dataMigration: { id: 'copy-1', fromEnvironment: 'staging', include: { database: true } } }, /dataMigration is not available yet for production/],
+  ])('refuses %s', (_what, database, more, message) => {
+    const problems = engineEnvironmentProblems(spec(database, more), 'production');
+    expect(problems.join(' ')).toMatch(message);
+  });
+
+  it('refuses a declared data migration out of a shared database, whatever the target is', () => {
+    const target = projectSpecSchema.parse({ version: 1, project: 'demo', environments: {
+      staging: { hosting: { provider: 'cloudrun' }, services: {}, database: { provider: 'cloudsql', placement: 'app' } },
+      copy: { hosting: { provider: 'cloudrun' }, services: {}, database: { provider: 'cloudsql' }, dataMigration: { id: 'copy-1', fromEnvironment: 'staging', include: { database: true } } } } });
+    expect(sharedDatabaseSpecProblems(target, 'copy').join(' ')).toMatch(/copies the database of staging, which is on the app's shared database server/);
   });
 });

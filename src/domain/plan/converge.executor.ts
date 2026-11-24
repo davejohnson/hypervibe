@@ -54,7 +54,10 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
       && action.metadata?.operation === 'queueDestroy'
       && action.metadata?.backend === 'pubsub'
     );
-  if (billableDataResource && action.type === 'create' && action.billable !== true) {
+  // A database made on the app's existing shared server is a create the person must see, yet it starts no new charge:
+  // the server is the billable thing, and its own create is marked so. Only that exact step is exempt.
+  const onExistingSharedServer = action.resource.kind === 'database' && action.metadata?.operation === 'gcpSharedDatabase' && action.metadata?.step === 'allocate';
+  if (billableDataResource && action.type === 'create' && action.billable !== true && !onExistingSharedServer) {
     ctx.addIssue({
       code: 'custom',
       path: ['billable'],
@@ -326,7 +329,7 @@ export const planRunDocumentSchema = z.object({
   const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure', 'gcpRetainDatabaseAliasImports',
     'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
     'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete', 'awsImageBuild', 'awsDatabaseDrop',
-    'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup', 'azureFailedAppEnvironment', 'gcpStorageEmpty', 'gcpTeardownCleanup'];
+    'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup', 'azureFailedAppEnvironment', 'gcpStorageEmpty', 'gcpTeardownCleanup', 'gcpSharedDatabase'];
   if (document.scope === 'infrastructure-engine') {
     const engine = (document as { engine?: { planId?: unknown } }).engine;
     if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha

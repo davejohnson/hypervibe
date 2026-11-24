@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { ActionResult } from '../../domain/plan/converge.executor.js';
 import type { TenantServer, TenantSession } from '../../adapters/providers/database/tenant-database.js';
 import type { SharedDatabaseCloud, SqlSession } from './ports.js';
-import { ADMINISTRATOR_LOGIN, MAINTENANCE_DATABASE, SHARED_SERVER_LABEL, administratorSecretId, sharedServerLabels, type SharedServerScope } from './server.js';
+import { ADMINISTRATOR_LOGIN, MAINTENANCE_DATABASE, type SharedServerScope } from './server.js';
 
 /** Ends a step with the result to report. Nothing that carries a password is ever put in one. */
 export class Stop extends Error {
@@ -14,6 +14,9 @@ export class Stop extends Error {
 export const blocked = (message: string) => new Stop({ success: false, status: 'blocked', message });
 export const pending = (message: string) => new Stop({ success: false, status: 'pending', message });
 
+/** Said whenever two changes to the server meet. It is never a sign of damage: the second one simply runs again. */
+export const SERVER_BUSY = 'Another change to the app\'s shared database server is in progress (for example another environment being applied). Nothing the app uses was changed; run the same command again.';
+
 /** How long a statement waits for another session's lock, and how long the tenant module waits for its own. */
 export const LOCK_WAIT_MS = 30_000;
 
@@ -24,41 +27,6 @@ const refusedLogin = (error: unknown): boolean => ['28P01', '28000'].includes(St
 
 export interface ServerAddress { instanceName: string; connectionName: string }
 
-/**
- * Hypervibe's own administrator login on the shared server. Its password is
- * generated here, set through Google's API and kept in Secret Manager in the
- * app's Google project; it never enters OpenTofu, plans, results or logs.
- *
- * `repair` lets a missing or rejected password be replaced with a new one.
- * Read-only callers pass false and are told the administrator is unavailable.
- */
-async function administratorPassword(cloud: SharedDatabaseCloud, scope: SharedServerScope, server: ServerAddress, repair: boolean): Promise<string> {
-  const secretId = administratorSecretId(server.instanceName);
-  const stored = await cloud.readAdministratorSecret(scope.gcpProjectId, secretId);
-  if (stored.state === 'unknown') throw blocked(stored.reason);
-  if (stored.state === 'absent') throw blocked('The secret that holds Hypervibe\'s administrator password for the shared database server is missing. Run hv_plan again so it is created first.');
-  const wanted = sharedServerLabels(scope);
-  if (stored.value.labels['managed-by'] !== 'hypervibe' || stored.value.labels[SHARED_SERVER_LABEL] !== wanted[SHARED_SERVER_LABEL]) {
-    throw blocked(`Secret ${secretId} exists but does not belong to this app's shared database server. Nothing was changed.`);
-  }
-  const target = { connectionName: server.connectionName, user: ADMINISTRATOR_LOGIN, database: MAINTENANCE_DATABASE };
-  if (stored.value.value) {
-    const password = stored.value.value;
-    const accepted = await cloud.withSession({ ...target, password }, async () => true).catch((error: unknown) => {
-      if (refusedLogin(error)) return false;
-      throw error;
-    });
-    if (accepted) return password;
-  }
-  if (!repair) throw blocked('Hypervibe\'s administrator login on the shared database server is not set up or its saved password no longer works. Run hv_plan and hv_apply for one of the app\'s environments to restore it.');
-  const password = newPassword();
-  const set = await cloud.setServerLogin(scope.gcpProjectId, server.instanceName, ADMINISTRATOR_LOGIN, password);
-  if (set) throw new Stop(set);
-  const written = await cloud.writeAdministratorSecret(scope.gcpProjectId, secretId, password);
-  if (written) throw new Stop(written);
-  return password;
-}
-
 const tenantSession = (session: SqlSession): TenantSession => ({ query: (text, values) => session.query(text, values) });
 
 /** No statement waits on another session's lock for longer than the tenant module itself is willing to wait. */
@@ -67,19 +35,35 @@ async function boundLockWait(session: SqlSession): Promise<void> {
 }
 
 /**
- * Runs `work` with the privileged sessions the tenant module needs, always as
- * the same administrator on the same maintenance database, then closes them.
+ * Runs `work` as Hypervibe's administrator on the shared server, then closes
+ * every session.
+ *
+ * The administrator's password is never kept anywhere. Every workload of the
+ * app may read the project's secrets, so a stored one would let staging's
+ * code administer production's database. Instead each use sets a fresh random
+ * password through Google's API, holds it in memory for this one call and
+ * forgets it. Always the same login, on the same maintenance database.
+ *
+ * Two of these at once is expected (two environments applied together): the
+ * later password replaces the earlier, and whoever is turned away is told to
+ * run again.
  */
-export async function withAdministrator<T>(cloud: SharedDatabaseCloud, scope: SharedServerScope, server: ServerAddress, options: { repair: boolean },
-  work: (tenants: TenantServer) => Promise<T>): Promise<T> {
-  const password = await administratorPassword(cloud, scope, server, options.repair);
+export async function withAdministrator<T>(cloud: SharedDatabaseCloud, scope: SharedServerScope, server: ServerAddress, work: (tenants: TenantServer) => Promise<T>): Promise<T> {
+  const password = newPassword();
+  const set = await cloud.setServerLogin(scope.gcpProjectId, server.instanceName, ADMINISTRATOR_LOGIN, password);
+  if (set) throw new Stop(set);
   const target = { connectionName: server.connectionName, user: ADMINISTRATOR_LOGIN, password };
-  return cloud.withSession({ ...target, database: MAINTENANCE_DATABASE }, async (session) => {
+  const open = <R>(database: string, inner: (session: SqlSession) => Promise<R>) => cloud.withSession({ ...target, database }, inner).catch((error: unknown) => {
+    // This password was replaced by a later one before the session opened.
+    if (refusedLogin(error)) throw pending(SERVER_BUSY);
+    throw error;
+  });
+  return open(MAINTENANCE_DATABASE, async (session) => {
     await boundLockWait(session);
     return work({
       admin: tenantSession(session),
       lockWaitMs: LOCK_WAIT_MS,
-      inDatabase: (database, inner) => cloud.withSession({ ...target, database }, async (other) => {
+      inDatabase: (database, inner) => open(database, async (other) => {
         await boundLockWait(other);
         return inner(tenantSession(other));
       }),

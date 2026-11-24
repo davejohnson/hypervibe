@@ -8,7 +8,7 @@ import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.serv
 import pg from 'pg';
 import { randomUUID } from 'node:crypto';
 import type { CommandContext } from './context.js';
-import { gcpDatabaseConnectionName, gcpDatabaseLocation, type GcpDatabaseLocation } from './gcp-database-location.js';
+import { gcpDatabaseConnectionName, gcpDatabaseLocation, gcpDatabaseOnSharedServer, type GcpDatabaseLocation } from './gcp-database-location.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import { SpecStore, type SpecResult } from '../domain/spec/spec.store.js';
@@ -343,8 +343,13 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   const sourceSpec = specResult.spec.environments[params.from]!;
   const declaredTarget = specResult.spec.environments[params.to];
   // Copy, verification and cutover all identify a database by its server; two databases on one server look the same to them.
-  if (sourceSpec.database?.placement === 'app' || declaredTarget?.database?.placement === 'app') {
-    return { status: 'blocked', message: `Migration is not available yet for a database on the app's shared database server (${sourceSpec.database?.placement === 'app' ? params.from : params.to}). Nothing was changed.` };
+  // The saved binding counts as much as the spec: removing "placement" from the spec does not move the database.
+  const sharedTarget = ctx.repos.environments.findByProjectAndName(params.project.id, params.to);
+  const onSharedServer = (environment: typeof sourceEnvironment | null, declared: typeof declaredTarget) => declared?.database?.placement === 'app'
+    || gcpDatabaseOnSharedServer((environment?.platformBindings as { engine?: EngineBinding } | undefined)?.engine);
+  const sharedSide = onSharedServer(sourceEnvironment, sourceSpec) ? params.from : onSharedServer(sharedTarget, declaredTarget) ? params.to : undefined;
+  if (sharedSide) {
+    return { status: 'blocked', message: `Migration is not available yet for a database on the app's shared database server (${sharedSide}). Nothing was changed.` };
   }
   if (params.gcpProjectId && declaredTarget && declaredTarget.hosting.gcpProjectId !== params.gcpProjectId) {
     return { status: 'blocked', message: `Migration target ${params.to} already selects ${declaredTarget.hosting.gcpProjectId ?? 'the repository default'}. Choose a new target environment to migrate to ${params.gcpProjectId}.` };

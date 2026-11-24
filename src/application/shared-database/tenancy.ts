@@ -1,15 +1,15 @@
 import crypto from 'node:crypto';
 import {
-  TenantBusyError, TenantRefusedError, dropTenant, ensureTenant, listTenants, observeTenant, retireTenantLogin, setTenantLoginPassword, tenantNames,
-  type TenantIdentity, type TenantNames, type TenantObservation, type TenantServer,
+  TENANT_WRITER_LOCK, TenantBusyError, TenantRefusedError, dropTenant, ensureTenant, listTenants, observeTenant, retireTenantLogin, setTenantLoginPassword, tenantNames,
+  type TenantIdentity, type TenantNames, type TenantServer,
 } from '../../adapters/providers/database/tenant-database.js';
 import type { ActionResult } from '../../domain/plan/converge.executor.js';
 import type { EngineActionSegment, EngineStateIdentity } from '../../domain/ports/infrastructure-engine.port.js';
 import { gcpDatabaseOnSharedServer, type GcpDatabaseBinding } from '../gcp-database-location.js';
 import { connectionUrl } from '../infrastructure-engine-database.js';
-import { Stop, blocked, newPassword, pending, withAdministrator, type ServerAddress } from './administrator.js';
+import { SERVER_BUSY, Stop, blocked, newPassword, pending, withAdministrator, type ServerAddress } from './administrator.js';
 import type { Seen, SeenConnectionSecret, SharedDatabaseCloud, SharedDatabaseEngine } from './ports.js';
-import { findSharedServer, sharedServerState, type SharedServerScope } from './server.js';
+import { MAINTENANCE_DATABASE, findSharedServer, sharedServerState, type SharedServerScope } from './server.js';
 
 /**
  * One environment's database on the shared server: allocation, its login and
@@ -34,6 +34,8 @@ export interface StepMetadata {
   labels?: Record<string, string>;
   generation?: number;
   connectionLimit?: number;
+  /** retire: the secret version every service had moved to when this was reviewed. */
+  secretVersion?: string;
 }
 
 export interface ReviewedServerPlan { planId: string; state: EngineStateIdentity; segment: EngineActionSegment }
@@ -57,21 +59,44 @@ const usableTenantId = (id: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,1
 export function tenantFor(environment: { id: string; name: string }, binding: GcpDatabaseBinding | undefined): TenantIdentity {
   if (!usableTenantId(environment.id)) throw blocked('This environment\'s id cannot be used to mark its database on a shared server.');
   const recorded = gcpDatabaseOnSharedServer(binding) ? binding!.database!.databaseName : undefined;
-  if (recorded) return { names: tenantNames(recorded.replace(/^app_/, '')), tenantId: environment.id };
+  if (recorded !== undefined) {
+    if (!/^app_[a-z0-9]+(?:_[a-z0-9]+)*$/.test(recorded) || recorded.length > 44) throw blocked(INCOMPLETE_RECORD);
+    return { names: tenantNames(recorded.slice(4)), tenantId: environment.id };
+  }
   const hint = environment.name.toLowerCase().replace(/[^a-z0-9]+/g, '').slice(0, 20) || 'env';
   return { names: tenantNames(`${hint}_${crypto.createHash('sha256').update(environment.id).digest('hex').slice(0, 12)}`), tenantId: environment.id };
+}
+
+const INCOMPLETE_RECORD = 'The saved record of this environment\'s database on the shared server is incomplete, so Hypervibe will not plan changes to it.';
+
+/**
+ * How far the saved record says this environment's database got.
+ * - `none`: nothing recorded.
+ * - `started`: written down before anything was created, so a teardown can always find what an interrupted apply left.
+ * - `finished`: created, with the login its services use.
+ * Anything else is refused: a record whose parts do not belong together is never acted on.
+ */
+export function recordedAllocation(binding: GcpDatabaseBinding | undefined, identity: TenantIdentity): 'none' | 'started' | 'finished' {
+  if (!gcpDatabaseOnSharedServer(binding)) return 'none';
+  const record = binding!.database!;
+  if (record.placement !== 'app' || record.tenantId !== identity.tenantId || record.databaseName !== identity.names.database) throw blocked(INCOMPLETE_RECORD);
+  if (record.allocation === 'started' && record.activeLogin === undefined) return 'started';
+  if (record.allocation === undefined && identity.names.logins.includes(record.activeLogin ?? '')) return 'finished';
+  throw blocked(INCOMPLETE_RECORD);
 }
 
 const otherLogin = (names: TenantNames, login: string): string => (login === names.logins[0] ? names.logins[1] : names.logins[0]);
 
 export interface CredentialState {
-  /** The secret holds a working version made for this database. */
+  /** The secret's latest version is a working credential made for this database. */
   ready: boolean;
   login?: string;
   generation: number;
   latestVersion?: string;
   /** The login a finished rotation still has to switch off. */
   retirePending?: string;
+  /** A latest version nothing is recorded about; it is replaced, never used. */
+  unrecorded?: string;
 }
 
 /** Reads the state of the environment's connection secret from what Hypervibe recorded with its latest version. */
@@ -82,6 +107,7 @@ export function credentialState(seen: Seen<SeenConnectionSecret>, target: { secr
   if (labels['managed-by'] !== 'hypervibe' || labels['hv-environment'] !== target.environmentLabel) {
     throw blocked(`Secret Manager already has ${target.secretId}, but it is not owned by this Hypervibe environment.`);
   }
+  if (seen.value.unrecorded) return { ready: false, generation: 0, ...(seen.value.latestVersion ? { unrecorded: seen.value.latestVersion } : {}) };
   const ours = (login: string | undefined): login is string => login === target.names.logins[0] || login === target.names.logins[1];
   const login = labels['hv-db-login'];
   const ready = seen.value.hasEnabledVersion && labels['hv-db-instance'] === target.instanceName && labels['hv-db-database'] === target.names.database && ours(login);
@@ -94,6 +120,8 @@ export function credentialState(seen: Seen<SeenConnectionSecret>, target: { secr
   };
 }
 
+export type RunningSecretVersions = () => Promise<{ versions: string[] } | { blocked: string }>;
+
 export interface StepContext {
   cloud: SharedDatabaseCloud;
   engine: SharedDatabaseEngine;
@@ -101,12 +129,12 @@ export interface StepContext {
   environment: { id: string; name: string };
   /** The environment's saved binding as it is now, not as it was when planned. */
   binding: GcpDatabaseBinding | undefined;
+  /** Saves the binding's database record at once; null forgets it. */
+  record(database: SharedDatabaseRecord | null): void;
+  runningSecretVersions: RunningSecretVersions;
   metadata: StepMetadata;
   server?: ReviewedServerPlan;
 }
-
-/** `binding` is what to record: a record to save, null to forget the database, absent to leave the binding alone. */
-export interface StepOutcome { result: ActionResult; binding?: SharedDatabaseRecord | null }
 
 /** The server, found by its label in Google's own list and accepting connections. Not finding it never means "removed". */
 export async function runningServer(cloud: SharedDatabaseCloud, scope: SharedServerScope, instanceName: string): Promise<ServerAddress> {
@@ -121,42 +149,62 @@ export async function runningServer(cloud: SharedDatabaseCloud, scope: SharedSer
   return { instanceName, connectionName: `${scope.gcpProjectId}:${scope.region}:${instanceName}` };
 }
 
-async function applyServer(context: StepContext): Promise<StepOutcome> {
-  const reviewed = context.server;
-  if (!reviewed || JSON.stringify(reviewed.state) !== JSON.stringify(sharedServerState(context.scope))) {
-    return { result: { success: false, status: 'blocked', message: 'The reviewed plan for the shared database server targets a different app, Google Cloud project or region. Run hv_plan again.' } };
-  }
+async function applyEnginePlan(context: StepContext): Promise<ActionResult> {
+  const reviewed = context.server!;
   const { step, instanceName } = context.metadata;
-  if (step !== 'server') {
-    // Looked at again at the last moment: a server with anything of an environment's on it is never unprotected or deleted.
-    const tenants = await serverInventory(context.cloud, context.scope, instanceName);
-    if (tenants.length) throw blocked(`The app's shared database server holds a database again (${tenants.map((tenant) => tenant.names.database).join(', ')}). It was not changed.`);
-  }
   const outcome = await context.engine.apply(reviewed.state, reviewed.planId, reviewed.segment);
   const states = Object.values(outcome.outcomes);
   if (states.length && states.every((state) => state === 'succeeded')) {
-    return { result: { success: true, message: step === 'remove-server' ? `The app's shared database server (${instanceName}) was deleted.`
-      : step === 'unprotect-server' ? `Deletion protection is off on the app's shared database server (${instanceName}). Plan its removal again to delete it.`
-        : `The app's shared database server (${instanceName}) is ready.` } };
+    return { success: true, message: step === 'remove-server' ? `The app's shared database server (${instanceName}) was deleted.`
+      : step === 'unprotect-server' ? `The app's shared database server (${instanceName}) is ready to be deleted. Plan its removal again to delete it.`
+        : `The app's shared database server (${instanceName}) is ready.` };
   }
   const settled = !states.includes('unknown');
-  return { result: { success: false, ...(settled ? {} : { status: 'pending' as const }),
-    message: `The change to the app's shared database server was not ${settled ? 'made' : 'confirmed'}: ${outcome.diagnostics.join(' ') || 'the engine gave no reason.'} Run hv_plan again.` } };
+  return { success: false, ...(settled ? {} : { status: 'pending' as const }),
+    message: `The change to the app's shared database server was not ${settled ? 'made' : 'confirmed'}: ${outcome.diagnostics.join(' ') || 'the engine gave no reason.'} Run hv_plan again.` };
+}
+
+async function applyServer(context: StepContext): Promise<ActionResult> {
+  const reviewed = context.server;
+  if (!reviewed || JSON.stringify(reviewed.state) !== JSON.stringify(sharedServerState(context.scope))) {
+    return { success: false, status: 'blocked', message: 'The reviewed plan for the shared database server targets a different app, Google Cloud project or region. Run hv_plan again.' };
+  }
+  if (context.metadata.step === 'server') return applyEnginePlan(context);
+  // Removal. The server's own list is read at the last moment, and the lock every allocation needs is held from that
+  // read until the change is made, so no environment's database can arrive in between.
+  const server = await runningServer(context.cloud, context.scope, context.metadata.instanceName);
+  return withAdministrator(context.cloud, context.scope, server, async (tenants) => {
+    const lock = `(${TENANT_WRITER_LOCK[0]}, ${TENANT_WRITER_LOCK[1]})`;
+    const held = await tenants.admin.query(`SELECT pg_catalog.pg_try_advisory_lock${lock} AS answer`);
+    if (held.rows[0]?.answer !== true) throw pending(SERVER_BUSY);
+    try {
+      const marked = (await listTenants(tenants)).map((tenant) => tenant.names.database);
+      // Marked or not: any database beyond the server's own is someone's data.
+      const others = await tenants.admin.query(`SELECT datname::text AS name FROM pg_catalog.pg_database WHERE NOT datistemplate AND datname NOT IN ('${MAINTENANCE_DATABASE}', 'cloudsqladmin') ORDER BY 1`);
+      const names = [...new Set([...marked, ...others.rows.map((row) => String(row.name))])];
+      if (names.length) throw blocked(`The app's shared database server still holds ${names.length === 1 ? 'a database' : `${names.length} databases`} (${names.join(', ')}). It was not changed; a server is never deleted with a database on it.`);
+      return await applyEnginePlan(context);
+    } finally {
+      // After a delete there is no server left to answer; the lock went with it.
+      await tenants.admin.query(`SELECT pg_catalog.pg_advisory_unlock${lock}`).catch(() => {});
+    }
+  });
 }
 
 /** Proves the login opens this tenant's database and acts as its owner role, before anything is published. */
 async function proveLogin(cloud: SharedDatabaseCloud, server: ServerAddress, names: TenantNames, login: string, password: string): Promise<void> {
+  const refused = new Stop({ success: false, message: `The new login for ${names.database} did not open that database as its owner. Nothing was published; the app keeps using its current login.` });
   const seen = await cloud.withSession({ connectionName: server.connectionName, user: login, password, database: names.database },
-    (session) => session.query('SELECT current_user::text AS role, session_user::text AS login, current_database()::text AS database'));
+    (session) => session.query('SELECT current_user::text AS role, session_user::text AS login, current_database()::text AS database')).catch((error: unknown) => {
+    if (/^(28|42501|3D000)/.test(String((error as { code?: unknown } | null)?.code))) throw refused;
+    throw error;
+  });
   const row = seen.rows[0];
-  if (row?.role !== names.owner || row.login !== login || row.database !== names.database) {
-    throw new Stop({ success: false, message: `The new login for ${names.database} did not open that database as its owner. Nothing was published; the app keeps using its current login.` });
-  }
+  if (row?.role !== names.owner || row.login !== login || row.database !== names.database) throw refused;
 }
 
 /** Sets a new password on `login`, proves it, then publishes the connection URL with what is recorded about it. */
-async function issueCredential(context: StepContext, server: ServerAddress, tenants: TenantServer, identity: TenantIdentity,
-  login: string, retire?: string): Promise<void> {
+async function issueCredential(context: StepContext, server: ServerAddress, tenants: TenantServer, identity: TenantIdentity, login: string, retire?: string): Promise<void> {
   const { metadata, cloud } = context;
   const password = newPassword();
   await setTenantLoginPassword(tenants, { ...identity, login, password });
@@ -167,85 +215,111 @@ async function issueCredential(context: StepContext, server: ServerAddress, tena
   if (failure) throw new Stop(failure);
 }
 
-const record = (context: StepContext, identity: TenantIdentity, activeLogin: string): SharedDatabaseRecord => ({
+const recordOf = (context: StepContext, identity: TenantIdentity, state: { activeLogin: string } | { allocation: 'started' }): SharedDatabaseRecord => ({
   instanceName: context.metadata.instanceName, gcpProjectId: context.scope.gcpProjectId, region: context.scope.region,
-  databaseName: identity.names.database, placement: 'app', tenantId: identity.tenantId, activeLogin,
+  databaseName: identity.names.database, placement: 'app', tenantId: identity.tenantId, ...state,
 });
 
-async function applyTenantStep(context: StepContext): Promise<StepOutcome> {
+async function applyTenantStep(context: StepContext): Promise<ActionResult> {
   const { metadata, cloud, scope } = context;
   const identity = tenantFor(context.environment, context.binding);
   if (metadata.tenantId !== identity.tenantId || metadata.databaseName !== identity.names.database) {
-    return { result: { success: false, status: 'blocked', message: 'The database this plan was reviewed for is not this environment\'s. Run hv_plan again.' } };
+    return { success: false, status: 'blocked', message: 'The database this plan was reviewed for is not this environment\'s. Run hv_plan again.' };
   }
-  const recorded = gcpDatabaseOnSharedServer(context.binding);
+  const recorded = recordedAllocation(context.binding, identity);
+  const active = recorded === 'finished' ? context.binding!.database!.activeLogin! : undefined;
   const server = await runningServer(cloud, scope, metadata.instanceName);
   const name = context.environment.name;
   const credential = async () => credentialState(await cloud.observeConnectionSecret(metadata.gcpProjectId, metadata.secretId!),
     { secretId: metadata.secretId!, environmentLabel: metadata.labels?.['hv-environment'] ?? '', instanceName: server.instanceName, names: identity.names });
+  // Written down before anything exists, so whatever an interrupted apply leaves behind can always be found and removed.
+  if (metadata.step === 'allocate' && recorded === 'none') context.record(recordOf(context, identity, { allocation: 'started' }));
 
-  return withAdministrator(cloud, scope, server, { repair: true }, async (tenants): Promise<StepOutcome> => {
+  return withAdministrator(cloud, scope, server, async (tenants): Promise<ActionResult> => {
     if (metadata.step === 'release') {
       const dropped = await dropTenant(tenants, identity);
-      const leftover = dropped.remainingRoles.length ? ` Its logins ${dropped.remainingRoles.join(', ')} are switched off but could not be deleted yet; they are removed when this is run again.` : '';
-      return { binding: null, result: { success: true, message: dropped.database === 'dropped'
-        ? `${name}'s database (${identity.names.database}) was deleted from the app's shared database server. The server and the other environments' databases were not touched.${leftover}`
-        : `${name}'s database was already gone from the app's shared database server. The server was not touched.${leftover}` } };
+      if (dropped.remainingRoles.length) {
+        // Still recorded, so the next run finishes the job instead of forgetting them.
+        throw pending(`${name}'s database was deleted from the app's shared database server, but its logins ${dropped.remainingRoles.join(', ')} could not be deleted yet (they are switched off). Run the same command again.`);
+      }
+      context.record(null);
+      return { success: true, message: dropped.database === 'dropped'
+        ? `${name}'s database (${identity.names.database}) was deleted from the app's shared database server. The server and the other environments' databases were not touched.`
+        : `${name}'s database was already gone from the app's shared database server. The server was not touched.` };
     }
     if (metadata.step === 'allocate') {
       const seen = await observeTenant(tenants, identity);
-      // A database that was recorded and is no longer there is lost data, never a reason to make an empty one.
-      if (recorded && seen.database === 'absent') {
+      // A finished database that is no longer there is lost data, never a reason to make an empty one.
+      if (recorded === 'finished' && seen.database === 'absent') {
         throw blocked(`${name}'s database (${identity.names.database}) is recorded but is no longer on the app's shared database server. Hypervibe will not put an empty database in its place.`);
       }
-      // A new database is made only when the server itself says none exists and none was ever recorded for this environment.
-      await ensureTenant(tenants, { ...identity, connectionLimit: metadata.connectionLimit ?? CONNECTION_LIMITS.other, allocate: !recorded && seen.database === 'absent' });
+      // A new database is made only when the server itself says none exists and none was ever finished for this environment.
+      await ensureTenant(tenants, { ...identity, connectionLimit: metadata.connectionLimit ?? CONNECTION_LIMITS.other, allocate: recorded !== 'finished' && seen.database === 'absent' });
       const current = await credential();
-      if (current.ready) return { binding: record(context, identity, current.login!), result: { success: true, message: `${name}'s database on the app's shared database server is ready (${identity.names.database}).` } };
-      // Never the login the services may already hold: its password keeps working.
-      const login = recorded && context.binding!.database!.activeLogin ? otherLogin(identity.names, context.binding!.database!.activeLogin) : identity.names.logins[0];
-      await issueCredential(context, server, tenants, identity, login);
-      return { binding: record(context, identity, login), result: { success: true, message: `${name} has its own database (${identity.names.database}) on the app's shared database server; the app connects through ${metadata.secretId}.` } };
+      if (current.ready) {
+        context.record(recordOf(context, identity, { activeLogin: current.login! }));
+        return { success: true, message: `${name}'s database on the app's shared database server is ready (${identity.names.database}).` };
+      }
+      // A version Google stored and Hypervibe never heard back about holds a password nobody has. Mark it as holding nothing, then publish a fresh one.
+      if (current.unrecorded && !cloud.relabelConnectionSecret(metadata.gcpProjectId, metadata.secretId!, current.unrecorded, metadata.labels ?? {})) {
+        throw pending(`An earlier, unfinished write to ${metadata.secretId} could not be set aside. Run the same command again.`);
+      }
+      // Never the login the services may already hold: its password keeps working until they have moved.
+      const login = active ? otherLogin(identity.names, active) : identity.names.logins[0];
+      await issueCredential(context, server, tenants, identity, login, active);
+      context.record(recordOf(context, identity, { activeLogin: login }));
+      return { success: true, message: `${name} has its own database (${identity.names.database}) on the app's shared database server; the app connects through ${metadata.secretId}.` };
     }
     const current = await credential();
-    if (!current.ready || !recorded) throw blocked(`${name}'s database login changed since this plan. Run hv_plan again.`);
+    if (!current.ready || recorded !== 'finished') throw blocked(`${name}'s database login changed since this plan. Run hv_plan again.`);
     if (metadata.step === 'rotate') {
       if (current.retirePending || current.generation >= (metadata.generation ?? 1)) throw blocked(`${name}'s database password was already changed since this plan. Run hv_plan again.`);
       const next = otherLogin(identity.names, current.login!);
       await issueCredential(context, server, tenants, identity, next, current.login);
-      return { binding: record(context, identity, next), result: { success: true, message: `A new password for ${name}'s database is published on its second login. The app keeps running on its current login until its services move to the new secret version.` } };
+      context.record(recordOf(context, identity, { activeLogin: next }));
+      return { success: true, message: `A new password for ${name}'s database is published on its second login. The app keeps running on its current login until its services move to the new secret version.` };
     }
-    // retire: every service runs the new version, so the previous login can be switched off.
+    // retire: switch the previous login off, but only if what was reviewed is still true right now.
     if (!current.retirePending || !current.latestVersion) throw blocked(`${name}'s database has no previous login waiting to be switched off. Run hv_plan again.`);
+    const running = await context.runningSecretVersions();
+    if ('blocked' in running) throw blocked(running.blocked);
+    if (current.latestVersion !== metadata.secretVersion || running.versions.some((version) => version !== current.latestVersion)) {
+      throw blocked(`Not every service and job of ${name} uses the new database password yet, or it changed again since this plan. The previous login was left on. Run hv_plan again.`);
+    }
     const retired = await retireTenantLogin(tenants, { ...identity, login: current.retirePending });
     const seen = await cloud.observeConnectionSecret(metadata.gcpProjectId, metadata.secretId!);
     const { 'hv-db-retire': _retire, ...labels } = seen.state === 'present' ? seen.value.labels : {};
     if (seen.state !== 'present' || !cloud.relabelConnectionSecret(metadata.gcpProjectId, metadata.secretId!, current.latestVersion, labels)) {
       throw pending(`The previous login for ${name}'s database is switched off, but that could not be recorded. Run the same command again.`);
     }
+    context.record(recordOf(context, identity, { activeLogin: current.login! }));
     const open = retired.remainingSessions ? ` ${retired.remainingSessions} of its sessions had not ended yet; they cannot be reopened.` : '';
-    return { binding: record(context, identity, current.login!), result: { success: true, message: `The previous login for ${name}'s database no longer works. Rotation is complete.${open}` } };
+    return { success: true, message: `The previous login for ${name}'s database no longer works. Rotation is complete.${open}` };
   });
 }
 
-/** What the server itself lists: every database Hypervibe made on it, finished or not. Never repairs anything. */
-export async function serverInventory(cloud: SharedDatabaseCloud, scope: SharedServerScope, instanceName: string): Promise<TenantObservation[]> {
-  const server = await runningServer(cloud, scope, instanceName);
-  return withAdministrator(cloud, scope, server, { repair: false }, (tenants) => listTenants(tenants));
-}
+const NETWORK = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', 'EPIPE', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']);
 
-/** Runs one reviewed step. Every refusal comes back as a result; nothing here throws a password or a statement at the caller. */
-export async function runStep(context: StepContext): Promise<StepOutcome> {
+/**
+ * Runs one reviewed step. Every refusal comes back as a result. An unexpected
+ * error is reported by its class and code only: its text may quote a statement
+ * or a value, so none of it is copied.
+ */
+export async function runStep(context: StepContext): Promise<ActionResult> {
   try {
     return ['server', 'unprotect-server', 'remove-server'].includes(context.metadata.step) ? await applyServer(context) : await applyTenantStep(context);
   } catch (error) {
-    if (error instanceof Stop) return { result: error.result };
-    if (error instanceof TenantRefusedError) return { result: { success: false, status: 'blocked', message: error.message } };
-    if (error instanceof TenantBusyError) return { result: { success: false, status: 'pending', message: error.message } };
-    const reason = (error instanceof Error ? error.message.split('\n')[0]! : 'unknown error').replace(/postgresql:\/\/\S+/g, '<redacted>');
-    const retry = /timeout|ECONN|ENOTFOUND|EAI_AGAIN|Connection terminated|fetch failed/i.test(reason);
-    return { result: { success: false, ...(retry ? { status: 'pending' as const } : { error: reason }),
-      message: retry ? `The connection to the shared database server dropped (${reason}). Run the same command again; nothing the app uses was changed.`
-        : `The shared database server refused a step (${reason}). The app keeps using its current login.` } };
+    if (error instanceof Stop) return error.result;
+    if (error instanceof TenantRefusedError) return { success: false, status: 'blocked', message: error.message };
+    if (error instanceof TenantBusyError) return { success: false, status: 'pending', message: SERVER_BUSY };
+    const raw = (error as { code?: unknown } | null)?.code;
+    const code = typeof raw === 'string' && /^[A-Z0-9_]{3,40}$/.test(raw) ? raw : undefined;
+    const kind = error instanceof Error && /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : 'Error';
+    const label = code ? `${kind} ${code}` : kind;
+    // Dropped connections and timeouts are worth simply repeating; the text is tested, never shown.
+    const retry = (code !== undefined && NETWORK.has(code)) || (error instanceof Error && /timeout|Connection terminated|fetch failed/i.test(error.message));
+    return retry
+      ? { success: false, status: 'pending', message: `The connection to the app's shared database server dropped (${label}). Run the same command again; nothing the app uses was changed.` }
+      : { success: false, error: label, message: `A step on the app's shared database server failed (${label}). The app keeps using its current login.` };
   }
 }

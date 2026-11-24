@@ -29,6 +29,8 @@ export interface GcpDatabaseBinding {
     /** On such a server: the environment the database was made for, and the login its services use now. */
     tenantId?: string;
     activeLogin?: string;
+    /** 'started': written before anything was created, so an interrupted creation can always be found. Absent once finished. */
+    allocation?: 'started';
   };
 }
 
@@ -61,15 +63,15 @@ export function gcpDatabaseOnSharedServer(binding: GcpDatabaseBinding | undefine
 }
 
 /**
- * The record of a database on a shared server is trusted only when every part is
- * present and the parts agree: made for this environment, in this environment's
- * Google project, with a database name and an active login that belong together.
+ * A record of a database on a shared server is acted on only when it names a
+ * server in this environment's own Google project and says it was made for
+ * this very environment. Whether the rest of the record hangs together is for
+ * the shared-database module, which is the only reader of those parts.
  */
 function sharedRecordProblem(environmentGcpProjectId: string, binding: GcpDatabaseBinding, environmentId: string | undefined): string | undefined {
   const record = binding.database as Record<string, unknown>;
-  const database = typeof record.databaseName === 'string' ? record.databaseName : '';
   const complete = record.placement === 'app' && filled(record.instanceName) && filled(record.region) && record.gcpProjectId === environmentGcpProjectId
-    && /^app_[a-z0-9]+(?:_[a-z0-9]+)*$/.test(database) && (record.activeLogin === `${database}_a` || record.activeLogin === `${database}_b`) && filled(record.tenantId);
+    && filled(record.databaseName) && filled(record.tenantId);
   if (!complete) return 'The saved record of this environment\'s database on the shared server is incomplete, so Hypervibe will not plan changes to it.';
   if (!environmentId || record.tenantId !== environmentId) return 'The saved record says this database on the shared server was made for a different environment, so Hypervibe will not plan changes to it.';
   return undefined;

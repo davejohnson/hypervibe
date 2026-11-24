@@ -8,12 +8,11 @@ import { gcpDatabaseOnSharedServer, type GcpDatabaseBinding } from '../gcp-datab
 import { Stop, blocked } from './administrator.js';
 import type { SharedDatabaseCloud, SharedDatabaseEngine } from './ports.js';
 import {
-  SERVER_ENGINE_ACTIONS, administratorSecretId, findSharedServer, newSharedServerName, sharedServerConfiguration, sharedServerCost, sharedServerProtection,
-  sharedServerState, type SharedServerScope,
+  SERVER_ENGINE_ACTION, findSharedServer, newSharedServerName, sharedServerConfiguration, sharedServerCost, sharedServerProtection, sharedServerState, type SharedServerScope,
 } from './server.js';
 import {
-  CONNECTION_LIMITS, SHARED_DATABASE_OPERATION, credentialState, runStep, serverInventory, tenantFor,
-  type ReviewedServerPlan, type SharedDatabaseRecord, type SharedDatabaseStep, type StepMetadata,
+  CONNECTION_LIMITS, SHARED_DATABASE_OPERATION, credentialState, recordedAllocation, runStep, tenantFor,
+  type ReviewedServerPlan, type RunningSecretVersions, type SharedDatabaseRecord, type SharedDatabaseStep, type StepMetadata,
 } from './tenancy.js';
 
 /**
@@ -25,8 +24,8 @@ import {
  * saved state, Hypervibe's administrator login, which database and logins an
  * environment has, rotation and release. A planner asks three things and
  * learns nothing else: what to do (`actions`), what its services connect to
- * (`connection`, `credential`), and what to write in the environment's binding
- * after a step (`binding`).
+ * (`connection`, `credential`), and what to keep in the environment's binding
+ * (`record`, called by a step whenever that changes).
  */
 export { googleSharedDatabaseCloud } from './google.js';
 export type { SharedDatabaseCloud, SharedDatabaseEngine } from './ports.js';
@@ -39,6 +38,8 @@ export interface SharedDatabaseRequest {
   region: string;
   /** The environment's saved engine binding, as it is now. */
   binding: GcpDatabaseBinding | undefined;
+  /** The connection secret version each of the environment's services and jobs runs now. Asked only when a rotation is finishing. */
+  runningSecretVersions: RunningSecretVersions;
   engine: SharedDatabaseEngine;
   cloud: SharedDatabaseCloud;
 }
@@ -47,12 +48,8 @@ export interface SharedDatabasePlanRequest extends SharedDatabaseRequest {
   /** The environment's database spec; absent when the database is being removed or the environment torn down. */
   desired: EnvironmentSpec['database'];
   teardown?: boolean;
-  /** A worker of this environment counts pending work with a query in the database. */
-  countsPendingWork: boolean;
   /** The environment's own connection secret (DATABASE_URL) and its ownership labels. */
   secret: { id: string; labels: Record<string, string> };
-  /** The connection secret version each running service uses now. Asked only when a rotation is waiting to finish. */
-  runningSecretVersions(): Promise<{ versions: string[] } | { blocked: string }>;
 }
 
 export interface SharedDatabasePlan {
@@ -69,22 +66,25 @@ export interface SharedDatabasePlan {
 export interface SharedDatabaseApplyRequest extends SharedDatabaseRequest {
   action: PlanAction;
   reviewed: unknown;
+  /** Saves the database part of the environment's binding at once: a record, or null to forget it. */
+  record(database: SharedDatabaseRecord | null): void;
 }
 
-export interface SharedDatabaseApplied {
-  result: ActionResult;
-  /** What to save as the binding's database: a record, null to forget it, absent to leave it. */
-  binding?: SharedDatabaseRecord | null;
-}
+export type SharedServerRequest = Pick<SharedDatabaseRequest, 'project' | 'gcpProjectId' | 'region' | 'engine' | 'cloud'>;
+export interface SharedServerRemovalPlan { instanceName: string; action: PlanAction; reviewed: Record<string, unknown> }
 
 export interface SharedDatabaseEntry {
   /** Undefined when this environment's database is not, and is not asked to be, on the shared server: the caller carries on as before. */
   plan(request: SharedDatabasePlanRequest): Promise<SharedDatabasePlan | { blocked: string } | undefined>;
   /** True for the actions `plan` and `planServerRemoval` return. */
   handles(action: PlanAction): boolean;
-  apply(request: SharedDatabaseApplyRequest): Promise<SharedDatabaseApplied>;
-  /** Removing the server itself: offered only when the server's own list of databases is empty. Never part of an environment's plan. */
-  planServerRemoval(request: Omit<SharedDatabaseRequest, 'environment' | 'binding'>): Promise<{ actions: PlanAction[]; reviewed: Record<string, unknown> } | { blocked: string }>;
+  apply(request: SharedDatabaseApplyRequest): Promise<ActionResult>;
+  /**
+   * Removing the server itself; never part of an environment's plan. `none` when the app has no shared server.
+   * Planning reads no database: the step itself refuses, at the last moment, while any database is on the server.
+   */
+  planServerRemoval(request: SharedServerRequest): Promise<SharedServerRemovalPlan | { none: true } | { blocked: string }>;
+  applyServerRemoval(request: SharedServerRequest & { action: PlanAction; reviewed: unknown }): Promise<ActionResult>;
 }
 
 interface Reviewed { instanceName: string; server?: ReviewedServerPlan }
@@ -93,58 +93,37 @@ const scopeOf = (request: Pick<SharedDatabaseRequest, 'project' | 'gcpProjectId'
   ({ projectId: request.project.id, gcpProjectId: request.gcpProjectId, region: request.region });
 
 const resource = { kind: 'database' as const, name: 'postgres', provider: 'gcp' };
+const serverMetadata = (scope: SharedServerScope, step: SharedDatabaseStep, instanceName: string): Record<string, unknown> =>
+  ({ operation: SHARED_DATABASE_OPERATION, step, gcpProjectId: scope.gcpProjectId, region: scope.region, instanceName, databaseName: '', tenantId: '' } satisfies StepMetadata);
 
-/** What an environment on the shared server cannot have yet. Each is refused whole, never half done. */
-function unsupported(request: SharedDatabasePlanRequest): string | undefined {
-  const name = request.environment.name;
-  const database = request.desired!;
-  const onServer = 'on the app\'s shared database server';
-  if (request.countsPendingWork) return `${name} has an on-demand worker that counts pending work in the database. That is not available yet ${onServer}; give ${name} its own database (remove "placement") or run the worker all the time.`;
-  if (database.size !== undefined) return `database.size cannot be set for ${name}: its database is ${onServer}, whose size is not chosen by one environment. Remove "size", or remove "placement" to give ${name} its own database.`;
-  if (database.version !== undefined) return `database.version cannot be set for ${name}: its database is ${onServer} (PostgreSQL 16), and one environment cannot change the version for the others. Remove "version", or remove "placement".`;
-  if (request.binding && (request.binding as { migration?: unknown }).migration) return `${name} is part of a migration. Migration is not available yet for a database ${onServer}.`;
-  return undefined;
+type ServerChange = 'create' | 'take-over' | 'unprotect' | 'delete';
+
+/**
+ * Plans one change to the server through the engine, in the server's own saved state, and accepts the result only
+ * when it is exactly that change. Anything else the engine wants to do to the server is refused, never folded in.
+ */
+async function planServerChange(request: Pick<SharedDatabaseRequest, 'engine'>, scope: SharedServerScope, instanceName: string, change: ServerChange): Promise<ReviewedServerPlan | undefined> {
+  const state = sharedServerState(scope);
+  const planId = crypto.randomUUID();
+  const planned = await request.engine.plan(sharedServerConfiguration({ scope, instanceName, ...(change === 'take-over' ? { adopt: true } : {}), ...(change === 'create' ? {} : { protect: false }) }),
+    state, planId, change === 'delete');
+  if (!planned.ok) throw blocked(planned.error);
+  if (planned.blockers.length) throw blocked(planned.blockers.join(' '));
+  const changes = planned.actions.filter((action) => action.type !== 'noop');
+  if (!changes.length) return undefined;
+  const expected = change === 'create' ? 'create' : change === 'delete' ? 'destroy' : 'update';
+  if (changes.length !== 1 || changes[0]!.id !== SERVER_ENGINE_ACTION || changes[0]!.type !== expected) {
+    throw blocked(`The engine would ${changes.map((action) => action.type).join(' and ')} the app's shared database server (${instanceName}) where only "${expected}" was expected. Hypervibe will not change it.`);
+  }
+  return { planId, state, segment: { ...planned.segment, addresses: [...new Set(changes.flatMap((action) => engineSegmentOf(action)?.addresses ?? []))] } };
 }
 
-/** Plans the server through the engine in its own saved state and wraps the result as one plainly worded action. */
-async function planServer(request: Pick<SharedDatabaseRequest, 'engine' | 'project'>, scope: SharedServerScope, instanceName: string,
-  exists: { server: boolean; administratorSecret: boolean }, mode: { protect?: boolean; destroy?: boolean } = {}): Promise<{ action?: PlanAction; server?: ReviewedServerPlan }> {
-  const state = sharedServerState(scope);
-  let adopt: { server?: boolean; administratorSecret?: boolean } = {};
-  for (let round = 0; ; round++) {
-    const planId = crypto.randomUUID();
-    const planned = await request.engine.plan(sharedServerConfiguration({ scope, instanceName, adopt, ...(mode.protect === false ? { protect: false } : {}) }), state, planId, mode.destroy);
-    if (!planned.ok) throw blocked(planned.error);
-    if (planned.blockers.length) throw blocked(planned.blockers.join(' '));
-    const changes = planned.actions.filter((action) => action.type !== 'noop');
-    const creating = (id: string) => changes.some((action) => action.id === id && action.type === 'create');
-    // A create for something that already exists means saved state lost track of an interrupted create. It carries this app's label, so it is taken over.
-    const missed = { ...(exists.server && creating(SERVER_ENGINE_ACTIONS.server) ? { server: true } : {}),
-      ...(exists.administratorSecret && creating(SERVER_ENGINE_ACTIONS.administratorSecret) ? { administratorSecret: true } : {}) };
-    if (Object.keys(missed).length && round === 0 && !mode.destroy) { adopt = missed; continue; }
-    if (Object.keys(missed).length) throw blocked('The shared database server exists but could not be matched to Hypervibe\'s saved state. Nothing was planned.');
-    if (!changes.length) return {};
-    const addresses = [...new Set(changes.flatMap((action) => engineSegmentOf(action)?.addresses ?? []))];
-    const billable = creating(SERVER_ENGINE_ACTIONS.server);
-    const replaces = changes.some((action) => action.type === 'replace' || (action.type === 'destroy' && !mode.destroy));
-    if (replaces) throw blocked('The engine would replace or delete the app\'s shared database server. Hypervibe will not plan that from an environment.');
-    const step: SharedDatabaseStep = mode.destroy ? 'remove-server' : mode.protect === false ? 'unprotect-server' : 'server';
-    const reason = mode.destroy
-      ? `Delete ${request.project.name}'s shared database server (${instanceName}) and its backups. Its own list shows no database left on it. This cannot be undone.`
-      : mode.protect === false
-        ? `Turn off deletion protection on ${request.project.name}'s shared database server (${instanceName}) so it can be deleted. Its own list shows no database left on it. Plan the removal again afterwards.`
-        : billable
-          ? `Create the app's shared database server (${sharedServerCost()}). ${sharedServerProtection()} Each environment that uses it gets its own database on it.`
-          : `Finish setting up the app's shared database server (${instanceName}); no new server is created and nothing on it is changed.`;
-    return {
-      server: { planId, state, segment: { ...planned.segment, addresses } },
-      action: {
-        id: `shared-database:${step}`, type: mode.destroy ? 'destroy' : billable ? 'create' : 'update', resource, verified: true, reason,
-        ...(billable ? { billable: true } : {}), ...(mode.destroy ? { dataBearing: true } : {}), ...(billable || mode.destroy || mode.protect === false ? { requiresConfirm: true } : {}),
-        metadata: { operation: SHARED_DATABASE_OPERATION, step, gcpProjectId: scope.gcpProjectId, region: scope.region, instanceName, databaseName: '', tenantId: '' } satisfies StepMetadata,
-      },
-    };
+/** What an environment on the shared server cannot have yet, that only its saved binding shows. What the spec alone shows is refused where specs are checked. */
+function unsupported(request: SharedDatabasePlanRequest): string | undefined {
+  if (request.binding && (request.binding as { migration?: unknown }).migration) {
+    return `${request.environment.name} is part of a migration. Migration is not available yet for a database on the app's shared database server.`;
   }
+  return undefined;
 }
 
 async function plan(request: SharedDatabasePlanRequest): Promise<SharedDatabasePlan | { blocked: string } | undefined> {
@@ -162,6 +141,7 @@ async function plan(request: SharedDatabasePlanRequest): Promise<SharedDatabaseP
   try {
     const scope = scopeOf(request);
     const identity = tenantFor(environment, binding);
+    const recorded = recordedAllocation(binding, identity);
     const metadata = (step: SharedDatabaseStep, instanceName: string, more: Partial<StepMetadata> = {}): Record<string, unknown> => ({
       operation: SHARED_DATABASE_OPERATION, step, gcpProjectId: scope.gcpProjectId, region: scope.region, instanceName,
       databaseName: identity.names.database, tenantId: identity.tenantId, ...more } satisfies StepMetadata);
@@ -186,42 +166,47 @@ async function plan(request: SharedDatabasePlanRequest): Promise<SharedDatabaseP
     if (bound && (found.state !== 'present' || found.server.instanceName !== binding!.database!.instanceName)) {
       return { blocked: `${name}'s database is recorded on shared database server ${binding!.database!.instanceName}, which was not found in ${scope.gcpProjectId}. Hypervibe will not create another server or an empty database in its place.` };
     }
+    // The server is planned from an environment only when Google's own list shows none. One that exists is never changed from here.
     const instanceName = found.state === 'present' ? found.server.instanceName : newSharedServerName(request.project.name);
-    const administratorSecret = await cloud.readAdministratorSecret(scope.gcpProjectId, administratorSecretId(instanceName));
-    if (administratorSecret.state === 'unknown') return { blocked: administratorSecret.reason };
-    // The server is planned only while a piece of it is missing; an ordinary plan for an environment never re-plans a finished server.
-    const server = found.state === 'present' && administratorSecret.state === 'present' ? {}
-      : await planServer(request, scope, instanceName, { server: found.state === 'present', administratorSecret: administratorSecret.state === 'present' });
+    const actions: PlanAction[] = [];
+    let server: ReviewedServerPlan | undefined;
+    if (found.state === 'absent') {
+      server = await planServerChange(request, scope, instanceName, 'create');
+      if (!server) return { blocked: `Hypervibe's saved state says the app's shared database server exists, but Google lists none in ${scope.gcpProjectId} (${scope.region}). Nothing was planned.` };
+      actions.push({ id: 'shared-database:server', type: 'create', resource, verified: true, billable: true, requiresConfirm: true,
+        reason: `Create the app's shared database server (${sharedServerCost()}). ${sharedServerProtection()} Each environment that uses it gets its own database on it.`,
+        metadata: serverMetadata(scope, 'server', instanceName) });
+    }
 
     const credential = credentialState(await cloud.observeConnectionSecret(scope.gcpProjectId, request.secret.id),
       { secretId: request.secret.id, environmentLabel: request.secret.labels['hv-environment'] ?? '', instanceName, names: identity.names });
     const generation = desired.passwordGeneration ?? 1;
-    const actions: PlanAction[] = server.action ? [server.action] : [];
     const secret = { secretId: request.secret.id, labels: request.secret.labels };
-    if (!bound || !credential.ready) {
+    const finished = recorded === 'finished';
+    if (!finished || !credential.ready) {
       // Staging counts as "other" here: on one server its connections come out of production's.
       const limit = /prod/i.test(name) ? CONNECTION_LIMITS.production : CONNECTION_LIMITS.other;
-      actions.push({ id: 'shared-database:allocate', type: bound ? 'update' : 'create', resource, verified: true,
-        ...(server.action ? { dependsOn: [server.action.id] } : {}),
-        reason: bound
-          ? `Give ${name}'s database on the app's shared database server a working login again and store its connection URL in Secret Manager (${request.secret.id}).`
+      actions.push({ id: 'shared-database:allocate', type: finished ? 'update' : 'create', resource, verified: true,
+        ...(server ? { dependsOn: ['shared-database:server'] } : {}),
+        reason: finished
+          ? `Give ${name}'s database on the app's shared database server a working login again and store its connection URL in Secret Manager (${request.secret.id}). Its data is not touched.`
           : `Create ${name}'s own database on the app's shared database server (up to ${limit} connections), with two logins that take turns, and store its connection URL in Secret Manager (${request.secret.id}). No extra server charge. Passwords never enter OpenTofu.`,
         metadata: metadata('allocate', instanceName, { ...secret, generation, connectionLimit: limit }) });
     } else if (credential.retirePending) {
       const running = await request.runningSecretVersions();
       if ('blocked' in running) return running;
-      // Only once every service runs the published version; until then the rollout is still under way.
-      if (running.versions.every((version) => version === credential.latestVersion)) {
+      // Only once every service and job runs the published version; until then the rollout is still under way.
+      if (credential.latestVersion && running.versions.every((version) => version === credential.latestVersion)) {
         actions.push({ id: 'shared-database:retire', type: 'update', resource, verified: true,
           reason: `Every service now uses ${name}'s new database password; Hypervibe will switch off the previous login. Other environments' logins are not touched.`,
-          metadata: metadata('retire', instanceName, secret) });
+          metadata: metadata('retire', instanceName, { ...secret, secretVersion: credential.latestVersion }) });
       }
     } else if (credential.generation < generation) {
       actions.push({ id: 'shared-database:rotate', type: 'update', resource, verified: true,
         reason: `Rotate ${name}'s database password with no downtime: set a new password on its idle login, then move services to it before switching the old one off. Other environments' logins are not touched.`,
         metadata: metadata('rotate', instanceName, { ...secret, generation }) });
     }
-    const ready = bound && credential.ready;
+    const ready = finished && credential.ready;
     return {
       actions,
       connection: { connectionName: `${scope.gcpProjectId}:${scope.region}:${instanceName}`, wireServices: ready,
@@ -230,7 +215,7 @@ async function plan(request: SharedDatabasePlanRequest): Promise<SharedDatabaseP
       warnings: actions.some((action) => action.id === 'shared-database:allocate' && action.type === 'create')
         ? [`${name}'s database shares one server with this app's other environments that use "placement": "app". Their data is separate, but they share the machine: a heavy load or a full disk in one can slow the others, and a restore or a PostgreSQL upgrade covers the whole server. Remove "placement" to give ${name} a server of its own.`]
         : [],
-      reviewed: { instanceName, ...(server.server ? { server: server.server } : {}) } satisfies Reviewed,
+      reviewed: { instanceName, ...(server ? { server } : {}) } satisfies Reviewed,
     };
   } catch (error) {
     if (error instanceof Stop) return { blocked: error.result.message };
@@ -238,43 +223,60 @@ async function plan(request: SharedDatabasePlanRequest): Promise<SharedDatabaseP
   }
 }
 
-async function planServerRemoval(request: Omit<SharedDatabaseRequest, 'environment' | 'binding'>): Promise<{ actions: PlanAction[]; reviewed: Record<string, unknown> } | { blocked: string }> {
+async function planServerRemoval(request: SharedServerRequest): Promise<SharedServerRemovalPlan | { none: true } | { blocked: string }> {
   try {
     const scope = scopeOf(request);
     const listed = await request.cloud.listServers(scope.gcpProjectId);
     if (listed.state === 'unknown') return { blocked: listed.reason };
     const found = findSharedServer(listed.servers, scope);
     if (found.state === 'unclear') return { blocked: found.reason };
-    if (found.state === 'absent') return { blocked: `${request.project.name} has no shared database server in ${scope.gcpProjectId} (${scope.region}).` };
+    if (found.state === 'absent') return { none: true };
     const { instanceName } = found.server;
-    const tenants = await serverInventory(request.cloud, scope, instanceName);
-    if (tenants.length) {
-      return { blocked: `The app's shared database server still holds ${tenants.length === 1 ? 'a database' : `${tenants.length} databases`} (${tenants.map((tenant) => tenant.names.database).join(', ')}). Remove ${tenants.length === 1 ? 'that environment\'s database' : 'those environments\' databases'} first; the server is never deleted with data on it.` };
+    const only = 'It is changed only if its own list shows no database on it at that moment; otherwise nothing happens.';
+    const step = (name: SharedDatabaseStep, server: ReviewedServerPlan, type: 'update' | 'destroy', reason: string): SharedServerRemovalPlan => ({
+      instanceName, reviewed: { instanceName, server } satisfies Reviewed,
+      action: { id: `shared-database:${name}`, type, resource, verified: true, requiresConfirm: true, ...(type === 'destroy' ? { dataBearing: true } : {}), reason, metadata: serverMetadata(scope, name, instanceName) },
+    });
+    // Google refuses to delete a protected server, so removal is two reviewed steps: protection off, then delete.
+    if (!found.server.deletionProtection) {
+      const removal = await planServerChange(request, scope, instanceName, 'delete');
+      if (removal) return step('remove-server', removal, 'destroy', `Delete ${request.project.name}'s shared database server (${instanceName}) and its backups. ${only} This cannot be undone.`);
     }
-    const exists = { server: true, administratorSecret: true };
-    const planned = await planServer(request, scope, instanceName, exists, found.server.deletionProtection ? { protect: false } : { protect: false, destroy: true });
-    if (!planned.action || !planned.server) return { blocked: 'The engine found nothing to change on the shared database server. Run the removal plan again.' };
-    return { actions: [planned.action], reviewed: { instanceName, server: planned.server } satisfies Reviewed };
+    // Either still protected, or saved state lost track of the server (an interrupted create): the first step puts both right.
+    const prepare = await planServerChange(request, scope, instanceName, 'unprotect').catch(async (error: unknown) => {
+      if (!(error instanceof Stop)) throw error;
+      return planServerChange(request, scope, instanceName, 'take-over');
+    });
+    if (!prepare) return { blocked: 'The engine found nothing to change on the shared database server, yet could not plan its deletion. Run the removal again.' };
+    return step('unprotect-server', prepare, 'update', `Turn off deletion protection on ${request.project.name}'s shared database server (${instanceName}) so it can be deleted in a second step. ${only}`);
   } catch (error) {
     if (error instanceof Stop) return { blocked: error.result.message };
     throw error;
   }
 }
 
-async function apply(request: SharedDatabaseApplyRequest): Promise<SharedDatabaseApplied> {
+type Applying = Pick<SharedDatabaseApplyRequest, 'action' | 'reviewed' | 'project' | 'gcpProjectId' | 'region' | 'engine' | 'cloud'>
+  & Partial<Pick<SharedDatabaseApplyRequest, 'environment' | 'binding' | 'record' | 'runningSecretVersions'>>;
+
+async function run(request: Applying, serverSteps: boolean): Promise<ActionResult> {
   const metadata = request.action.metadata as unknown as StepMetadata | undefined;
   const reviewed = request.reviewed as Reviewed | undefined;
   const scope = scopeOf(request);
+  const removal = metadata?.step === 'unprotect-server' || metadata?.step === 'remove-server';
   if (metadata?.operation !== SHARED_DATABASE_OPERATION || metadata.gcpProjectId !== scope.gcpProjectId || metadata.region !== scope.region
-    || !reviewed || typeof reviewed !== 'object' || reviewed.instanceName !== metadata.instanceName) {
-    return { result: { success: false, status: 'blocked', message: 'The shared database target changed since this plan. Run hv_plan again.' } };
+    || !reviewed || typeof reviewed !== 'object' || reviewed.instanceName !== metadata.instanceName || removal !== serverSteps) {
+    return { success: false, status: 'blocked', message: 'The shared database target changed since this plan. Run hv_plan again.' };
   }
-  return runStep({ cloud: request.cloud, engine: request.engine, scope, environment: request.environment, binding: request.binding, metadata, ...(reviewed.server ? { server: reviewed.server } : {}) });
+  return runStep({ cloud: request.cloud, engine: request.engine, scope, environment: request.environment ?? { id: '', name: '' }, binding: request.binding,
+    record: request.record ?? (() => {}), runningSecretVersions: request.runningSecretVersions ?? (async () => ({ blocked: 'No workloads to check.' })),
+    metadata, ...(reviewed.server ? { server: reviewed.server } : {}) });
 }
 
 export const sharedDatabase: SharedDatabaseEntry = {
   plan,
   handles: (action) => action.metadata?.operation === SHARED_DATABASE_OPERATION,
-  apply,
+  // An environment's plan can never carry a step that removes the server, and the removal can never carry an environment's.
+  apply: (request) => run(request, false),
   planServerRemoval,
+  applyServerRemoval: (request) => run(request, true),
 };
