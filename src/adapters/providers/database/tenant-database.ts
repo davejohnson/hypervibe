@@ -512,6 +512,37 @@ export async function retireTenantLogin(server: TenantServer, params: TenantIden
 }
 
 /**
+ * Pause: neither login of a ready tenant can log in, their sessions are ended,
+ * and every other session in the tenant's database is counted. Unlike
+ * retirement the passwords are kept, so `resumeTenantLogin` can switch a login
+ * back on exactly as it was. Safe to repeat. The logins are off even when
+ * sessions had not ended within the wait; the counts say whether the database
+ * is quiet yet.
+ */
+export async function pauseTenantLogins(server: TenantServer, params: TenantIdentity): Promise<{ remainingSessions: number; otherSessions: number }> {
+  const { names, tenantId } = checked(params);
+  const sessionWaitMs = waitOption(server.sessionWaitMs, 5000, 'session');
+  return locked(server, 'exclusive', async () => {
+    requireReady(await observe(server.admin, names, tenantId), names);
+    for (const login of names.logins) await server.admin.query(`ALTER ROLE ${ident(login)} NOLOGIN`);
+    const remainingSessions = await endSessions(server.admin, [...names.logins], sessionWaitMs);
+    // Anyone else connected to this database (a person's own session, another tool) could still write to it.
+    const others = await server.admin.query(`SELECT count(*)::int AS open FROM pg_catalog.pg_stat_activity WHERE datname = $1::name AND pid <> pg_catalog.pg_backend_pid()`, [names.database]);
+    return { remainingSessions, otherSessions: Number(others.rows[0]?.open) };
+  });
+}
+
+/** Undoes a pause for one login of a ready tenant: it may log in again with the password it already had. Sets no password. */
+export async function resumeTenantLogin(server: TenantServer, params: TenantIdentity & { login: string }): Promise<void> {
+  const { names, tenantId } = checked(params);
+  const login = checkedLogin(names, params.login);
+  await locked(server, 'exclusive', async () => {
+    requireReady(await observe(server.admin, names, tenantId), names);
+    await server.admin.query(`ALTER ROLE ${ident(login)} LOGIN`);
+  });
+}
+
+/**
  * Removes the tenant, in this order: marks its database as being removed;
  * switches both logins off (cannot log in, no password); ends their sessions in
  * every database on the server and confirms they are gone; only then drops the

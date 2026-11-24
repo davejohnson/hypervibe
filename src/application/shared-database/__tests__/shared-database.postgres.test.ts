@@ -126,6 +126,10 @@ const cloud: SharedDatabaseCloud = {
     return { state: 'present', value: { labels: secret.unrecorded ? labelsOf({ id: secret.labels['hv-environment']! }) : secret.labels, hasEnabledVersion: secret.versions.length > 0,
       ...(secret.versions.length ? { latestVersion: String(secret.versions.length) } : {}), ...(secret.unrecorded ? { unrecorded: true } : {}) } };
   },
+  readSecretVersion: async (_project, secretId, version) => {
+    const value = google.connectionSecrets.get(secretId)?.versions[Number(version) - 1];
+    return value ? { state: 'present', value } : { state: 'absent' };
+  },
   async publishConnectionSecret(_project, secretId, labels, value) {
     const secret = google.connectionSecrets.get(secretId)!;
     const mode = google.nextPublish;

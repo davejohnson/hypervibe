@@ -1,5 +1,5 @@
 import { sqlAdmin } from '../../adapters/providers/gcp/gcp-data.client.js';
-import { readSecretContainer } from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { readSecretContainer, readSecretVersionValue } from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { setCloudSqlLoginPassword, withCloudSqlSession } from '../infrastructure-engine-database.js';
 import { observeSecret, recordSecretVersionMetadata, writeSecretVersion } from '../infrastructure-engine.js';
 import { SERVER_BUSY } from './administrator.js';
@@ -68,6 +68,7 @@ export function googleSharedDatabaseCloud(access: { token: string; credentials: 
       return { state: 'present', value: { labels: container.value.labels, hasEnabledVersion: container.value.hasEnabledVersion, latestVersion: version, unrecorded: true } };
     },
 
+    readSecretVersion: (gcpProjectId, secretId, version) => readSecretVersionValue(token, gcpProjectId, secretId, version),
     publishConnectionSecret: (gcpProjectId, secretId, labels, value) => writeSecretVersion(token, gcpProjectId, secretId, labels, value),
     relabelConnectionSecret: recordSecretVersionMetadata,
 

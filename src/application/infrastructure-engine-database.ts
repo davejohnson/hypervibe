@@ -92,6 +92,13 @@ export function connectionUrl(login: string, secret: string, databaseName: strin
   return `postgresql://${login}:${encodeURIComponent(secret)}@/${databaseName}?host=/cloudsql/${connectionName}`;
 }
 
+/** Reads back exactly what `connectionUrl` writes; anything else is not a Hypervibe connection URL. The password is for use in memory only. */
+export function parseConnectionUrl(url: string): { login: string; password: string; databaseName: string; connectionName: string } | undefined {
+  const parts = /^postgresql:\/\/([a-z][a-z0-9_]{0,62}):([^@/:?#]+)@\/([a-z][a-z0-9_]{0,62})\?host=\/cloudsql\/([a-z][a-z0-9-]+:[a-z0-9-]+:[a-z][a-z0-9-]+)$/.exec(url);
+  if (!parts) return undefined;
+  try { return { login: parts[1]!, password: decodeURIComponent(parts[2]!), databaseName: parts[3]!, connectionName: parts[4]! }; } catch { return undefined; }
+}
+
 /** Runs statements in one session through the Cloud SQL connector as the deployment identity. */
 export async function withCloudSqlSession<T>(serviceAccount: Record<string, unknown>, connectionName: string, user: string, secret: string, database: string, work: (client: pg.Client) => Promise<T>): Promise<T> {
   const connector = new Connector({ auth: new GoogleAuth({ credentials: serviceAccount as never, scopes: ['https://www.googleapis.com/auth/sqlservice.admin'] }) });

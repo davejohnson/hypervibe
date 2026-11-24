@@ -721,6 +721,42 @@ That is one run. Not exercised by it, and still unconfirmed:
 - Deleting the Google project while the server's deletion protection is on.
 - An app spanning more than one Google project or region.
 
+Pausing a database, the first step of moving one, exists as two calls that no
+plan or command uses yet: pause and its undo, for a database on the shared
+server (`sharedDatabase.pause` / `resume`) and for one on a server of its own
+(`src/application/gcp-dedicated-database-pause.ts`). Tested offline against
+real local PostgreSQL servers; not yet run on Google Cloud.
+
+- Paused means the app cannot connect with either of its two logins, their
+  sessions are ended, and nobody else is connected to that database. The call
+  succeeds only after it has seen all of that; while a session remains it says
+  so and the app stays shut out until it is run again.
+- On the shared server the logins are switched off and keep their passwords.
+  On a server of its own both logins get new passwords through Google's API.
+- The login the app does not hold becomes the copy login with a password made
+  for the occasion. Its URL goes to a secret of its own, which must never be
+  mounted into a service. Like every secret of the project it can be read by
+  the app's own cloud identity; that is accepted.
+- Undoing makes exactly the connection the services are pinned to work again,
+  and proves it by connecting with that secret version. The value is read
+  into memory, and on a server of its own handed back to the same Google API
+  that set it in the first place; it appears in no result, message or log.
+  The app's secret is never rewritten.
+- Both calls can be repeated and follow each other in any order, whatever was
+  interrupted. Pausing again replaces the copy login's password.
+- Refused, with the reason and with nothing changed: a database not fully set
+  up, a password change whose previous login is not switched off yet, a
+  connection secret that is not the version the caller named or not this
+  environment's, and a copy secret that is the app's own.
+- Not confirmed on Google Cloud: that a login created through the API may end
+  its own other sessions and see other sessions' users, and how long setting
+  two passwords through the API takes, which is part of the pause.
+- Known gap for the move itself: a service can be pointed at a database its
+  environment does not create only when the environment creates none
+  (`gcp-engine.backend.ts`, where the environment's own instance takes
+  precedence). Moving off a server of its own needs that order changed, in a
+  pull request of its own.
+
 Known limits of removing the server:
 
 - What Hypervibe has saved is read from this machine. A checkout that loads
