@@ -725,23 +725,44 @@ Moving a database between the shared server and a server of its own is not
 available yet; changing `placement` on an environment that has a database is
 still refused. One piece exists: the copy-and-verify job
 (`src/application/database-move-copy.ts`), tested offline against two local
-PostgreSQL servers and not yet run on Google Cloud. It reaches both databases
-through secret references, refuses a target that is not empty, refuses what it
-cannot carry over (granted or revoked privileges, objects of another owner and,
-onto the shared server, extensions), and compares every table's rows, every
-sequence, every large object's bytes and every object's definition with the
-source as it was when the dump was taken. Accepted limits of that job:
+PostgreSQL servers and not yet run on Google Cloud. In order, it:
+
+1. checks that its two connections reach exactly the two databases its caller
+   named, the right way round, before it reads or clears anything;
+2. requires the new database to hold nothing, judged by PostgreSQL's own dump
+   of it, and clears it only when its caller allows that;
+3. dumps the source and inventories it in one snapshot, and from that same
+   dump refuses what a copy cannot carry over: any privilege granted or taken
+   away (other than to roles Hypervibe gives access again itself), objects of
+   another owner, settings made on the database itself, extensions that keep
+   data of their own and, onto the shared server, any extension;
+4. only then clears the new database if allowed, checks it is empty again, and
+   restores, stopping on any error;
+5. compares every table's rows, every sequence, every large object's bytes and
+   the dumped text of every definition with the source as it was at the dump.
+
+Accepted limits of that job:
 
 - The secrets holding both connection strings can be read by the app's own
   cloud identity, like every secret in the project. One person owns all of
   them, so the copy has no separate identity; the rule is only that neither is
   ever mounted into a service.
+- Nothing stops another session writing to the new database while the copy
+  runs. It is a database the move itself made, with no app login until the
+  switch; the job checks it is empty right before the restore and does not
+  lock it.
+- A database that hv_migrate once filled has its `public` schema without the
+  usual access for everyone. That counts as a privilege taken away, so such a
+  database is refused until moves handle it.
 - The dump is held in the job's own scratch space, so a database larger than
   that cannot be moved this way.
-- Comments on objects and security labels are copied but not compared.
+- Security labels are copied but not compared.
 - A sequence's value is outside any snapshot. A rehearsal made while the app
   runs checks that every sequence arrived, not its value; the final copy,
   made with the app paused, compares values too.
+- The job's image runs scripts with BusyBox `ash`. The tests run the script
+  under `dash` where there is one, the strictest shell at hand; `ash` itself
+  is only confirmed by a live run.
 
 Known limits of removing the server:
 

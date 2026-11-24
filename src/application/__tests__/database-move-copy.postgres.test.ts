@@ -8,13 +8,14 @@
  * directory and the PATH to the PostgreSQL tools differ from the job.
  */
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { ensureTenant, observeTenant, setTenantLoginPassword, tenantNames, type TenantServer } from '../../adapters/providers/database/tenant-database.js';
 import { databaseMoveCopyJob, databaseMoveCopyScript, databaseMoveCopyVerified, type DatabaseMoveCopyResult } from '../database-move-copy.js';
-import { parseTransferResult } from '../migration-transfer-gcp.js';
+import { parseTransferResult, runTransferJob } from '../migration-transfer-gcp.js';
+import { POSTGRES_DATABASE_IDENTITY_SQL } from '../../domain/services/postgres-database-identity.js';
 import { createdJobBody } from './transfer-job-body.js';
 
 function postgresBin(): string {
@@ -49,7 +50,11 @@ async function connect(side: 'own' | 'shared', user: string, password: string | 
 const close = async (client: pg.Client) => { opened.delete(client); await client.end().catch(() => {}); };
 const url = (side: 'own' | 'shared', user: string, database: string) => `postgresql://${user}:${PASSWORD}@${encodeURIComponent(servers[side].socket)}:5432/${database}`;
 
-interface Database { side: 'own' | 'shared'; name: string; login: string; owner: string; url: string }
+interface Database { side: 'own' | 'shared'; name: string; login: string; owner: string; url: string; identity: string }
+const identityOf = async (side: 'own' | 'shared', name: string) => {
+  const inside = await connect(side, 'boot', undefined, name);
+  try { return String((await inside.query(POSTGRES_DATABASE_IDENTITY_SQL)).rows[0].identity); } finally { await close(inside); }
+};
 let counter = 0;
 
 /** A database as Hypervibe leaves a dedicated one: owned by app_owner, which both logins act as. One server holds several here; each has its own roles. */
@@ -64,16 +69,16 @@ async function ownDatabase(): Promise<Database> {
   const inside = await connect('own', 'boot', undefined, name);
   await inside.query(`ALTER SCHEMA public OWNER TO ${owner}`);
   await close(inside);
-  return { side: 'own', name, login, owner, url: url('own', login, name) };
+  return { side: 'own', name, login, owner, url: url('own', login, name), identity: await identityOf('own', name) };
 }
 
 let tenants: TenantServer;
 /** A database on the shared server, made by the tenant module as its non-superuser administrator. */
-async function sharedDatabase(): Promise<Database & { identity: { names: ReturnType<typeof tenantNames>; tenantId: string } }> {
+async function sharedDatabase(): Promise<Database & { tenant: { names: ReturnType<typeof tenantNames>; tenantId: string } }> {
   const identity = { names: tenantNames(`move_${++counter}`), tenantId: `env-${counter}` };
   await ensureTenant(tenants, { ...identity, connectionLimit: 10, allocate: true });
   await setTenantLoginPassword(tenants, { ...identity, login: identity.names.logins[0], password: PASSWORD });
-  return { side: 'shared', name: identity.names.database, login: identity.names.logins[0], owner: identity.names.owner, url: url('shared', identity.names.logins[0], identity.names.database), identity };
+  return { side: 'shared', name: identity.names.database, login: identity.names.logins[0], owner: identity.names.owner, url: url('shared', identity.names.logins[0], identity.names.database), tenant: identity, identity: await identityOf('shared', identity.names.database) };
 }
 
 /** Everything the verification has to see, written as the app's own login. */
@@ -86,6 +91,9 @@ const FIXTURE = [
   `CREATE TABLE "we""ird name" (payload jsonb, raw bytea, amount numeric(12, 2))`,
   `INSERT INTO "we""ird name" VALUES ('{"k": [1, 2]}', '\\xdeadbeef', 12.50)`,
   `CREATE TABLE never_filled (id bigint)`,
+  `CREATE TABLE shadowed (t text, hv_move_row text, payload text)`,
+  `INSERT INTO shadowed VALUES ('same', 'same', 'one'), ('same', 'same', 'two')`,
+  `COMMENT ON TABLE shadowed IS 'columns named like aliases'`,
   `CREATE TABLE orders (id bigserial PRIMARY KEY, customer integer REFERENCES customers (id), total numeric) PARTITION BY RANGE (id)`,
   `CREATE TABLE orders_low PARTITION OF orders FOR VALUES FROM (1) TO (1000)`,
   `INSERT INTO orders (customer, total) SELECT n, n * 1.5 FROM generate_series(1, 50) n`,
@@ -113,19 +121,31 @@ const scalar = async (database: Database, sql: string) => {
 
 let work: string;
 let shims: string;
-/** Runs the generated script with the same shell command the job uses. `afterRestore` is SQL a stand-in pg_restore runs on the target once the real restore has finished. */
-function copy(source: Database, target: Database, env: Record<string, string> = {}, afterRestore?: string): Promise<{ result: DatabaseMoveCopyResult; output: string }> {
+/** The strictest POSIX shell on this machine: the job image's `/bin/sh` is BusyBox ash, which is closer to dash than to bash. */
+const shell = existsSync('/bin/dash') ? '/bin/dash' : 'sh';
+interface Run { result: DatabaseMoveCopyResult; output: string; code: number | null }
+/**
+ * Runs the generated script with the same shell command the job uses. `afterRestore` is SQL a stand-in pg_restore runs on
+ * the target once the real restore has finished; `path` puts other stand-ins first. Whatever happens, the job must exit 0
+ * and print exactly one line: its result. Anything else in its output could be a database message.
+ */
+async function copy(source: Database, target: Database, env: Record<string, string> = {}, afterRestore?: string, before = ''): Promise<Run> {
   const script = databaseMoveCopyScript().replaceAll('/tmp/hv-move', work);
-  return new Promise((resolve) => {
-    const child = spawn('sh', ['-c', script], { env: { PATH: `${afterRestore ? `${shims}:` : ''}${bin}:${process.env.PATH}`, SOURCE_DATABASE_URL: source.url, DATABASE_URL: target.url, PGTZ: 'UTC',
-      REAL_BIN: bin, ...(afterRestore ? { AFTER_RESTORE: afterRestore } : {}), ...env } });
-    let output = '';
-    child.stdout.on('data', (chunk) => { output += String(chunk); });
-    child.stderr.on('data', (chunk) => { output += String(chunk); });
-    child.on('close', () => { for (const log of ['hold.log', 'precheck.log', 'reset.log', 'restore.log', 'verify.log', 'dump.log']) { try { output += `\n[${log}] ${readFileSync(path.join(work, log), 'utf8')}`; } catch { /* not written */ } }
-      resolve({ result: (parseTransferResult(output) ?? { ok: false, error: `no result: ${output}` }) as unknown as DatabaseMoveCopyResult, output }); });
+  const { output, code } = await new Promise<{ output: string; code: number | null }>((resolve) => {
+    const child = spawn(shell, ['-c', script], { env: { PATH: `${before}${afterRestore ? `${shims}:` : ''}${bin}:${process.env.PATH}`, SOURCE_DATABASE_URL: source.url, DATABASE_URL: target.url, PGTZ: 'UTC',
+      MOVE_SOURCE_IDENTITY: source.identity, MOVE_TARGET_IDENTITY: target.identity, REAL_BIN: bin, ...(afterRestore ? { AFTER_RESTORE: afterRestore } : {}), ...env } });
+    let text = '';
+    child.stdout.on('data', (chunk) => { text += String(chunk); });
+    child.stderr.on('data', (chunk) => { text += String(chunk); });
+    child.on('close', (status) => resolve({ output: text, code: status }));
   });
+  const shown = output;
+  expect(code, shown).toBe(0);
+  expect(output.trim().split('\n'), shown).toHaveLength(1);
+  expect(output.startsWith('HV_TRANSFER_RESULT {'), shown).toBe(true);
+  return { result: parseTransferResult(output) as unknown as DatabaseMoveCopyResult, output: shown, code };
 }
+const publicRelations = (database: Database) => scalar(database, `SELECT count(*)::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'`);
 
 beforeAll(async () => {
   root = mkdtempSync('/tmp/hv-move-test-');
@@ -134,7 +154,7 @@ beforeAll(async () => {
   shims = path.join(root, 'shims');
   mkdirSync(shims);
   // The real restore, then a change to the target the verification must notice.
-  writeFileSync(path.join(shims, 'pg_restore'), '#!/bin/sh\ncase " $* " in *" -l "*) exec "$REAL_BIN/pg_restore" "$@" ;; esac\n"$REAL_BIN/pg_restore" "$@" || exit $?\n"$REAL_BIN/psql" "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -c "$AFTER_RESTORE" >/dev/null\n');
+  writeFileSync(path.join(shims, 'pg_restore'), '#!/bin/sh\ncase " $* " in *" -d "*) ;; *) exec "$REAL_BIN/pg_restore" "$@" ;; esac\n"$REAL_BIN/pg_restore" "$@" || exit $?\n"$REAL_BIN/psql" "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -c "$AFTER_RESTORE" >/dev/null\n');
   chmodSync(path.join(shims, 'pg_restore'), 0o755);
   for (const side of ['own', 'shared'] as const) {
     const directory = path.join(root, side);
@@ -173,60 +193,118 @@ afterAll(async () => {
   }
 });
 
+const A = '7400000000000000001:617070';
+const B = '7400000000000000002:617070';
+const jobSide = (identity: string, secretId: string, instance: string) => ({ identity, secret: { secretId, version: '1' }, connectionName: `demo-project:us-central1:${instance}` });
+
 describe('the generated job', () => {
-  it('is valid POSIX shell and holds no connection string', () => {
-    const script = databaseMoveCopyScript();
-    expect(() => execFileSync('sh', ['-n'], { input: script })).not.toThrow();
-    expect(script).not.toMatch(/postgres(ql)?:\/\//);
+  it('holds no connection string', () => {
+    expect(databaseMoveCopyScript()).not.toMatch(/postgres(ql)?:\/\//);
   });
 
-  it('mounts both servers and takes both URLs as pinned secret versions, never as values', async () => {
-    const job = databaseMoveCopyJob({ majorVersion: 16, source: { secret: { secretId: 'hv-production-database-url', version: '4' }, connectionName: 'demo-project:us-central1:hv-demo-shared-a1b2c3' },
-      target: { secret: { secretId: 'hv-production-database-move', version: '1' }, connectionName: 'demo-project:us-central1:hv-production-db-d4e5f6' }, blockExtensions: true, ignoredGrantees: ['hv-runtime@demo-project.iam'] });
+  it('mounts both servers, takes both URLs as pinned secret versions and is told which two databases to expect', async () => {
+    const job = databaseMoveCopyJob({ majorVersion: 16, source: { ...jobSide(A, 'hv-production-database-url', 'hv-demo-shared-a1b2c3'), secret: { secretId: 'hv-production-database-url', version: '4' } },
+      target: jobSide(B, 'hv-production-database-move', 'hv-production-db-d4e5f6'), blockExtensions: true, ignoredGrantees: ['hv-runtime@demo-project.iam'] });
     expect(job.sourceSecrets).toEqual({});
     const body = await createdJobBody(job) as { template: { template: { containers: Array<{ image: string; env: unknown[]; args: string[]; volumeMounts: unknown }>; volumes: unknown } } };
     const container = body.template.template.containers[0]!;
     expect(container.image).toBe('postgres:16-alpine');
     expect(container.args).toEqual(['-c', databaseMoveCopyScript()]);
-    expect(container.env).toEqual([{ name: 'PGTZ', value: 'UTC' }, { name: 'MOVE_BLOCK_EXTENSIONS', value: '1' }, { name: 'MOVE_IGNORED_GRANTEES', value: 'hv-runtime@demo-project.iam' },
+    expect(container.env).toEqual([{ name: 'PGTZ', value: 'UTC' }, { name: 'MOVE_SOURCE_IDENTITY', value: A }, { name: 'MOVE_TARGET_IDENTITY', value: B },
+      { name: 'MOVE_BLOCK_EXTENSIONS', value: '1' }, { name: 'MOVE_IGNORED_GRANTEES', value: 'hv-runtime@demo-project.iam' },
       { name: 'SOURCE_DATABASE_URL', valueSource: { secretKeyRef: { secret: 'hv-production-database-url', version: '4' } } },
       { name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'hv-production-database-move', version: '1' } } }]);
     expect(container.volumeMounts).toEqual([{ name: 'cloudsql', mountPath: '/cloudsql' }]);
     expect(body.template.template.volumes).toEqual([{ name: 'cloudsql', cloudSqlInstance: { instances: ['demo-project:us-central1:hv-production-db-d4e5f6', 'demo-project:us-central1:hv-demo-shared-a1b2c3'] } }]);
   });
 
-  it('refuses a job that is not two pinned, different databases', () => {
-    const side = (secretId: string) => ({ secret: { secretId, version: '1' }, connectionName: 'demo-project:us-central1:hv-demo-shared-a1b2c3' });
-    expect(() => databaseMoveCopyJob({ majorVersion: 16, source: side('one'), target: side('one') })).toThrow(/cannot share one connection secret/);
-    expect(() => databaseMoveCopyJob({ majorVersion: 16, source: side('one'), target: { ...side('two'), secret: { secretId: 'two', version: 'latest' } } })).toThrow(/one pinned secret version/);
-    expect(() => databaseMoveCopyJob({ majorVersion: 14, source: side('one'), target: side('two') })).toThrow(/PostgreSQL 15 to 18/);
-    expect(() => databaseMoveCopyJob({ majorVersion: 16, source: side('one'), target: side('two'), ignoredGrantees: ['a,b'] })).toThrow(/plain role name/);
+  it('refuses a job that is not two pinned, different, named databases', () => {
+    const one = jobSide(A, 'one', 'hv-demo-shared-a1b2c3'), two = jobSide(B, 'two', 'hv-demo-db-a1b2c3');
+    expect(() => databaseMoveCopyJob({ majorVersion: 16, source: one, target: { ...two, secret: one.secret } })).toThrow(/cannot share one connection secret/);
+    expect(() => databaseMoveCopyJob({ majorVersion: 16, source: one, target: { ...two, secret: { secretId: 'two', version: 'latest' } } })).toThrow(/one pinned secret version/);
+    expect(() => databaseMoveCopyJob({ majorVersion: 16, source: one, target: { ...two, identity: A } })).toThrow(/must be different databases/);
+    expect(() => databaseMoveCopyJob({ majorVersion: 16, source: one, target: { ...two, identity: 'app' } })).toThrow(/identity of each database/);
+    expect(() => databaseMoveCopyJob({ majorVersion: 14, source: one, target: two })).toThrow(/PostgreSQL 15 to 18/);
+    expect(() => databaseMoveCopyJob({ majorVersion: 16, source: one, target: two, ignoredGrantees: ['a,b'] })).toThrow(/plain role name/);
   });
 
-  it('counts a result as verified only when every part matched', () => {
-    const good: DatabaseMoveCopyResult = { ok: true, rehearsal: false, match: true, different: [], source: { tables: 0, rows: '0', version: '160004' }, target: { tables: 0, rows: '0', version: '160004' } };
+  it('counts a result as verified only when every part matched and every count is there on both sides', () => {
+    const side = { tables: 0, rows: '0', version: '160004', sequences: 0, largeObjects: 0 };
+    const good: DatabaseMoveCopyResult = { ok: true, rehearsal: false, match: true, different: [], source: side, target: side };
     expect(databaseMoveCopyVerified(good)).toBe(true);
-    for (const bad of [undefined, { ...good, ok: false }, { ...good, rehearsal: true }, { ...good, rehearsal: undefined }, { ...good, match: false }, { ...good, different: ['sequences'] }, { ...good, different: undefined }, { ...good, target: { ...good.target!, rows: '1' } }, { ...good, source: undefined }]) {
-      expect(databaseMoveCopyVerified(bad)).toBe(false);
+    for (const bad of [undefined, { ...good, ok: false }, { ...good, rehearsal: true }, { ...good, rehearsal: undefined }, { ...good, match: false }, { ...good, different: ['sequences'] }, { ...good, different: undefined },
+      { ...good, source: undefined }, { ...good, source: {}, target: {} }, { ...good, target: { ...side, rows: '1' } }, { ...good, target: { ...side, sequences: 1 } }, { ...good, target: { ...side, largeObjects: 1 } },
+      { ...good, source: { ...side, sequences: undefined }, target: { ...side, sequences: undefined } }, { ...good, source: { ...side, rows: undefined }, target: { ...side, rows: undefined } },
+      { ...good, source: { ...side, tables: '0' as never }, target: { ...side, tables: '0' as never } }]) {
+      expect(databaseMoveCopyVerified(bad as DatabaseMoveCopyResult | undefined)).toBe(false);
     }
   });
 });
 
+describe('a refusal reaches the caller through the job runner', () => {
+  const parent = 'projects/demo-project/locations/us-central1';
+  const refusal = { ok: false, stage: 'dump', targetChanged: false, error: 'The database has 1 privilege(s) granted or taken away that the copy cannot carry over; nothing was changed.' };
+  /** Google's interfaces for one job run: created, run to the given end, its output read, deleted. */
+  function cloud(end: 'exits 0' | 'exits non-zero') {
+    let jobId = '';
+    let labels = {};
+    let present = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: string, init: RequestInit = {}) => {
+      const url = new URL(input);
+      const path = url.pathname.replace(/^\/v2\//, '');
+      const method = init.method ?? 'GET';
+      const name = `${parent}/jobs/${jobId}`;
+      const native = { name, uid: 'uid-1', etag: 'tag', labels };
+      if (url.hostname === 'logging.googleapis.com') return Response.json({ entries: String(init.body).includes('HV_RESTORE_ERROR') ? [] : [{ textPayload: `HV_TRANSFER_RESULT ${JSON.stringify(refusal)}` }] });
+      if (path === `${parent}/jobs` && method === 'POST') { jobId = url.searchParams.get('jobId')!; labels = JSON.parse(String(init.body)).labels; present = true; return Response.json({ name: `${parent}/operations/create`, done: true, response: { ...native, name: `${parent}/jobs/${jobId}` } }); }
+      if (method === 'GET' && path.startsWith(`${parent}/jobs/`)) return present ? Response.json(native) : Response.json({}, { status: 404 });
+      if (method === 'POST' && path === `${name}:run`) {
+        return end === 'exits 0' ? Response.json({ name: `${parent}/operations/run`, done: true, response: { name: `${name}/executions/e1`, succeededCount: 1, completionTime: '2026-11-24T12:00:00Z' } })
+          : Response.json({ name: `${parent}/operations/run`, done: true, error: { code: 13, message: 'Execution failed' }, metadata: { name: `${name}/executions/e1` } });
+      }
+      if (method === 'DELETE' && path === name) return Response.json({ name: `${parent}/operations/delete` });
+      if (path === `${parent}/operations/delete`) { present = false; return Response.json({ name: path, done: true, response: native }); }
+      throw new Error(`Unexpected request ${method} ${url.pathname}`);
+    }));
+  }
+  const run = async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = runTransferJob({ token: async () => 'synthetic', gcpProjectId: 'demo-project', region: 'us-central1', runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com', environmentLabel: 'env-1' },
+        databaseMoveCopyJob({ majorVersion: 16, source: jobSide(A, 'one', 'hv-demo-shared-a1b2c3'), target: jobSide(B, 'two', 'hv-demo-db-a1b2c3') })).catch((error: Error) => ({ thrown: error.message }));
+      await vi.runAllTimersAsync();
+      return await pending;
+    } finally { vi.useRealTimers(); }
+  };
+
+  it('with its stage and whether the target was written to, because the job exits 0', async () => {
+    cloud('exits 0');
+    expect(await run()).toEqual(refusal);
+  });
+
+  it('which a job that exited non-zero would have lost: the runner reports only that it failed', async () => {
+    cloud('exits non-zero');
+    expect(await run()).toEqual({ thrown: 'The transfer execution failed.' });
+  });
+});
+
 describe.runIf(major >= 15)('copying between an own server and the shared server (two real PostgreSQL servers)', () => {
+  const make = (side: 'own' | 'shared') => (side === 'own' ? ownDatabase() : sharedDatabase());
+
   it.each([['shared', 'own'], ['own', 'shared']] as const)('copies everything from %s to %s and proves it, as each side\'s plain owner role', async (from, to) => {
-    const make = (side: 'own' | 'shared') => (side === 'own' ? ownDatabase() : sharedDatabase());
     const source = await make(from);
     const target = await make(to);
     await fill(source);
     const { result, output } = await copy(source, target, to === 'shared' ? { MOVE_BLOCK_EXTENSIONS: '1' } : {});
-    expect(result, output).toMatchObject({ ok: true, match: true, different: [], rehearsal: false, source: { tables: 7, rows: '303' }, target: { tables: 7, rows: '303' }, sequences: 5, largeObjects: 1 });
+    const side = { tables: 8, rows: '305', sequences: 5, largeObjects: 1 };
+    expect(result, output).toMatchObject({ ok: true, rehearsal: false, match: true, different: [], source: side, target: side });
     expect(databaseMoveCopyVerified(result)).toBe(true);
-    expect(output).not.toContain(PASSWORD);
     // Everything belongs to the target's own owner role, and the app's login can carry on exactly where the source stopped.
     expect(await scalar(target, `SELECT string_agg(DISTINCT pg_catalog.pg_get_userbyid(c.relowner), ',') FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname IN ('public', 'audit')`)).toBe(target.owner);
     expect(await scalar(target, `INSERT INTO customers (name) VALUES ('  new  ') RETURNING id::text || ':' || name`)).toBe('201:new');
     expect(await scalar(target, `SELECT nextval('audit.ticket')::text || ',' || nextval('audit.unused')::text`)).toBe('505,42');
     expect(await scalar(target, `SELECT md5(lo_get(oid)) FROM pg_largeobject_metadata`)).toBe(await scalar(source, `SELECT md5(lo_get(oid)) FROM pg_largeobject_metadata`));
+    expect(await scalar(target, `SELECT obj_description('shadowed'::regclass)`)).toBe('columns named like aliases');
     // The source was only read.
     expect(await scalar(source, 'SELECT count(*)::text FROM customers')).toBe('200');
   }, 120_000);
@@ -235,11 +313,12 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     const source = await sharedDatabase();
     const target = await ownDatabase();
     const { result, output } = await copy(source, target);
-    expect(result, output).toMatchObject({ ok: true, match: true, different: [], source: { tables: 0, rows: '0' }, target: { tables: 0, rows: '0' } });
+    const side = { tables: 0, rows: '0', sequences: 0, largeObjects: 0 };
+    expect(result, output).toMatchObject({ ok: true, match: true, different: [], source: side, target: side });
     expect(databaseMoveCopyVerified(result)).toBe(true);
   }, 60_000);
 
-  it('verifies a rehearsal against the dump\'s own moment while the app keeps writing', async () => {
+  it('verifies a rehearsal against the dump\'s own moment while the app keeps writing, and never counts it as the copy', async () => {
     const source = await sharedDatabase();
     const target = await ownDatabase();
     await fill(source);
@@ -252,7 +331,6 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     await writes;
     expect(written).toBeGreaterThan(10);
     expect(result, output).toMatchObject({ ok: true, rehearsal: true, match: true, different: [] });
-    // A rehearsal proves the copy works; it is never the proof that the two databases are the same.
     expect(databaseMoveCopyVerified(result)).toBe(false);
     // The copy is the source as it was at one moment, not as it is now.
     expect(Number(await scalar(target, 'SELECT count(*) FROM "a|b"'))).toBeLessThan(Number(await scalar(source, 'SELECT count(*) FROM "a|b"')));
@@ -260,6 +338,7 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
 
   it.each([
     ['a changed row in a table whose name contains the old separator', `UPDATE "a|b" SET note = 'tampered' WHERE id = 1`, ['tables']],
+    ['a changed value beside columns named like the row alias', `UPDATE shadowed SET payload = 'changed' WHERE payload = 'two'`, ['tables']],
     ['a row missing from an oddly named table', `DELETE FROM "we""ird name"`, ['tables']],
     ['a sequence at the same value but marked unused', `SELECT setval('audit.ticket', 500, false)`, ['sequences']],
     ['a sequence one step behind', `SELECT setval('public.customers_id_seq', 199)`, ['sequences']],
@@ -268,6 +347,9 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     ['a missing index', `DROP INDEX customers_by_name`, ['definitions']],
     ['a dropped column default', `ALTER TABLE customers ALTER COLUMN mood DROP DEFAULT`, ['definitions']],
     ['a disabled trigger', `ALTER TABLE customers DISABLE TRIGGER tidy`, ['definitions']],
+    ['a changed replica identity', `ALTER TABLE customers REPLICA IDENTITY FULL`, ['definitions']],
+    ['a changed comment', `COMMENT ON TABLE shadowed IS 'different'`, ['definitions']],
+    ['an added collation, a kind of object no list here names', `CREATE COLLATION extra (locale = 'C')`, ['definitions']],
     ['an extra table', `CREATE TABLE smuggled (id int)`, ['tables', 'definitions']],
     ['a missing sequence, even in a rehearsal', `DROP SEQUENCE audit.unused`, ['sequences', 'definitions'], { MOVE_REHEARSAL: '1' }],
   ] as Array<[string, string, string[], Record<string, string>?]>)('does not certify a copy with %s', async (_what, change, different, env) => {
@@ -279,7 +361,23 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     expect(databaseMoveCopyVerified(result)).toBe(false);
   }, 60_000);
 
-  it('leaves a target that already holds something alone, and clears it only when told to, keeping the owner role\'s place on the shared server', async () => {
+  it('refuses swapped connections before reading or clearing anything, even when clearing is allowed', async () => {
+    const source = await ownDatabase();
+    const target = await sharedDatabase();
+    await fill(source);
+    // The secrets are the wrong way round: what the job calls its target is the live source.
+    const swapped = await copy({ ...target, identity: source.identity }, { ...source, identity: target.identity }, { MOVE_RESET_TARGET: '1' });
+    expect(swapped.result).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'The two connections do not reach the two databases this move is for, in that order; nothing was changed.' });
+    expect(await scalar(source, 'SELECT count(*)::text FROM customers')).toBe('200');
+    expect(await publicRelations(source)).not.toBe('0');
+    // The same for one connection used twice, and for a job told nothing.
+    expect((await copy(source, { ...source, identity: target.identity }, { MOVE_RESET_TARGET: '1' })).result).toMatchObject({ ok: false, stage: 'check', targetChanged: false });
+    expect((await copy(source, target, { MOVE_RESET_TARGET: '1', MOVE_SOURCE_IDENTITY: '', MOVE_TARGET_IDENTITY: '' })).result).toMatchObject({ ok: false, stage: 'check', targetChanged: false, error: expect.stringMatching(/not told which two different databases/) });
+    expect((await copy(source, target, { MOVE_RESET_TARGET: '1', MOVE_TARGET_IDENTITY: source.identity })).result).toMatchObject({ ok: false, stage: 'check', targetChanged: false });
+    expect(await scalar(source, 'SELECT count(*)::text FROM customers')).toBe('200');
+  }, 60_000);
+
+  it('leaves a target that already holds something alone, and clears it only when told to and only once the source is safely dumped', async () => {
     const source = await ownDatabase();
     const target = await sharedDatabase();
     await fill(source);
@@ -288,30 +386,55 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     expect(refused.result).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'The new database is not empty; nothing was changed.' });
     expect(await scalar(target, 'SELECT count(*)::text FROM left_behind')).toBe('1');
 
+    // Clearing is allowed, but the source turns out not to be movable: the target must still be as it was, and the message true.
+    const boot = await connect('own', 'boot', undefined, source.name);
+    await boot.query(`ALTER DATABASE ${source.name} SET work_mem = '8MB'`);
+    const early = await copy(source, target, { MOVE_RESET_TARGET: '1' });
+    expect(early.result).toMatchObject({ ok: false, stage: 'dump', targetChanged: false, error: expect.stringMatching(/setting\(s\) made on the database itself.*nothing was changed/) });
+    expect(await scalar(target, 'SELECT count(*)::text FROM left_behind')).toBe('1');
+    expect(await scalar(target, 'SELECT count(*)::text FROM old.things')).toBe('0');
+    await boot.query(`ALTER DATABASE ${source.name} RESET work_mem`);
+    await close(boot);
+
     const cleared = await copy(source, target, { MOVE_RESET_TARGET: '1' });
-    expect(cleared.result, cleared.output).toMatchObject({ ok: true, match: true, different: [], target: { tables: 7, rows: '303' }, largeObjects: 1 });
+    expect(cleared.result, cleared.output).toMatchObject({ ok: true, match: true, different: [], target: { tables: 8, rows: '305', largeObjects: 1 } });
     expect(await scalar(target, `SELECT (to_regclass('public.left_behind') IS NULL AND to_regnamespace('old') IS NULL)::text`)).toBe('true');
-    expect((await observeTenant(tenants, target.identity)).state).toBe('ready');
+    expect((await observeTenant(tenants, target.tenant)).state).toBe('ready');
     // A second run over the first copy (a retry after a lost result) is the same reset and the same proof.
     expect((await copy(source, target, { MOVE_RESET_TARGET: '1' })).result).toMatchObject({ ok: true, match: true });
-    expect((await observeTenant(tenants, target.identity)).state).toBe('ready');
+    expect((await observeTenant(tenants, target.tenant)).state).toBe('ready');
   }, 120_000);
 
-  it('never clears or writes when both connections reach the same database', async () => {
+  it.each([
+    ['a collation', [`CREATE COLLATION left_over (locale = 'C')`]],
+    ['a default privilege for another role', [`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO reporting`]],
+    ['a text search dictionary', [`CREATE TEXT SEARCH DICTIONARY plain_words (TEMPLATE = pg_catalog.simple)`]],
+    ['an empty extra schema', [`CREATE SCHEMA waiting`]],
+    ['a privilege on its public schema', [`GRANT CREATE ON SCHEMA public TO PUBLIC`]],
+  ])('counts a target holding only %s as not empty', async (_what, statements) => {
     const source = await ownDatabase();
-    await fill(source);
-    const again = { ...source, url: url('own', source.login, source.name) };
-    expect((await copy(source, again, { MOVE_RESET_TARGET: '1' })).result).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'The source and target reach the same database; no data was replaced.' });
-    expect(await scalar(source, 'SELECT count(*)::text FROM customers')).toBe('200');
-  });
+    const target = await sharedDatabase();
+    await servers.shared.boot.query(`DO $$ BEGIN CREATE ROLE reporting NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
+    await fill(source, ['CREATE TABLE one (id int)']);
+    await fill(target, statements);
+    expect((await copy(source, target)).result).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'The new database is not empty; nothing was changed.' });
+  }, 60_000);
 
   it.each([
     ['an extension, when moving onto the shared server', 'boot', [`CREATE EXTENSION pgcrypto`], { MOVE_BLOCK_EXTENSIONS: '1' }, /uses 1 extension\(s\) that cannot be installed on the new server yet/],
+    ['an extension that keeps data of its own, wherever it moves', 'boot', [`CREATE EXTENSION citext`, `CREATE TABLE citext_settings (k text)`, `UPDATE pg_extension SET extconfig = ARRAY['citext_settings'::regclass::oid] WHERE extname = 'citext'`], {}, /1 extension\(s\) that keep data of their own/],
+    ['a setting made on the database itself', 'boot', [`DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET statement_timeout = 5000', current_database()); END $$`], {}, /1 setting\(s\) made on the database itself/],
     ['execute taken away from everyone on a function', 'app', [`CREATE FUNCTION secret() RETURNS int LANGUAGE sql AS 'SELECT 1'`, `REVOKE EXECUTE ON FUNCTION secret() FROM PUBLIC`], {}, /privilege\(s\) granted or taken away that the copy cannot carry over/],
     ['a table readable by another role', 'app', [`CREATE TABLE shared_out (id int)`, `GRANT SELECT ON shared_out TO reporting`], {}, /1 privilege\(s\) granted or taken away/],
+    ['a column readable by another role', 'app', [`CREATE TABLE shared_out (id int, secret text)`, `GRANT SELECT (id) ON shared_out TO reporting`], {}, /privilege\(s\) granted or taken away/],
     ['a default privilege for another role', 'app', [`ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO reporting`], {}, /1 privilege\(s\) granted or taken away/],
+    ['a default privilege taken away from everyone', 'app', [`ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`], {}, /privilege\(s\) granted or taken away/],
+    ['use of the public schema taken away from everyone', 'app', [`REVOKE USAGE ON SCHEMA public FROM PUBLIC`], {}, /privilege\(s\) granted or taken away/],
+    ['everyone allowed to create in the public schema', 'app', [`GRANT CREATE ON SCHEMA public TO PUBLIC`], {}, /privilege\(s\) granted or taken away/],
+    ['a composite type usable only by some', 'app', [`CREATE TYPE pair AS (a int, b int)`, `REVOKE USAGE ON TYPE pair FROM PUBLIC`], {}, /privilege\(s\) granted or taken away/],
+    ['a large object readable by another role', 'app', [`SELECT lo_from_bytea(77001, '\\x01')`, `GRANT SELECT ON LARGE OBJECT 77001 TO reporting`], {}, /owned by a role other than the app's own, or large objects with privileges of their own/],
     ['a table owned by another role', 'boot', [`CREATE TABLE not_ours (id int)`], {}, /1 object\(s\) owned by a role other than the app's own/],
-    ['a publication', 'app', [`CREATE TABLE feed (id int)`, `CREATE PUBLICATION feed_out FOR TABLE feed`], {}, /publication\(s\), event trigger\(s\) or foreign server\(s\)/],
+    ['a publication', 'app', [`CREATE TABLE feed (id int)`, `CREATE PUBLICATION feed_out FOR TABLE feed`], {}, /publication\(s\), subscription\(s\), event trigger\(s\) or foreign data object\(s\)/],
   ])('refuses %s before touching the new database', async (_what, as, statements, env, message) => {
     const source = await ownDatabase();
     const target = await sharedDatabase();
@@ -320,9 +443,9 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     for (const statement of statements) await client.query(statement);
     await close(client);
     const { result, output } = await copy(source, target, env);
-    expect(result, output).toMatchObject({ ok: false, stage: 'check', targetChanged: false, error: expect.stringMatching(message) });
+    expect(result, output).toMatchObject({ ok: false, stage: 'dump', targetChanged: false, error: expect.stringMatching(message) });
     expect(result.error).toMatch(/nothing was changed/);
-    expect(await scalar(target, `SELECT count(*)::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'`)).toBe('0');
+    expect(await publicRelations(target)).toBe('0');
   }, 60_000);
 
   it('carries on when the only grants are to a role Hypervibe re-creates access for itself', async () => {
@@ -331,11 +454,11 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     await servers.own.boot.query(`DO $$ BEGIN CREATE ROLE "waker@demo-project.iam" NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
     await fill(source, [`CREATE TABLE jobs (id int)`, `GRANT USAGE ON SCHEMA public TO "waker@demo-project.iam"`, `GRANT SELECT ON ALL TABLES IN SCHEMA public TO "waker@demo-project.iam"`,
       `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "waker@demo-project.iam"`]);
-    expect((await copy(source, target)).result).toMatchObject({ ok: false, stage: 'check', targetChanged: false });
-    expect((await copy(source, target, { MOVE_IGNORED_GRANTEES: 'waker@demo-project.iam' })).result).toMatchObject({ ok: true, match: true });
+    expect((await copy(source, target)).result).toMatchObject({ ok: false, stage: 'dump', targetChanged: false, error: expect.stringMatching(/3 privilege\(s\)/) });
+    expect((await copy(source, target, { MOVE_IGNORED_GRANTEES: 'someone-else,waker@demo-project.iam' })).result).toMatchObject({ ok: true, match: true });
   }, 60_000);
 
-  it('allows an extension when the new server\'s login may install it, and compares it', async () => {
+  it('copies a database that uses an extension its new owner may install', async () => {
     const source = await sharedDatabase();
     const target = await ownDatabase();
     const inside = await connect('shared', 'boot', undefined, source.name);
@@ -348,35 +471,50 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     expect(await scalar(target, `SELECT (email = 'a@EXAMPLE.com')::text FROM people`)).toBe('true');
   }, 60_000);
 
-  it('restores a source whose public schema was once recreated, which a dump then tries to create again', async () => {
+  it('restores a source whose public schema was once recreated, and one with a schema whose name merely starts with "public"', async () => {
     const source = await ownDatabase();
     const target = await sharedDatabase();
-    await fill(source, ['DROP SCHEMA public CASCADE', 'CREATE SCHEMA public', 'GRANT USAGE ON SCHEMA public TO PUBLIC', `COMMENT ON SCHEMA public IS 'recreated'`, 'CREATE TABLE kept (id int)', 'INSERT INTO kept VALUES (1)']);
+    await fill(source, ['DROP SCHEMA public CASCADE', 'CREATE SCHEMA public', 'GRANT USAGE ON SCHEMA public TO PUBLIC', `COMMENT ON SCHEMA public IS 'recreated'`, 'CREATE TABLE kept (id int)', 'INSERT INTO kept VALUES (1)',
+      `CREATE SCHEMA "public ${source.owner}"`, `CREATE TABLE "public ${source.owner}".also_kept (id int)`, `INSERT INTO "public ${source.owner}".also_kept VALUES (1), (2)`]);
     const { result, output } = await copy(source, target);
-    expect(result, output).toMatchObject({ ok: true, match: true, source: { tables: 1, rows: '1' } });
+    expect(result, output).toMatchObject({ ok: true, match: true, source: { tables: 2, rows: '3' } });
+    expect(await scalar(target, `SELECT count(*)::text FROM "public ${source.owner}".also_kept`)).toBe('2');
   }, 60_000);
 
-  it('reports a restore that stopped part-way as a changed target, never as a copy', async () => {
+  it('reports a restore that stopped part-way as a changed target, and says nothing of what the database said', async () => {
     const source = await ownDatabase();
     const target = await sharedDatabase();
-    // A policy for a role that exists only on the source's server.
-    await fill(source, ['CREATE TABLE guarded (id int)', 'INSERT INTO guarded VALUES (1)', 'ALTER TABLE guarded ENABLE ROW LEVEL SECURITY', `CREATE POLICY own_rows ON guarded TO ${source.login} USING (true)`]);
-    const { result } = await copy(source, target);
-    expect(result).toMatchObject({ ok: false, stage: 'restore', targetChanged: true, error: expect.stringMatching(/could not be written to the new database \(pg_restore exit [1-9]/) });
+    // A policy for a role that exists only on the source's server: the restore fails on a statement that names it.
+    await fill(source, ['CREATE TABLE guarded (id int, card text)', `INSERT INTO guarded VALUES (1, 'private-card-number')`, 'ALTER TABLE guarded ENABLE ROW LEVEL SECURITY', `CREATE POLICY own_rows ON guarded TO ${source.login} USING (true)`]);
+    const { result, output } = await copy(source, target);
+    expect(result).toMatchObject({ ok: false, stage: 'restore', targetChanged: true, error: expect.stringMatching(/^The copy could not be written to the new database \(pg_restore exit [1-9][0-9]*\)\.$/) });
+    expect(output).not.toMatch(new RegExp(`${source.login}|private-card-number|ERROR|${PASSWORD}`));
     expect(databaseMoveCopyVerified(result)).toBe(false);
     // What it left is cleared by the next attempt only because the caller allows it.
     expect((await copy(source, target)).result).toMatchObject({ ok: false, stage: 'check', error: 'The new database is not empty; nothing was changed.' });
   }, 60_000);
 
-  it('refuses two servers on different major versions before reading anything else', async () => {
+  it('ends in a result line, not silence, when the session holding the snapshot dies', async () => {
     const source = await ownDatabase();
     const target = await sharedDatabase();
-    const fake = path.join(root!, 'old-psql');
-    mkdirSync(fake, { recursive: true });
-    writeFileSync(path.join(fake, 'psql'), '#!/bin/sh\ncase "$*" in *server_version_num*) if [ "$1" = "$SOURCE_DATABASE_URL" ]; then echo 150008; exit 0; fi ;; esac\nexec "$REAL_BIN/psql" "$@"\n');
-    chmodSync(path.join(fake, 'psql'), 0o755);
-    const script = databaseMoveCopyScript().replaceAll('/tmp/hv-move', work);
-    const run = spawnSync('sh', ['-c', script], { encoding: 'utf8', env: { PATH: `${fake}:${bin}:${process.env.PATH}`, REAL_BIN: bin, SOURCE_DATABASE_URL: source.url, DATABASE_URL: target.url } });
-    expect(parseTransferResult(run.stdout)).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'The two databases run different PostgreSQL major versions; nothing was changed.' });
-  });
+    await fill(source, ['CREATE TABLE one (id int)']);
+    const dying = path.join(root!, 'dying-psql');
+    mkdirSync(dying, { recursive: true });
+    // The only psql call with no -c and the source first is the session that holds the snapshot.
+    writeFileSync(path.join(dying, 'psql'), '#!/bin/sh\ncase " $* " in *" -c "*) exec "$REAL_BIN/psql" "$@" ;; esac\nif [ "$1" = "$SOURCE_DATABASE_URL" ]; then exit 3; fi\nexec "$REAL_BIN/psql" "$@"\n');
+    chmodSync(path.join(dying, 'psql'), 0o755);
+    const { result } = await copy(source, target, {}, undefined, `${dying}:`);
+    expect(result).toEqual({ ok: false, stage: 'dump', targetChanged: false, error: 'The source database could not be read at one point in time; nothing was changed.' });
+    expect(await publicRelations(target)).toBe('0');
+  }, 60_000);
+
+  it('refuses two servers on different major versions', async () => {
+    const source = await ownDatabase();
+    const target = await sharedDatabase();
+    const older = path.join(root!, 'older-psql');
+    mkdirSync(older, { recursive: true });
+    writeFileSync(path.join(older, 'psql'), `#!/bin/sh\ncase "$*" in *server_version_num*) if [ "$1" = "$SOURCE_DATABASE_URL" ]; then echo ${(major - 1) * 10000 + 8}; exit 0; fi ;; esac\nexec "$REAL_BIN/psql" "$@"\n`);
+    chmodSync(path.join(older, 'psql'), 0o755);
+    expect((await copy(source, target, {}, undefined, `${older}:`)).result).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'The two databases run different PostgreSQL major versions; nothing was changed.' });
+  }, 60_000);
 });
