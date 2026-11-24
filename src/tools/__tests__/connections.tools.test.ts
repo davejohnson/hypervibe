@@ -1545,6 +1545,14 @@ describe('hv_connections', () => {
             inputKind: 'text',
             description: 'Existing independently trusted SSH host file; no host key is accepted automatically.',
           },
+          {
+            name: 'sshProjectId',
+            label: 'Ssh Project ID',
+            required: false,
+            sensitive: false,
+            inputKind: 'text',
+            description: 'Native Railway project ID allowed to use this SSH identity.',
+          },
         ],
         requiredPermissions: expect.arrayContaining([
           expect.stringContaining('create projects, services, environments, variables, databases, domains, and deployments'),

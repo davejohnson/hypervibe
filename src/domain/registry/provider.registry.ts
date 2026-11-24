@@ -359,7 +359,7 @@ export interface ProviderCredentialUpdateCapability {
   matches(supplied: Record<string, unknown>): boolean;
   /** Read-only verification and private merge. Called only for a verified exact-scope connection. */
   prepare(input: { existing: Record<string, unknown>; supplied: Record<string, unknown>; scope: string | null }): Promise<
-    | { success: true; credentials: Record<string, unknown>; credentialKeys: string[]; message: string }
+    | { success: true; credentials: Record<string, unknown>; credentialKeys: string[]; primaryVerified: boolean; message: string }
     | { success: false; error: string }
   >;
 }
@@ -396,6 +396,11 @@ export interface RegisteredProvider {
   ensureDependencies?: () => Promise<{ installed: string[]; errors: string[] }>;
   /** Optional narrow update which preserves an existing primary credential. */
   credentialUpdate?: ProviderCredentialUpdateCapability;
+  /** Preserve restrictions that older clients cannot enforce when they read saved credentials. */
+  credentialStorage?: {
+    encode(credentials: unknown): Record<string, unknown>;
+    decode(stored: unknown): Record<string, unknown>;
+  };
   /** Optional provider-owned raw forensic reads used by hv_inspect. */
   inspection?: ProviderInspectionCapability;
   /** Bounded, exact-scope observation without local CLI state or provider mutations. */

@@ -14,8 +14,9 @@ export const migrationSourceInventorySchema = z.object({
   estimatedRows: z.string().regex(/^(?:0|[1-9][0-9]{0,29})$/),
 }).strict();
 export type MigrationSourceInventory = z.infer<typeof migrationSourceInventorySchema>;
+export type MigrationInspectionAccess = 'inspect' | 'reuse-receipt';
 export interface PrivateMigrationSourceInspection {
-  hasTrustedAccess(): Promise<boolean>;
+  hasTrustedAccess(projectId: string, purpose: MigrationInspectionAccess): Promise<boolean>;
   observe(scope: Pick<MigrationVersionSource, 'projectId' | 'environmentId' | 'serviceId'>): Promise<MigrationVersionSource>;
   programHash(source: MigrationVersionSource): string;
   inspect(source: MigrationVersionSource): Promise<MigrationSourceInventory>;

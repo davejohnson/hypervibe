@@ -33,8 +33,16 @@ describe('private Railway source version review', () => {
         });`;
         return spawn(process.execPath, ['-e', script, outcome], options);
       }) as typeof childProcess.spawn);
-      const probe = () => readRailwayServerVersion(source, { sshIdentityFile, sshKnownHostsFile });
-      expect(await probe()).toEqual({ versionNumber: 170003, tables: 0, estimatedRows: '0' });
+      const credentials = { sshIdentityFile, sshKnownHostsFile };
+      const inventory = { versionNumber: 170003, tables: 0, estimatedRows: '0' };
+      const scoped = { ...credentials, sshProjectId: source.projectId };
+      for (const projectId of ['other-project', '']) {
+        await expect(readRailwayServerVersion({ ...source, projectId }, scoped)).rejects.toThrow('could not be verified');
+      }
+      expect(childProcess.spawn).not.toHaveBeenCalled();
+      await expect(readRailwayServerVersion(source, scoped)).resolves.toEqual(inventory);
+      const probe = () => readRailwayServerVersion(source, credentials);
+      expect(await probe()).toEqual(inventory);
       for (outcome of ['stale', 'invalid', 'raw']) await expect(probe()).rejects.toThrow('could not be verified');
     } finally { await rm(directory, { recursive: true, force: true }); }
   });

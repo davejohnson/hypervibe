@@ -30,7 +30,8 @@ import type { IServiceVolumes, ServiceVolumeTarget, ServiceVolumeObservation } f
 import { railwayDeployedConfiguration } from './railway-runtime-configuration.js';
 import { railwayInspectionProgramHash } from './railway-version-program.js';
 import { createRailwayVersionInspection } from './railway-version-inspection.js';
-import { createRailwayRuntimeEvidence, readRailwayServerVersion, trustedRailwaySshCredentials } from './railway-runtime-evidence.js';
+import { createRailwayRuntimeEvidence, railwaySshCredentialsForProject, railwaySshProjectAllowed, readRailwayServerVersion, trustedRailwaySshCredentials } from './railway-runtime-evidence.js';
+import type { MigrationInspectionAccess } from '../../../domain/plan/migration-version.contract.js';
 import { createRailwayDatabaseRotationConfiguration } from './railway-database-rotation.js';
 import { createRailwayDatabaseInitialization } from './railway-database-initialization.js';
 import { railwayReplicaConfiguration } from './railway-replica-configuration.js';
@@ -107,9 +108,41 @@ export const RailwayCredentialsSchema = z.object({
   teamId: z.string().optional(),
   sshIdentityFile: z.string().startsWith('/').optional().describe('Existing registered SSH identity; Hypervibe never creates or registers a key.'),
   sshKnownHostsFile: z.string().startsWith('/').optional().describe('Existing independently trusted SSH host file; no host key is accepted automatically.'),
+  sshProjectId: z.string().uuid().toLowerCase().optional().describe('Native Railway project ID allowed to use this SSH identity.'),
 });
 
 export type RailwayCredentials = z.infer<typeof RailwayCredentialsSchema>;
+
+const railwaySshPaths = RailwayCredentialsSchema.pick({ sshIdentityFile: true, sshKnownHostsFile: true, sshProjectId: true })
+  .required({ sshIdentityFile: true, sshKnownHostsFile: true }).strict();
+const storedProjectSsh = RailwayCredentialsSchema.pick({ sshIdentityFile: true, sshKnownHostsFile: true, sshProjectId: true })
+  .required({ sshProjectId: true }).strict();
+
+function credentialRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid Railway connection data.');
+  return value as Record<string, unknown>;
+}
+
+// Older Railway clients use flat paths and ignore project IDs. Keep restricted paths out of their reach.
+const railwayCredentialStorage = {
+  encode(value: unknown) {
+    const credentials = credentialRecord(value);
+    const { sshProjectId, sshIdentityFile, sshKnownHostsFile, ...rest } = credentials;
+    if (sshProjectId === undefined) return credentials;
+    return { ...rest, projectSsh: { sshProjectId, ...(sshIdentityFile === undefined ? {} : { sshIdentityFile }),
+      ...(sshKnownHostsFile === undefined ? {} : { sshKnownHostsFile }) } };
+  },
+  decode(value: unknown) {
+    const credentials = credentialRecord(value);
+    if (!Object.hasOwn(credentials, 'projectSsh')) return credentials;
+    const { projectSsh, ...rest } = credentials;
+    const scoped = storedProjectSsh.safeParse(projectSsh);
+    if (!scoped.success || Object.keys(storedProjectSsh.shape).some(key => Object.hasOwn(rest, key))) {
+      throw new Error('The stored Railway SSH settings are invalid or ambiguous.');
+    }
+    return { ...rest, ...scoped.data };
+  },
+};
 
 const RAILWAY_API_URL = 'https://backboard.railway.app/graphql/v2';
 
@@ -262,7 +295,9 @@ export class RailwayAdapter implements
     programHash: railwayInspectionProgramHash,
     ...createRailwayVersionInspection(() => this.client, target => this.resolveBackupVolume(target),
       source => readRailwayServerVersion(source, this.credentials)),
-    hasTrustedAccess: async () => Boolean(await trustedRailwaySshCredentials(this.credentials)),
+    hasTrustedAccess: async (projectId: string, purpose: MigrationInspectionAccess) => purpose === 'reuse-receipt'
+      ? railwaySshProjectAllowed(this.credentials, projectId)
+      : Boolean(await railwaySshCredentialsForProject(this.credentials, projectId)),
   };
   readonly railwayRuntimeEvidence = createRailwayRuntimeEvidence(() => this.client, () => this.credentials);
   readonly railwayDatabaseRotationConfiguration = createRailwayDatabaseRotationConfiguration(() => this.client, this.railwayRuntimeEvidence);
@@ -404,7 +439,7 @@ export class RailwayAdapter implements
   }
 
   async connect(credentials: unknown): Promise<void> {
-    this.credentials = credentials as RailwayCredentials;
+    this.credentials = railwayCredentialStorage.decode(credentials) as RailwayCredentials;
     this.resolvedWorkspaceId = undefined;
     this.client = new GraphQLClient(RAILWAY_API_URL, {
       headers: {
@@ -8247,6 +8282,26 @@ export interface RailwayProjectDetails {
 // Self-register with provider registry
 providerRegistry.register({
   hostedObservation: { observe: observeRailwayHosted },
+  credentialStorage: railwayCredentialStorage,
+  credentialUpdate: {
+    secretKeys: ['apiToken', 'sshIdentityFile', 'sshKnownHostsFile'],
+    matches: supplied => !Object.hasOwn(supplied, 'apiToken') &&
+      Object.keys(railwaySshPaths.shape).some(key => Object.hasOwn(supplied, key)),
+    async prepare({ existing, supplied, scope }) {
+      const input = railwaySshPaths.safeParse(supplied);
+      if (!input.success) return { success: false, error: 'Supply sshIdentityFile and sshKnownHostsFile as absolute paths. The only other accepted field is sshProjectId, the native Railway project UUID.' };
+      if (!scope || scope.endsWith('/*')) {
+        if (!input.data.sshProjectId) return { success: false, error: 'Supply sshProjectId to limit SSH access on this shared connection to one Railway project.' };
+        if (existing.sshIdentityFile && existing.sshKnownHostsFile && existing.sshProjectId !== input.data.sshProjectId) {
+          return { success: false, error: 'This shared connection already has SSH files for a different set of projects. Use a verified connection scoped to the intended project.' };
+        }
+      }
+      const paths = await trustedRailwaySshCredentials(input.data).catch(() => undefined);
+      if (!paths) return { success: false, error: 'Check that both SSH paths point to existing regular files owned by you or root. The identity must be private and the host file must allow writes only by its owner.' };
+      return { success: true, credentials: { ...existing, ...input.data }, credentialKeys: Object.keys(input.data), primaryVerified: false,
+        message: 'Saved the Railway SSH file paths after checking ownership and permissions. The reviewed database inspection tests access to its selected replica.' };
+    },
+  },
   metadata: {
     name: 'railway',
     displayName: 'Railway',
