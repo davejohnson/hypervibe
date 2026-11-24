@@ -689,23 +689,37 @@ need Cloud SQL's elevated role cannot be installed by the app's logins there,
 and Hypervibe cannot detect that a migration needs one: such an app must keep
 its own server for now.
 
-Not yet confirmed against Google Cloud (each needs a live run):
+Run once against Google Cloud on November 23, 2026 (Hypervibe 0.1.52, a new
+project in `us-central1`, a scratch app with one web service and two
+environments). Each step went through `hv_plan` and `hv_apply` from the CLI and
+succeeded:
 
-- A login created through the Cloud SQL Admin API can create roles and
-  databases and manage the roles it creates on PostgreSQL 16.
-- Setting that login's password through the Admin API on every apply is quick
-  enough, keeps sessions that are already open, and answers HTTP 409 when the
-  server is busy with another change.
-- Cloud SQL accepts pre-hashed (SCRAM) passwords and `PASSWORD NULL` for the
-  environments' logins under its password rules.
-- The instance list carries labels, region, state, deletion protection and
-  the warnings field as read here; the connection name is
-  `project:region:instance`.
-- The smallest tier allows about 25 connections.
-- The deployment identity may create the instance; the import id format is
-  right; OpenTofu can turn protection off and then delete.
-- Deleting the Google project is not held up by the server's deletion
-  protection.
+- The first environment's plan created the server and that environment's
+  database; the second environment's plan found the server and only added its
+  own database. Both apps then read and wrote their database through the
+  Cloud SQL socket, and a row written through one was not visible to the other.
+- The administrator login created through the Cloud SQL Admin API could create
+  the databases and roles, and setting its password through the Admin API on
+  each apply worked. Cloud SQL accepted the pre-hashed (SCRAM) passwords and
+  `PASSWORD NULL` for the environments' logins.
+- Rotation on one environment: new password on the idle login, services moved
+  to the new secret version, previous login switched off. The app kept
+  answering throughout and the other environment was untouched.
+- Server removal was refused while both environments used the server. After
+  tearing down one environment the other kept working. After both were torn
+  down, deletion protection was turned off and the server was deleted in two
+  confirmed plans.
+
+That is one run. Not exercised by it, and still unconfirmed:
+
+- Two environments applying at the same moment, and the HTTP 409 answer when
+  the server is busy with another change.
+- Taking over a server whose create was interrupted (the import id format).
+- A list response carrying the warnings field for an unreachable region.
+- That the smallest tier allows about 25 connections.
+- Approving a removal plan on the review page (chat approval was used).
+- Deleting the Google project while the server's deletion protection is on.
+- An app spanning more than one Google project or region.
 
 Known limits of removing the server:
 
