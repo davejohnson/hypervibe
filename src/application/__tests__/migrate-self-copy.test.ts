@@ -127,6 +127,26 @@ describe.each(providers)('$label self-migration boundary', (provider) => {
   });
 });
 
+describe('resuming a saved Railway migration', () => {
+  it.each(['importedSecrets', 'pendingImportedSecrets'])('requires a target mapping before reusing an old %s database name', async field => {
+    const f = fixture(providers[0]!);
+    const databaseEnvAliases = { APP_DB: 'DATABASE_URL' };
+    f.store.merge(f.project, { environments: {
+      production: { services: { web: { databaseEnvAliases } } },
+      replacement: { hosting: { provider: 'cloudrun' }, services: { web: { workloadKind: 'web' } }, database: { provider: 'cloudsql' } },
+    } });
+    f.ctx.repos.environments.create({ projectId: f.project.id, name: 'replacement',
+      platformBindings: { engine: { kind: 'opentofu', [field]: ['APP_DB'] } } });
+    const resume = () => f.migrate({ to: 'replacement' });
+    expect(await resume()).toMatchObject({ status: 'blocked', message: expect.stringMatching(/APP_DB.*databaseEnvAliases/s) });
+    expect(launch.launchEnvironment).not.toHaveBeenCalled();
+
+    f.store.merge(f.project, { environments: { replacement: { services: { web: { databaseEnvAliases } } } } });
+    expect(await resume()).toEqual(preparationStop);
+    expect(launch.launchEnvironment).toHaveBeenCalledOnce();
+  });
+});
+
 describe('Cloud SQL native identity aliases', () => {
   it.each(modes)('rejects $label between different names bound to the same database', async ({ options }) => {
     const f = fixture(providers[1], { sourceProjectId: 'fixture-project', targetProjectId: 'fixture-project' });

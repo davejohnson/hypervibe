@@ -7,6 +7,7 @@ import { createCommandContext } from '../context.js';
 import { observeSecret, writeSecretVersion, planInfrastructureEngine, recordSecretVersionMetadata } from '../infrastructure-engine.js';
 import * as infrastructure from '../infrastructure-engine.js';
 import * as launch from '../launch.js';
+import { secretAges } from '../secret-rotation.js';
 import * as hosting from '../../domain/services/hosting-env.service.js';
 import { migrateEnvironment } from '../migrate.js';
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
@@ -135,6 +136,75 @@ describe('engine-owned Secret Manager containers', () => {
       ...spec.environments.staging, hosting: { provider, gcpRuntimeSecretGrants: 'per-secret' },
     } } });
     expect(result.error?.issues.map(issue => issue.path)).toEqual([['environments', 'staging', 'hosting', 'gcpRuntimeSecretGrants']]);
+  });
+
+  it('retains existing imported alias containers without requesting or recreating their versions', async () => {
+    const { ctx, project, environment, labels, spec } = engineFixture();
+    const alias = 'hv-staging-job-db-url';
+    const name = `projects/demo-project/secrets/${alias}`;
+    const updated = projectSpecSchema.parse({ ...spec, environments: { staging: { ...spec.environments.staging,
+      database: { provider: 'cloudsql' },
+      services: { web: { databaseEnvAliases: { JOB_DB_URL: 'DATABASE_URL', LEGACY_URL: 'DIRECT_URL' } } },
+    } } });
+    ctx.repos.environments.updatePlatformBindings(environment.id, { engine: {
+      kind: 'opentofu', database: { instanceName: 'staging-db' }, secrets: [alias], importedSecrets: ['JOB_DB_URL'], pendingImportedSecrets: ['LEGACY_URL'],
+    } });
+    let observedLabels = labels;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method) throw new Error('Planning cannot write to Google.');
+      if (url.includes('/secrets?')) return Response.json({ secrets: [{ name }] });
+      if (url.endsWith('/' + alias)) return Response.json({ name, labels: observedLabels });
+      for (const key of [secret, 'hv-staging-database-url', 'hv-staging-partner-token']) {
+        const path = `projects/demo-project/secrets/${key}`;
+        if (url.endsWith(path)) return Response.json({ name: path, labels: { ...labels, 'hv-db-login': 'app_a', 'hv-db-instance': 'staging-db' } });
+        if (url.endsWith(path + '/versions/latest')) return Response.json({ name: path + '/versions/3', state: 'ENABLED' });
+      }
+      if (url.includes('artifactregistry.googleapis.com')) return Response.json({ name: 'projects/demo-project/locations/us-central1/repositories/hypervibe', format: 'DOCKER' });
+      return new Response('', { status: 404 });
+    }));
+    const segment = { id: 'engine-segment', engine: 'opentofu' as const, planDigest: 'a'.repeat(64), configurationDigest: 'b'.repeat(64), engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } };
+    const enginePlan = vi.spyOn(OpenTofuEngine.prototype, 'plan').mockResolvedValue({ ok: true, segmentId: segment.id, segment,
+      planFile: '/not-executed', blockers: [], unmanagedDeletes: [], actions: [] });
+    const params = { project, spec: updated, specRevision: 1, environmentName: environment.name };
+    const previous = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: {
+      kind: 'hv_plan', scope: 'infrastructure-engine', environmentName: environment.name, specRevision: 1, observedFingerprint: null,
+      engine: { planId: 'old-plan', state: { provider: 'gcp', projectId: project.id, environmentId: environment.id, partition: 'environment' },
+        gcpProjectId: 'demo-project', region: 'us-central1' }, actions: [{ id: 'service:web', type: 'update', verified: true, requiresConfirm: true,
+        resource: { kind: 'service', name: 'web', provider: 'gcp' }, reason: 'Reviewed service update',
+        metadata: { engineSegment: { ...segment, addresses: ['google_cloud_run_v2_service.web'] } } }],
+    } });
+    expect(await infrastructure.applyInfrastructureEngine(ctx, { ...params, planId: previous.id, confirmActions: [] }))
+      .toMatchObject({ kind: 'blocked', reason: expect.stringContaining('hv_plan') });
+    const inventory = await secretAges(ctx, project, updated, environment.name);
+    if ('blocked' in inventory) throw new Error(inventory.blocked);
+    expect(inventory.secrets.map(entry => entry.key)).not.toContain('JOB_DB_URL');
+    const first = await planInfrastructureEngine(ctx, params);
+    if ('blocked' in first) throw new Error(first.blocked.join(' '));
+    const files = enginePlan.mock.calls[0]![0].configuration.files as Record<string, any>;
+    const containers = Object.values(files['secrets.tf.json'].resource.google_secret_manager_secret).map((item: any) => item.secret_id);
+    expect(containers).toContain(alias);
+    expect(containers).not.toContain('hv-staging-legacy-url');
+    await expect(infrastructure.applyInfrastructureEngine(ctx, { project, spec: updated, specRevision: 1,
+      planId: first.planRunId, confirmActions: first.confirmActions })).resolves.toMatchObject({ kind: 'executed', result: { success: true } });
+    expect(ctx.repos.environments.findById(environment.id)?.platformBindings.engine).toMatchObject({
+      importedSecrets: [], pendingImportedSecrets: [], retainedDatabaseAliasImports: ['JOB_DB_URL', 'LEGACY_URL'],
+    });
+    delete updated.environments.staging!.services.web!.databaseEnvAliases;
+    const next = await planInfrastructureEngine(ctx, { ...params, specRevision: 2 });
+    if ('blocked' in next) throw new Error(next.blocked.join(' '));
+    const nextFiles = enginePlan.mock.calls.at(-1)![0].configuration.files;
+    expect(JSON.stringify(nextFiles['secrets.tf.json'])).toContain(alias);
+    expect(JSON.stringify(nextFiles['cloudrun.tf.json'])).not.toMatch(/JOB_DB_URL|LEGACY_URL/);
+    const reuse = projectSpecSchema.parse({ ...updated, secrets: { ...updated.secrets, JOB_DB_URL: {
+      ownership: 'delegated', principal: 'app administrator', environments: ['staging'],
+    } } });
+    expect(await planInfrastructureEngine(ctx, { ...params, spec: reuse, specRevision: 3 })).toMatchObject({ blocked: [expect.stringContaining('previous database alias import')] });
+    expect(await infrastructure.gcpSecretStore(ctx, project, reuse, environment.name)).toMatchObject({ blocked: expect.stringContaining('previous database alias import') });
+    const renamed = { ...updated, secrets: { ...updated.secrets, PARTNER_TOKEN: reuse.secrets.JOB_DB_URL! } };
+    expect(await planInfrastructureEngine(ctx, { ...params, spec: renamed, specRevision: 4 })).not.toHaveProperty('blocked');
+    observedLabels = { ...labels, 'hv-environment': 'other' };
+    expect(await planInfrastructureEngine(ctx, { ...params, specRevision: 2 })).toMatchObject({ blocked: [expect.stringContaining('ownership')] });
+    expect(enginePlan).toHaveBeenCalledTimes(3);
   });
 
   it('plans containers before value writes and wires services only after enabled versions exist', async () => {
@@ -307,20 +377,23 @@ describe('engine-owned Secret Manager containers', () => {
   });
 
 
-  it('prepares imported secret containers through approved infrastructure before copying values', async () => {
+  it.each([false, true])('prepares imported secret containers before copying values (legacy database alias: %s)', async legacyAlias => {
     const { ctx, project, environment } = owned();
-    const target = ctx.repos.environments.create({ projectId: project.id, name: 'gcp' });
+    const target = ctx.repos.environments.create({ projectId: project.id, name: 'gcp',
+      ...(legacyAlias ? { platformBindings: { engine: { pendingImportedSecrets: ['APP_DB'], retainedDatabaseAliasImports: ['OLD_DB'] } } } : {}) });
     ctx.repos.services.create({ projectId: project.id, name: 'web' });
     const spec = projectSpecSchema.parse({ version: 1, project: project.name, environments: {
       staging: { hosting: { provider: 'railway' }, services: { web: {} } },
-      gcp: { hosting: { provider: 'cloudrun' }, services: { web: {} } },
+      gcp: { hosting: { provider: 'cloudrun' }, ...(legacyAlias ? { database: { provider: 'cloudsql' } } : {}),
+        services: { web: legacyAlias ? { databaseEnvAliases: { APP_DB: 'DATABASE_URL' } } : {} } },
     } });
     new ProjectSpecRepository().insert(project.id, 1, spec);
     const events: string[] = [];
     const engineContext = { environment: target, gcpProjectId: 'demo-project', region: 'us-central1',
       adapter: { engineAccessToken: async () => 'test-token' } } as unknown as infrastructure.EngineContext;
     vi.spyOn(infrastructure, 'resolveEngineContext').mockResolvedValue(engineContext);
-    vi.spyOn(hosting, 'readHostingEnvVars').mockResolvedValue({ success: true, provider: 'railway', variables: { API_KEY: 'private-value' } });
+    vi.spyOn(hosting, 'readHostingEnvVars').mockResolvedValue({ success: true, provider: 'railway',
+      variables: { API_KEY: 'private-value', ...(legacyAlias ? { OLD_DB: 'service=legacy' } : {}) } });
     const write = vi.spyOn(infrastructure, 'writeSecretVersion').mockImplementation(async () => { events.push('copy-value'); return undefined; });
     let authorized = false;
     let rounds = 0;
@@ -329,10 +402,13 @@ describe('engine-owned Secret Manager containers', () => {
       events.push('container-plan');
       const binding = ctx.repos.environments.findById(target.id)!.platformBindings as { engine?: infrastructure.EngineBinding };
       if (!authorized) {
-        expect(binding.engine?.pendingImportedSecrets).toEqual(['API_KEY']);
+        expect(binding.engine?.pendingImportedSecrets?.sort()).toEqual(legacyAlias ? ['API_KEY', 'APP_DB'] : ['API_KEY']);
         return { status: 'needs_confirmation', confirmActions: ['secret-container:hv-gcp-api-key'], changes: [], estimatedMonthlyCost: {} } as unknown as launch.LaunchResult;
       }
       rounds++;
+      if (legacyAlias && rounds === 1) {
+        ctx.repos.environments.updatePlatformBindings(target.id, { engine: infrastructure.retainDatabaseAliasImports(binding.engine!, ['APP_DB']) });
+      }
       return rounds === 1 ? { status: 'ready', phase: 'infrastructure', infrastructureRounds: 1 }
         : { status: 'blocked', message: 'WIRE_ROUND_REACHED' };
     });

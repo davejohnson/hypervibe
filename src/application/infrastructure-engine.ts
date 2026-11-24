@@ -8,6 +8,8 @@ import { statSync } from 'node:fs';
 import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
 import { domainServiceFor, environmentDomains, engineEnvironmentProblems, isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
 import { secretTargetsService } from '../domain/services/secret-service-scope.js';
+import { buildDatabaseAliasEnvVars, databaseEnvAliasKeys } from '../domain/services/database-env.js';
+import { gcpReleaseServiceName } from '../domain/services/gcp-runtime-env.js';
 import { gcpSecretScopeGate, gcpSecretScopeNotes, RELEASE_WORKLOAD } from './gcp-secret-scope.js';
 import { recordAppliedWorkloads } from '../adapters/providers/gcp/secret-scope-state.js';
 import type { GcpAppliedWorkload } from '../domain/services/gcp-secret-scope.js';
@@ -175,6 +177,8 @@ export interface EngineBinding {
   importedSecrets?: string[];
   /** Import names awaiting approved container creation and direct value transfer. */
   pendingImportedSecrets?: string[];
+  /** Former database alias imports, kept in their existing containers and excluded from runtime settings. */
+  retainedDatabaseAliasImports?: string[];
   /** Container identities tracked in the environment engine state. */
   secrets?: string[];
   /** Local ownership evidence for the native generation of each confirmed per-secret IAM member. */
@@ -191,6 +195,23 @@ export interface EngineBinding {
     finalCopy?: import('./migration-cutover-readiness.js').FinalCopyReceipt;
     previousCopy?: MigrationCopyEvidence;
   };
+}
+
+/** Preserve existing containers while permanently dropping superseded imports from runtime and transfer lists. */
+export function retainDatabaseAliasImports(binding: EngineBinding, keys: Iterable<string>): EngineBinding {
+  const selected = new Set([...keys, ...(binding.retainedDatabaseAliasImports ?? [])]);
+  const superseded = [...(binding.importedSecrets ?? []), ...(binding.pendingImportedSecrets ?? [])].filter(key => selected.has(key));
+  if (!superseded.length) return binding;
+  return { ...binding,
+    ...(binding.importedSecrets ? { importedSecrets: binding.importedSecrets.filter(key => !selected.has(key)) } : {}),
+    ...(binding.pendingImportedSecrets ? { pendingImportedSecrets: binding.pendingImportedSecrets.filter(key => !selected.has(key)) } : {}),
+    retainedDatabaseAliasImports: [...new Set([...(binding.retainedDatabaseAliasImports ?? []), ...superseded])].sort(),
+  };
+}
+
+function retainedImportConflict(environmentName: string, retainedIds: Set<string>, keys: string[]): string | undefined {
+  const reused = keys.find(key => retainedIds.has(engineSecretId(environmentName, key)));
+  if (reused) return `Secret name ${reused} belongs to a previous database alias import. Choose a separate name for the new runtime secret.`;
 }
 
 /** Globally unique, stable bucket name; bucket names can be reused after deletion. */
@@ -337,7 +358,9 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
 }): GcpCloudRunEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   // A package token is for image builds only; running services never receive it.
-  const secretKeys = [...engineSecretKeys(spec, environmentName), ...(context.importedSecrets ?? []).filter((key) => !isBuildTokenKey(key)), ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
+  const aliasKeys = databaseEnvAliasKeys(environmentSpec);
+  const imports = (context.importedSecrets ?? []).filter(key => !isBuildTokenKey(key) && !aliasKeys.has(key));
+  const secretKeys = [...engineSecretKeys(spec, environmentName), ...imports, ...(context.databaseWired ? [ENGINE_DATABASE_URL_KEY] : []),
     ...(context.cacheWired ? [ENGINE_CACHE_URL_KEY] : [])];
   // A secret that names services goes only to them; the release command borrows one service's set below.
   const secretEnvFor = (service: string) => Object.fromEntries(secretKeys
@@ -352,6 +375,18 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
     })));
   const services = Object.entries(environmentSpec.services).sort(([a], [b]) => a.localeCompare(b)).map(([name, service]) => {
       const workload = service.workloadKind === 'cron' ? 'job' as const : service.workloadKind === 'worker' ? 'worker' as const : 'web' as const;
+      const secretEnv = { ...secretEnvFor(name), ...s3SecretEnvFor(name) };
+      const databaseRef = context.databaseWired && secretEnv[ENGINE_DATABASE_URL_KEY];
+      if (databaseRef) {
+        // Cloud SQL's login connects directly over its socket. Both supported alias sources use that pinned reference.
+        const aliases = buildDatabaseAliasEnvVars({ DATABASE_URL: databaseRef, DIRECT_URL: databaseRef }, service.databaseEnvAliases);
+        for (const [alias, reference] of Object.entries(aliases)) {
+          if (Object.hasOwn(secretEnv, alias) || alias === 'CLOUD_SQL_CONNECTION_NAME' || alias === 'PGHOST') {
+            throw new Error(`Service ${name}'s database alias ${alias} conflicts with a managed runtime variable.`);
+          }
+          secretEnv[alias] = reference;
+        }
+      }
       return {
         logicalName: name,
         resourceName: context.resourceNameFor(name),
@@ -360,7 +395,7 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
         runtimeServiceAccountEmail: context.serviceIdentities?.[name] ?? context.runtimeServiceAccountEmail,
         // Queue names follow the shared Pub/Sub contract so apps see the same variables on every path.
         env: { ...buildQueueEnvVars({ environmentSpec, environment: { name: environmentName, platformBindings: { projectId: context.gcpProjectId } }, backend: environmentSpec.queues ? 'pubsub' : undefined, gcpProjectId: context.gcpProjectId }), ...environmentSpec.envVars },
-        secretEnv: { ...secretEnvFor(name), ...s3SecretEnvFor(name) },
+        secretEnv,
         public: service.public ?? workload === 'web',
         ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
         ...(service.cpu ? { cpu: service.cpu } : {}),
@@ -374,7 +409,8 @@ export function buildEngineInput(spec: ProjectSpec, environmentName: string, con
   // The release command runs with the web service's configuration (secrets, database, storage),
   // so it never holds a secret that is limited to other services.
   const command = releaseCommandFor(environmentSpec);
-  const primary = services.find((service) => service.workload === 'web') ?? services.find((service) => service.workload !== 'job');
+  const primaryName = gcpReleaseServiceName(environmentSpec);
+  const primary = services.find(service => service.logicalName === primaryName);
   return {
     projectId: context.gcpProjectId,
     region: context.region,
@@ -478,7 +514,12 @@ export async function gcpSecretStore(ctx: CommandContext, project: Project, spec
   // Finish approved container creation before asking the user to paste private values.
   // This also covers explicit key requests, which can bypass the missing-value scan.
   const binding = (context.environment.platformBindings as { engine?: EngineBinding }).engine;
-  for (const key of engineOutsideKeys(spec, environmentName, binding?.importedSecrets)) {
+  const imports = retainDatabaseAliasImports(binding ?? {}, databaseEnvAliasKeys(spec.environments[environmentName]!));
+  const outside = engineOutsideKeys(spec, environmentName, imports.importedSecrets);
+  const retainedIds = new Set(imports.retainedDatabaseAliasImports?.map(key => engineSecretId(environmentName, key)));
+  const conflict = retainedImportConflict(environmentName, retainedIds, outside);
+  if (conflict) return { blocked: conflict };
+  for (const key of outside) {
     const observed = await observe(key);
     if (typeof observed === 'object') return { blocked: observed.unknown };
   }
@@ -1045,9 +1086,14 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   // Outside values arrive only after the engine creates their reviewed containers.
   // Migration imports keep their private transfer stage instead of opening a collection page.
   // A teardown keeps nothing, imported values included.
-  const pendingImportedSecrets = options.teardown ? [] : engineBinding.pendingImportedSecrets ?? [];
-  const importedSecrets = options.teardown ? [] : engineOutsideKeys(spec, environmentName, engineBinding.importedSecrets)
+  const aliasKeys = databaseEnvAliasKeys(environmentSpec!);
+  const importBinding = retainDatabaseAliasImports(engineBinding, aliasKeys);
+  const pendingImportedSecrets = options.teardown ? [] : importBinding.pendingImportedSecrets ?? [];
+  const importedSecrets = options.teardown ? [] : engineOutsideKeys(spec, environmentName, importBinding.importedSecrets)
     .filter((key) => !pendingImportedSecrets.includes(key));
+  const retainedAliasIds = new Set((options.teardown ? [] : importBinding.retainedDatabaseAliasImports ?? []).map(key => engineSecretId(environmentName, key)));
+  const reused = retainedImportConflict(environmentName, retainedAliasIds, [...desiredKeys, ...importedSecrets, ...pendingImportedSecrets]);
+  if (reused) return { blocked: [reused] };
   const missingKeys: string[] = [];
   let outsideContainersMissing = false;
   for (const key of importedSecrets) {
@@ -1080,11 +1126,15 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     ...(cacheSpec ? [cacheSecretId] : []), ...s3SecretIds, ...[...importedSecrets, ...pendingImportedSecrets].map((key) => engineSecretId(environmentName, key))]);
   // Legacy owned containers enter engine state in one reviewed import round before retirement.
   const existingIds = existing.state === 'present' ? existing.value : [];
-  const untrackedRetired = existingIds.filter((id) => !desiredIds.has(id) && !engineBinding.secrets?.includes(id));
-  const retiredSecrets = (engineBinding.secrets ?? []).filter((id) => !desiredIds.has(id));
+  // Keep an old alias container only if it still exists and belongs to this environment.
+  for (const secretId of retainedAliasIds) {
+    if (desiredIds.has(secretId)) return { blocked: [`A managed database, cache, or storage secret uses the retained database alias container ${secretId}. Resolve the name conflict before applying.`] };
+  }
+  const untrackedRetired = existingIds.filter((id) => !desiredIds.has(id) && !retainedAliasIds.has(id) && !engineBinding.secrets?.includes(id));
+  const retiredSecrets = (engineBinding.secrets ?? []).filter((id) => !desiredIds.has(id) && !retainedAliasIds.has(id));
   const containers: NonNullable<GcpCloudRunEngineInput['secrets']> = [];
   const adoptSecrets: string[] = [];
-  for (const secretId of [...new Set([...desiredIds, ...untrackedRetired, ...retiredSecrets])].sort()) {
+  for (const secretId of [...new Set([...desiredIds, ...retainedAliasIds, ...untrackedRetired, ...retiredSecrets])].sort()) {
     const observed = await observeSecret(token, context.gcpProjectId, secretId);
     if (observed.state === 'unknown') return { blocked: [observed.reason] };
     if (observed.state === 'present') {
@@ -1092,7 +1142,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       if (ownership['managed-by'] !== 'hypervibe' || ownership['hv-environment'] !== labels['hv-environment']) {
         return { blocked: [`Secret Manager already has ${secretId}, but its ownership does not match this environment.`] };
       }
-      if (desiredIds.has(secretId) || untrackedRetired.includes(secretId)) {
+      if (desiredIds.has(secretId) || retainedAliasIds.has(secretId) || untrackedRetired.includes(secretId)) {
         adoptSecrets.push(secretId);
         containers.push({ secretId, labels: ownership });
       }
@@ -1382,7 +1432,13 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       instanceName: cacheInstanceName, secretId: cacheSecretId, labels: { ...labels, 'hv-cache-instance': cacheInstanceName } },
   }] : [];
   // The complete engine segment creates containers before operational value writes.
-  const ordinary = [...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
+  // Record the reviewed exclusion before changing any workloads, including when a later cloud action fails.
+  const retireImports: PlanAction[] = importBinding === engineBinding || options.teardown ? [] : [{
+    id: 'database-alias-imports:retain', type: 'update', resource: { kind: 'secret', name: 'database alias imports', provider: 'gcp' }, verified: true,
+    reason: `Stop using previous imports for database aliases (${importBinding.retainedDatabaseAliasImports!.join(', ')}). Keep their existing secret containers.`,
+    metadata: { operation: 'gcpRetainDatabaseAliasImports', gcpProjectId: context.gcpProjectId, keys: importBinding.retainedDatabaseAliasImports },
+  }];
+  const ordinary = [...retireImports, ...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const actions = options.teardown ? gcpTeardownActions(ordinary, context, environmentName, engineBinding) : ordinary;
   describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
   describeStorageAutoTieringChanges(serviceActions, environmentSpec!, 'gcp');
@@ -1410,6 +1466,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     engine: {
       planId, state: context.state, gcpProjectId: context.gcpProjectId, region: context.region,
       ...(options.teardown ? { teardown: true } : {}),
+      ...(aliasKeys.size || retainedAliasIds.size ? { databaseAliasImports: importBinding.retainedDatabaseAliasImports ?? [] } : {}),
       ...(Object.keys(runtimeGrants).length ? { runtimeGrants } : {}),
       ...(scopeWorkloads ? { scopeWorkloads } : {}),
       observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
@@ -1561,6 +1618,7 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
   const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; gcpProjectId: string; region: string; observedGenerations?: Record<string, string>; database?: { instanceName: string }; cache?: { instanceName: string };
+    teardown?: boolean; databaseAliasImports?: string[];
     runtimeGrants?: Record<string, ReviewedRuntimeSecretGrant>;
     scopeWorkloads?: Record<string, GcpAppliedWorkload>;
     imageRepository?: { planId: string; state: EngineStateIdentity };
@@ -1575,6 +1633,14 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const reviewedDatabase = gcpDatabaseLocation(reviewed.gcpProjectId, reviewed);
   if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || reviewed.gcpProjectId !== context.gcpProjectId || reviewed.region !== context.region) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different environment, GCP project or region. Re-run hv_plan.' };
+  }
+  if (!reviewed.teardown && document.actions.some(action => action.type !== 'noop')) {
+    const saved = context.environment.platformBindings.engine as EngineBinding | undefined;
+    const aliases = databaseEnvAliasKeys(params.spec.environments[environmentName]!);
+    const retained = retainDatabaseAliasImports(saved ?? {}, aliases).retainedDatabaseAliasImports ?? [];
+    if ((aliases.size || retained.length || reviewed.databaseAliasImports) && JSON.stringify(reviewed.databaseAliasImports) !== JSON.stringify(retained)) {
+      return { kind: 'blocked', reason: 'Run hv_plan again to review the current target database aliases and their secret references before applying.' };
+    }
   }
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
@@ -1597,6 +1663,21 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
       const operation = action.metadata?.operation;
       const metadata = action.metadata as { gcpProjectId?: string } | undefined;
       if (metadata?.gcpProjectId !== context.gcpProjectId) return { success: false, status: 'blocked', message: 'Secret target changed; re-run hv_plan.' };
+      if (operation === 'gcpRetainDatabaseAliasImports') return applyToTarget(() => {
+        const keys = action.metadata?.keys;
+        const current = ctx.repos.environments.findById(context.environment.id);
+        if (!current || !Array.isArray(keys) || !keys.every(key => typeof key === 'string')) {
+          return { success: false, status: 'blocked', message: 'The reviewed database alias imports are unavailable. Run hv_plan again.' };
+        }
+        const saved = (current.platformBindings.engine as EngineBinding | undefined) ?? {};
+        const next = retainDatabaseAliasImports(saved, databaseEnvAliasKeys(params.spec.environments[environmentName]!));
+        if (JSON.stringify(next.retainedDatabaseAliasImports) !== JSON.stringify(keys)
+          || !ctx.repos.environments.replacePlatformBindingsIfUnchanged(current, { ...current.platformBindings, engine: next })) {
+          return { success: false, status: 'blocked', message: 'The database alias imports changed since review. Run hv_plan again.' };
+        }
+        ctx.repos.environments.syncRepoBindingsForId(current.id);
+        return { success: true, message: 'Removed previous database alias imports from active runtime settings.' };
+      });
       if (operation === 'gcpDomainForget') {
         const domain = typeof action.metadata?.domain === 'string' ? action.metadata.domain : '';
         const selected = reviewed.domainClaims?.[domain];

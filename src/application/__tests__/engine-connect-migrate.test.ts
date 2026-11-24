@@ -78,11 +78,14 @@ describe('settings-only migration', () => {
     const target = ctx.repos.environments.create({ projectId: project.id, name: 'testing' });
     ctx.repos.services.create({ projectId: project.id, name: 'web' });
     new ProjectSpecRepository().insert(project.id, 1, projectSpecSchema.parse({ version: 1, project: project.name, environments: {
-      production: { hosting: { provider: 'railway' }, services: { web: {} } },
-      testing: { hosting: { provider: 'aws', engine: 'opentofu' }, services: { web: {} }, envVars: { PORT: '3000' } },
+      production: { hosting: { provider: 'railway' }, database: { provider: 'railway' },
+        services: { web: { databaseEnvAliases: { SOURCE_APP_DB: 'DATABASE_URL' } } } },
+      testing: { hosting: { provider: 'aws', engine: 'opentofu' }, database: { provider: 'rds' },
+        services: { web: { databaseEnvAliases: { TARGET_APP_DB: 'DATABASE_URL' } } }, envVars: { PORT: '3000' } },
     } }));
     vi.spyOn(hostingEnv, 'readHostingEnvVars').mockResolvedValue({ success: true, provider: 'railway',
-      variables: { STRIPE_KEY: 'sk_live_value', SENTRY_DSN: 'https://dsn.example', PORT: '8080', EMPTY: '' } } as never);
+      variables: { STRIPE_KEY: 'sk_live_value', SENTRY_DSN: 'https://dsn.example', PORT: '8080', EMPTY: '',
+        SOURCE_APP_DB: 'service=legacy', TARGET_APP_DB: 'service=old' } } as never);
     const writes: string[] = [];
     vi.spyOn(engineSecrets, 'engineSecretStore').mockResolvedValue({
       name: 'AWS Parameter Store', observe: async () => 'absent',

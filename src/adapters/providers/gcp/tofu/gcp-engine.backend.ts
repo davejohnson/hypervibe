@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { CLOUD_RUN_RESERVED_ENV, type GcpStorageEnv, type GcpS3StorageEnv } from '../../../../domain/services/gcp-runtime-env.js';
 import type {
   EngineAuthentication,
   EngineConfiguration,
@@ -208,7 +209,7 @@ export const STORAGE_VERSION_RETENTION_DAYS = 30;
 export const STORAGE_AUTOCLASS_TERMINAL_CLASS = 'NEARLINE';
 
 /** Variables S3-SDK apps read, pointed at Cloud Storage's S3-compatible endpoint. */
-export const S3_COMPATIBLE_SECRET_KEYS = ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'] as const;
+export { S3_COMPATIBLE_SECRET_KEYS } from '../../../../domain/services/gcp-runtime-env.js';
 
 export function storageEngineKey(name: string): string {
   return `storage_${name.replace(/[^a-z0-9]/g, '_')}`;
@@ -257,7 +258,6 @@ function wakerWorkflow(input: GcpCloudRunEngineInput, service: GcpCloudRunServic
 }
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-const RESERVED_ENV = new Set(['PORT', 'K_SERVICE', 'K_REVISION', 'K_CONFIGURATION']);
 
 function engineKey(logicalName: string): string {
   const key = logicalName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
@@ -318,7 +318,7 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
   const plain = Object.entries(service.env ?? {});
   const secret = Object.entries(service.secretEnv ?? {});
   for (const [name] of [...plain, ...secret]) {
-    if (!ENV_NAME.test(name) || RESERVED_ENV.has(name)) throw new Error(`Environment variable ${name} cannot be managed for ${service.logicalName}.`);
+    if (!ENV_NAME.test(name) || CLOUD_RUN_RESERVED_ENV.has(name)) throw new Error(`Environment variable ${name} cannot be managed for ${service.logicalName}.`);
   }
   const duplicate = plain.find(([name]) => name in (service.secretEnv ?? {}));
   if (duplicate) throw new Error(`Environment variable ${duplicate[0]} is declared both as a value and as a secret.`);
@@ -341,16 +341,17 @@ function serviceResource(input: GcpCloudRunEngineInput, service: GcpCloudRunServ
   if (buckets.length > 1) throw new Error(`Service ${service.logicalName} can receive only one bucket's variables.`);
   for (const bucket of buckets) {
     const reference = `\${google_storage_bucket.${storageEngineKey(bucket.name)}.name}`;
-    for (const [name, value] of Object.entries({
+    const nativeEnv: GcpStorageEnv = {
       OBJECT_STORAGE_PROVIDER: 'gcs', OBJECT_STORAGE_BUCKET: reference,
       GOOGLE_CLOUD_PROJECT: input.projectId, GOOGLE_CLOUD_STORAGE_BUCKET: reference,
-      ...(bucket.s3?.wired ? {
-        AWS_ENDPOINT_URL: 'https://storage.googleapis.com', AWS_DEFAULT_REGION: 'auto',
-        AWS_S3_BUCKET_NAME: reference, AWS_S3_URL_STYLE: 'path',
-        // Cloud Storage's S3 API does not accept the AWS SDK's newer default checksum headers.
-        AWS_REQUEST_CHECKSUM_CALCULATION: 'WHEN_REQUIRED', AWS_RESPONSE_CHECKSUM_VALIDATION: 'WHEN_REQUIRED',
-      } : {}),
-    })) {
+    };
+    const s3Env = bucket.s3?.wired ? {
+      AWS_ENDPOINT_URL: 'https://storage.googleapis.com', AWS_DEFAULT_REGION: 'auto',
+      AWS_S3_BUCKET_NAME: reference, AWS_S3_URL_STYLE: 'path',
+      // Cloud Storage's S3 API does not accept the AWS SDK's newer default checksum headers.
+      AWS_REQUEST_CHECKSUM_CALCULATION: 'WHEN_REQUIRED', AWS_RESPONSE_CHECKSUM_VALIDATION: 'WHEN_REQUIRED',
+    } satisfies GcpS3StorageEnv : {};
+    for (const [name, value] of Object.entries({ ...nativeEnv, ...s3Env })) {
       if (env.some((entry) => entry.name === name)) throw new Error(`Environment variable ${name} conflicts with storage ${bucket.name}.`);
       env.push({ name, value });
     }

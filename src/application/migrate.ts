@@ -14,6 +14,7 @@ import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js
 import { SpecStore, type SpecResult } from '../domain/spec/spec.store.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { acquireManagedDatabaseAccess, type DatabaseAccessLease } from '../domain/services/database-access.service.js';
+import { databaseEnvAliasKeys } from '../domain/services/database-env.js';
 import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-database-identity.js';
 import { isDeepStrictEqual } from 'node:util';
 import { finalCopyReceipt, migrationCutoverReadiness, protectForwardingTarget, targetWriteRecovery } from './migration-cutover-readiness.js';
@@ -133,6 +134,7 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
     hosting: { provider: 'cloudrun', region: options.region ?? 'us-central1', ...(options.gcpProjectId ? { gcpProjectId: options.gcpProjectId } : {}) },
     services: Object.fromEntries(Object.entries(source.services).map(([name, service]) => [name, {
       workloadKind: service.workloadKind,
+      ...(service.databaseEnvAliases ? { databaseEnvAliases: { ...service.databaseEnvAliases } } : {}),
       ...(service.startCommand ? { startCommand: service.startCommand } : {}),
       ...(service.healthCheckPath ? { healthCheckPath: service.healthCheckPath } : {}),
       ...(service.cronSchedule ? { cronSchedule: service.cronSchedule } : {}),
@@ -183,7 +185,7 @@ function notCopiedNote(notCopied: { conflicting: string[]; unresolved: string[] 
 }
 
 /** The runtime settings worth copying from a running source: not managed, not named for the source, not pointing at its data. */
-async function sourceSettings(ctx: CommandContext, params: { project: Project; from: string; to: string; spec: ProjectSpec; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment }):
+async function sourceSettings(ctx: CommandContext, params: { project: Project; from: string; to: string; spec: ProjectSpec; sourceSpec: EnvironmentSpec; sourceEnvironment: Environment; retainedDatabaseAliasImports?: string[] }):
 Promise<{ values: Record<string, string>; keys: string[]; leftOut: string[]; notCopied: { conflicting: string[]; unresolved: string[] } } | { blocked: string }> {
   const reads: Parameters<typeof mergeServiceSettings>[0] = [];
   for (const serviceName of Object.keys(params.sourceSpec.services)) {
@@ -194,8 +196,15 @@ Promise<{ values: Record<string, string>; keys: string[]; leftOut: string[]; not
     reads.push({ service: serviceName, variables: read.variables, ...(read.unresolvedKeys ? { unresolvedKeys: read.unresolvedKeys } : {}) });
   }
   const { values, conflicting, unresolved } = mergeServiceSettings(reads);
-  const declared = new Set([...Object.keys(params.spec.environments[params.to]!.envVars), ...Object.entries(params.spec.secrets)
-    .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(params.to)).map(([key]) => key)]);
+  const targetSpec = params.spec.environments[params.to]!;
+  const declared = new Set([
+    ...Object.keys(targetSpec.envVars),
+    ...Object.entries(params.spec.secrets)
+      .filter(([, secret]) => secret.ownership === 'hypervibe' && secret.environments.includes(params.to)).map(([key]) => key),
+    ...databaseEnvAliasKeys(params.sourceSpec),
+    ...databaseEnvAliasKeys(targetSpec),
+    ...(params.retainedDatabaseAliasImports ?? []),
+  ]);
   const candidates = Object.keys(values).filter((key) => !declared.has(key) && !MANAGED_KEY.test(key) && !pointsAtSourceData(values[key]!)).sort();
   const leftOut = candidates.filter((key) => scopedToEnvironment(key, params.from));
   return { values, keys: candidates.filter((key) => !leftOut.includes(key)), leftOut, notCopied: { conflicting: conflicting.filter((key) => !declared.has(key) && !MANAGED_KEY.test(key)), unresolved: unresolved.filter((key) => !declared.has(key) && !MANAGED_KEY.test(key)) } };
@@ -333,8 +342,19 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   if (params.gcpProjectId && declaredTarget && declaredTarget.hosting.gcpProjectId !== params.gcpProjectId) {
     return { status: 'blocked', message: `Migration target ${params.to} already selects ${declaredTarget.hosting.gcpProjectId ?? 'the repository default'}. Choose a new target environment to migrate to ${params.gcpProjectId}.` };
   }
+  const targetEnvironment = ctx.repos.environments.findByProjectAndName(params.project.id, params.to);
+  if (declaredTarget?.hosting.provider === 'cloudrun' && targetEnvironment) {
+    const binding = (targetEnvironment.platformBindings as { engine?: EngineBinding }).engine;
+    const sourceAliases = databaseEnvAliasKeys(sourceSpec);
+    const targetAliases = databaseEnvAliasKeys(declaredTarget);
+    const savedImports = [...(binding?.importedSecrets ?? []), ...(binding?.pendingImportedSecrets ?? [])];
+    const staleAliases = [...new Set(savedImports.filter(key => sourceAliases.has(key) && !targetAliases.has(key)))].sort();
+    if (staleAliases.length) {
+      return { status: 'blocked', message: `An earlier migration saved ${staleAliases.join(', ')} as source settings. Add these names to databaseEnvAliases on the services that read them in ${params.to}, then resume the migration. Hypervibe will use the target database connection.` };
+    }
+  }
   const liveTarget = await protectForwardingTarget(params.project, specResult.spec, sourceEnvironment,
-    ctx.repos.environments.findByProjectAndName(params.project.id, params.to), params.to, params);
+    targetEnvironment, params.to, params);
   if (store.get(params.project)?.revision !== specResult.revision) return { status: 'blocked', message: `The routing configuration changed during the migration check. Verify the current route first. ${targetWriteRecovery}` };
   if (liveTarget) return liveTarget;
   const bindingConflict = () => migrationDatabaseBindingConflict(ctx, params.project, specResult!.spec,
@@ -408,13 +428,18 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   }
   const environment = () => ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const recorded = (environment().platformBindings as { engine?: EngineBinding }).engine;
-  if (recorded?.importedSecrets?.some((key) => scopedToEnvironment(key, params.from))) {
+  const aliasKeys = databaseEnvAliasKeys(spec.environments[params.to]!);
+  // Keep superseded imports in the saved plan until its reviewed action retires them.
+  const pendingAliases = (binding: EngineBinding) => (binding.pendingImportedSecrets ?? []).filter(key => aliasKeys.has(key));
+  const sourceScoped = (key: string) => !aliasKeys.has(key) && scopedToEnvironment(key, params.from);
+  if (recorded?.importedSecrets?.some(sourceScoped)) {
     ctx.repos.environments.updatePlatformBindings(context.environment.id, {
-      engine: { ...recorded, importedSecrets: recorded.importedSecrets.filter((key) => !scopedToEnvironment(key, params.from)) },
+      engine: { ...recorded, importedSecrets: recorded.importedSecrets.filter(key => !sourceScoped(key)) },
     });
   }
   if (!(environment().platformBindings as { engine?: EngineBinding }).engine?.importedSecrets) {
-    const settings = await sourceSettings(ctx, { project: params.project, from: params.from, to: params.to, spec, sourceSpec, sourceEnvironment });
+    const settings = await sourceSettings(ctx, { project: params.project, from: params.from, to: params.to, spec, sourceSpec, sourceEnvironment,
+      retainedDatabaseAliasImports: recorded?.retainedDatabaseAliasImports });
     if ('blocked' in settings) return { status: 'blocked', message: settings.blocked };
     const { values, keys, leftOut, notCopied } = settings;
     if (!params.importSecrets) {
@@ -426,7 +451,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     }
     pendingSecretValues = Object.fromEntries(keys.map((key) => [key, values[key]!]));
     const engine = (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
-    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, kind: 'opentofu', pendingImportedSecrets: keys } });
+    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, kind: 'opentofu', pendingImportedSecrets: [...keys, ...pendingAliases(engine)] } });
   }
 
   const migration = () => {
@@ -546,7 +571,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
       if (failure) return { status: 'blocked', message: failure.message };
     }
     const engine = (environment().platformBindings as { engine?: EngineBinding }).engine ?? {};
-    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, importedSecrets: Object.keys(pendingSecretValues), pendingImportedSecrets: [] } });
+    ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...engine, importedSecrets: Object.keys(pendingSecretValues), pendingImportedSecrets: pendingAliases(engine) } });
     const wired = await launchEnvironment(ctx, { ...launchParams, stopAfter: 'infrastructure' });
     if (wired.status !== 'ready') return wired;
   }

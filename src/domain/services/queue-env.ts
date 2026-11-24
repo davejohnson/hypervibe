@@ -4,6 +4,8 @@ import type { EnvironmentSpec } from '../spec/spec.schema.js';
 import type { IProviderAdapter } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
 import { resourceName } from './resource-names.js';
+import { pubsubQueueEnvNames } from './gcp-runtime-env.js';
+export { queueEnvVarSuffix } from './gcp-runtime-env.js';
 
 /**
  * Env var contract for spec queues, mirroring database-env.ts. Every
@@ -16,10 +18,6 @@ import { resourceName } from './resource-names.js';
  * Names are deterministic (mirroring CloudRunAdapter.queueResourceNames)
  * so vars are correct at deploy time regardless of apply ordering.
  */
-
-export function queueEnvVarSuffix(queueName: string): string {
-  return queueName.toUpperCase().replace(/[^A-Z0-9]/g, '_');
-}
 
 export function pubsubQueueResourceIds(
   environment: (Pick<Environment, 'platformBindings'> & { name?: string }) | null,
@@ -70,9 +68,9 @@ export function buildQueueEnvVars(params: {
   if (params.backend === 'pubsub' && params.gcpProjectId && params.environment) {
     for (const name of names) {
       const { topicId, subscriptionId } = pubsubQueueResourceIds(params.environment, name, params.gcpProjectId);
-      const suffix = queueEnvVarSuffix(name);
-      vars[`QUEUE_TOPIC_${suffix}`] = `projects/${params.gcpProjectId}/topics/${topicId}`;
-      vars[`QUEUE_SUBSCRIPTION_${suffix}`] = `projects/${params.gcpProjectId}/subscriptions/${subscriptionId}`;
+      const keys = pubsubQueueEnvNames(name);
+      vars[keys.topic] = `projects/${params.gcpProjectId}/topics/${topicId}`;
+      vars[keys.subscription] = `projects/${params.gcpProjectId}/subscriptions/${subscriptionId}`;
     }
   }
 
