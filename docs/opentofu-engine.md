@@ -721,6 +721,14 @@ That is one run. Not exercised by it, and still unconfirmed:
 - Deleting the Google project while the server's deletion protection is on.
 - An app spanning more than one Google project or region.
 
+For moving a database between the shared server and a server of its own (not
+available yet), the configuration generator can point every workload of an
+environment at a database that is named outright, with its socket and its
+connection secret together, while the instance the environment itself creates
+stays in the configuration exactly as declared (`workloadDatabase`,
+`src/adapters/providers/gcp/tofu/gcp-workload-database.ts`). No plan passes
+that input yet, and without it the generated configuration is unchanged.
+
 Known limits of removing the server:
 
 - What Hypervibe has saved is read from this machine. A checkout that loads
