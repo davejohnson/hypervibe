@@ -131,11 +131,14 @@ export function databaseMoveCopyScript(): string {
     // grep's "no line matched" is an answer; anything worse (a file that cannot be read or written) is a failure and must stop the job.
     'sift() { s=0; grep "$@" || s=$?; [ "$s" -le 1 ]; }',
     // PostgreSQL 17.6 and later wrap a dump's text in one \\restrict line and one \\unrestrict line that carry a key made up for that run, so no
-    // two dumps are the same text. Exactly those two lines are left out: the key is read from the first \\restrict line, and only lines that are
-    // that command with that very key go. A line in the app's own definitions that merely looks alike has another key and stays.
+    // two dumps are the same text. Exactly those two lines are left out, and only where they are pg_dump's own: the \\restrict line stands
+    // before the first statement, and the last line of the text is \\unrestrict with the same key. A line anywhere in the app's own
+    // definitions that merely looks alike is neither, and stays.
     'unkeyed() {',
-    '  KEY=$(sed -n \'s/^\\\\restrict \\([A-Za-z0-9]\\{1,\\}\\)$/\\1/p\' "$1" | sed -n 1p) || return 1',
-    '  if [ -z "$KEY" ]; then cp "$1" "$2"; else sift -v -x -F -e "\\\\restrict $KEY" -e "\\\\unrestrict $KEY" "$1" > "$2"; fi',
+    '  FIRST=$(grep -m 1 -E \'^(SET |\\\\restrict [A-Za-z0-9]+$)\' "$1") || FIRST=',
+    '  case "$FIRST" in "\\\\restrict "*) KEY=${FIRST#* } ;; *) KEY= ;; esac',
+    '  LAST=$(grep -v -E \'^(--.*)?$\' "$1" | tail -n 1) || LAST=',
+    '  if [ -n "$KEY" ] && [ "$LAST" = "\\\\unrestrict $KEY" ]; then sift -v -x -F -e "\\\\restrict $KEY" -e "\\\\unrestrict $KEY" "$1" > "$2"; else cp "$1" "$2"; fi',
     '}',
     `rm -rf ${WORK}; mkdir -p ${WORK}`,
 

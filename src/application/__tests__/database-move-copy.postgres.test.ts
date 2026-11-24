@@ -161,8 +161,9 @@ beforeAll(async () => {
   writeFileSync(path.join(shims, 'pg_restore'), [
     '#!/bin/sh',
     // Writing definitions out as text: with WRAP_KEYS, as newer PostgreSQL does it, between a \\restrict and an \\unrestrict line carrying a key made up for that one run.
+    // Where the tools at hand already write such lines themselves (17.6 and later), theirs are the test and nothing is added.
     'case " $* " in *" -f "*) "$REAL_BIN/pg_restore" "$@" || exit $?',
-    '  if [ "${WRAP_KEYS:-0}" = 1 ]; then for A in "$@"; do case "$A" in *.rendered) KEY=$(od -An -N16 -tx1 /dev/urandom | tr -d " \\n"); { printf "%s\\n" "\\\\restrict $KEY"; cat "$A"; printf "%s\\n" "\\\\unrestrict $KEY"; } > "$A.keyed" && mv "$A.keyed" "$A" ;; esac; done; fi',
+    '  if [ "${WRAP_KEYS:-0}" = 1 ]; then for A in "$@"; do case "$A" in *.rendered) if grep -m 1 -E "^(SET |.restrict [A-Za-z0-9]+$)" "$A" | grep -q restrict; then continue; fi; KEY=$(od -An -N16 -tx1 /dev/urandom | tr -d " \\n"); { printf "%s\\n" "\\\\restrict $KEY"; cat "$A"; printf "%s\\n" "\\\\unrestrict $KEY"; } > "$A.keyed" && mv "$A.keyed" "$A" ;; esac; done; fi',
     '  exit 0 ;; esac',
     'case " $* " in *" -d "*) ;; *) exec "$REAL_BIN/pg_restore" "$@" ;; esac',
     '"$REAL_BIN/pg_restore" "$@" || exit $?',
