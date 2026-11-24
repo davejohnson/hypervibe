@@ -308,7 +308,10 @@ export async function migrateEnvironment(ctx: CommandContext, params: MigratePar
         || suppliedPlan.run.environmentId !== sourceEnvironment.id || suppliedPlan.document.environmentName !== params.from || action?.metadata?.targetEnvironment !== params.to) {
         return { status: 'blocked', message: 'This saved plan belongs to a different migration or operation.' };
       }
-      const applied = await createCommandRegistry(ctx).get('hv_apply')!.execute({ project: params.project.id, planId: params.planId, confirmActions: params.confirmActions ?? [] });
+      const applied = await createCommandRegistry(ctx).get('hv_apply')!.execute({
+        project: params.project.id, planId: params.planId,
+        ...(params.confirmActions === undefined ? { useBrowserApproval: true } : { confirmActions: params.confirmActions }),
+      });
       const outcome = applied.data as { applied?: boolean; error?: string; receipts?: Array<{ actionId: string; data?: Record<string, unknown> }> } | undefined;
       const receipt = migrationVersionReceiptSchema.safeParse(outcome?.receipts?.find(item => item.actionId === action.id)?.data?.sourceVersion);
       if (!applied.ok || !outcome?.applied || !receipt.success || receipt.data.planId !== params.planId || receipt.data.actionId !== action.id) {

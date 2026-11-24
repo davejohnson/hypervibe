@@ -4,6 +4,8 @@ import path from 'node:path';
 import pg from 'pg';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { LocalReviewCatalog } from '../../adapters/storage/local-review-catalog.js';
+import * as reviewService from '../local-review-service.js';
 import { acquireMigrationTargetLease } from '../../adapters/db/migration-target-lease.js';
 import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
@@ -384,6 +386,74 @@ describe('current source credential handoff', () => {
     } as any);
     return { ...f, store, runPrivateTask, versionInspection, versionSource };
   }
+
+  describe('browser approval for a saved source inspection', () => {
+    beforeEach(() => {
+      vi.stubEnv('HYPERVIBE_DATA_DIR', directory);
+      SqliteAdapter.resetInstance();
+      SqliteAdapter.getInstance(path.join(directory, 'hypervibe.db')).migrate();
+      vi.spyOn(reviewService, 'currentLocalReviewOrigin').mockResolvedValue('http://127.0.0.1:47832/v/test-profile');
+    });
+    afterEach(() => vi.unstubAllEnvs());
+
+    function inspection() {
+      const f = railwayFixture();
+      f.versionInspection.hasTrustedAccess.mockResolvedValue(true);
+      const registry = commands.createCommandRegistry(f.ctx);
+      const catalog = new LocalReviewCatalog(directory);
+      const call = (input: Record<string, unknown>) => registry.execute('hv_migrate', {
+        project: f.project.name, from: 'source', to: 'target', ...input,
+      });
+      const preview = async () => {
+        const result = await call({ inspectSource: true });
+        expect(result).toMatchObject({ ok: true, data: { status: 'needs_confirmation', reviewStatus: 'Awaiting approval' },
+          hint: expect.stringContaining('omitting confirmActions') });
+        const { planId, confirmActions } = result.data as { planId: string; confirmActions: string[] };
+        return { planId, confirmActions };
+      };
+      const approve = (id: string) => catalog.approve(id, catalog.get(id)!.approval!.digest);
+      return { ...f, call, preview, approve };
+    }
+
+    it('resumes from the exact approved plan and lets the operator approve after an early retry', async () => {
+      const f = inspection();
+      const first = await f.preview();
+      const second = await f.preview();
+      f.approve(first.planId);
+      expect(await f.call({ planId: second.planId })).toMatchObject({ ok: false });
+      expect(f.versionInspection.inspect).not.toHaveBeenCalled();
+      const resumed = await f.call({ planId: first.planId });
+      expect(resumed, resumed.error?.message).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
+      f.approve(second.planId);
+      expect(await f.call({ planId: second.planId })).toMatchObject({ ok: true,
+        data: { status: 'source_inspected', inventory: { versionNumber: 170002, tables: 4, estimatedRows: '20' } } });
+      expect(f.versionInspection.inspect).toHaveBeenCalledTimes(2);
+    });
+
+    it.each(['changed plan', 'stale revision', 'wrong target', 'explicit empty actions'])('rejects %s even with a recorded approval', async mode => {
+      const f = inspection();
+      const { planId } = await f.preview();
+      f.approve(planId);
+      if (mode === 'changed plan') {
+        const run = f.ctx.repos.runs.findById(planId)!;
+        const document = planRunDocumentSchema.parse(run.plan);
+        document.actions[0]!.reason = 'Changed after review';
+        f.ctx.repos.runs.updatePlan(planId, document);
+      }
+      if (mode === 'stale revision') f.store.merge(f.project, { environments: { source: { domain: 'changed.example.com' } } });
+      const result = await f.call({ planId, ...(mode === 'wrong target' && { to: 'other-target' }),
+        ...(mode === 'explicit empty actions' && { confirmActions: [] }) });
+      expect(result.ok).toBe(false);
+      expect(f.versionInspection.inspect).not.toHaveBeenCalled();
+    });
+
+    it('accepts explicit action confirmation without browser consent', async () => {
+      const f = inspection();
+      const reviewed = await f.preview();
+      expect(await f.call(reviewed)).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
+      expect(f.versionInspection.inspect).toHaveBeenCalledTimes(1);
+    });
+  });
 
   it('stops before exporting a private Railway dump and keeps the previous receipt', async () => {
     const f = railwayFixture();
