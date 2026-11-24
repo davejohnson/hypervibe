@@ -54,7 +54,22 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
       && action.metadata?.operation === 'queueDestroy'
       && action.metadata?.backend === 'pubsub'
     );
-  if (billableDataResource && action.type === 'create' && action.billable !== true) {
+  // A database made on the app's existing shared server is a create the person must see, yet it starts no new charge:
+  // the server is the billable thing, and its own create is marked so. Only that exact step is exempt.
+  const sharedStep = action.metadata?.operation === 'gcpSharedDatabase' ? String(action.metadata.step) : undefined;
+  const onExistingSharedServer = action.resource.kind === 'database' && sharedStep === 'allocate' && action.metadata?.engineSegment === undefined;
+  if (sharedStep !== undefined) {
+    // Confirmation follows what an action is shown as, and apply runs its step: the two must agree, so a saved plan
+    // can never present a deletion as an update or a new server as free.
+    const destroys = sharedStep === 'release' || sharedStep === 'remove-server';
+    const types: Record<string, string[]> = { server: ['create'], allocate: ['create', 'update'], rotate: ['update'], retire: ['update'], release: ['destroy'], 'unprotect-server': ['update'], 'remove-server': ['destroy'] };
+    const honest = action.resource.kind === 'database' && action.metadata?.engineSegment === undefined && (types[sharedStep] ?? []).includes(action.type)
+      && (!destroys || (action.dataBearing === true && action.requiresConfirm === true))
+      && (sharedStep !== 'unprotect-server' || action.requiresConfirm === true)
+      && (sharedStep !== 'server' || (action.billable === true && action.requiresConfirm === true));
+    if (!honest) ctx.addIssue({ code: 'custom', path: ['metadata', 'step'], message: 'A shared database step must be shown as what it does.' });
+  }
+  if (billableDataResource && action.type === 'create' && action.billable !== true && !onExistingSharedServer) {
     ctx.addIssue({
       code: 'custom',
       path: ['billable'],
@@ -326,7 +341,7 @@ export const planRunDocumentSchema = z.object({
   const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure', 'gcpRetainDatabaseAliasImports',
     'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
     'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete', 'awsImageBuild', 'awsDatabaseDrop',
-    'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup', 'azureFailedAppEnvironment', 'gcpStorageEmpty', 'gcpTeardownCleanup'];
+    'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup', 'azureFailedAppEnvironment', 'gcpStorageEmpty', 'gcpTeardownCleanup', 'gcpSharedDatabase'];
   if (document.scope === 'infrastructure-engine') {
     const engine = (document as { engine?: { planId?: unknown } }).engine;
     if (typeof engine?.planId !== 'string' || document.overrides || document.inputRequired?.length || document.sourceCommitSha

@@ -604,6 +604,101 @@ environment's engine does not manage, so it is never silently ignored.
 
 No live run has been made of this setting on any cloud.
 
+## One database server per app (opt-in, 2026-11-23)
+
+Status: implemented for Google Cloud behind `database.placement: "app"`, verified
+offline only (an in-memory stand-in for Google, a real local PostgreSQL for every
+SQL statement, through the planner, the saved-plan check and apply). It has not
+been run against Google Cloud. Without the field nothing changes: an environment
+keeps a database server of its own. The plan is in
+[#830](https://github.com/davejohnson/hypervibe/issues/830).
+
+What the person gets: every environment that opts in has its own PostgreSQL
+database and its own logins on one Cloud SQL server per app (per Hypervibe
+project, Google project and region). The server is paid for once (the smallest
+size, about US$10 a month plus storage, the same approximate list price quoted
+for the smallest dedicated database), however many environments use it. Their
+data is separate; the machine is shared, so heavy load in one can slow the
+others, and a restore or a PostgreSQL upgrade covers the whole server.
+
+| Piece | Owner |
+| --- | --- |
+| The server | OpenTofu, in a saved state of its own (`project-shared` partition), never in an environment's state. Its configuration holds the instance and nothing else |
+| The administrator login | Hypervibe. Its password is stored nowhere: every workload of the app may read the project's secrets, so a stored one would let staging's code administer production's database. Each apply that needs the administrator sets a fresh random password through Google's API, uses it in memory and forgets it |
+| An environment's database, owner role and two logins | Hypervibe, as SQL through the administrator login (`tenant-database.ts`), marked with the environment's id |
+| `DATABASE_URL` | The environment's own secret, same id and labels as for a dedicated database. Services get the server's literal connection name; the environment's configuration contains no Cloud SQL resource |
+
+All of it sits in `src/application/shared-database/`, and the Google planner
+reaches it only through `index.ts`: plan (actions, the connection for workloads,
+the secret version) and apply (run one action; the step itself says what to
+record). Guard tests fail if the planner, the workload generator or the
+dedicated-database module mention its internals, and the architecture test
+refuses imports of its other files.
+
+Rules it enforces:
+
+- Plans read no database and set no password. Everything a plan needs comes
+  from Google's list of servers, the environment's secret and its saved record.
+  A list Google marks as incomplete (a region it could not reach) is "unknown",
+  never "no server".
+- An environment's plan creates the server only when Google lists none. A
+  server that exists is never changed from an environment's plan.
+- The database is written down before it is created, so an interrupted apply
+  can always be finished or torn down. A new database is created only when the
+  server itself says none exists and none was ever finished for that
+  environment; a finished one that has gone missing blocks.
+- A new password is proven to open that environment's database before it is
+  published. Rotation (`passwordGeneration`) sets the idle login, publishes,
+  and switches the old login off only after checking, at that moment, that
+  every service and job (the release job included) runs the reviewed secret
+  version. A secret version Google stored without Hypervibe hearing back is
+  set aside and replaced on the next plan.
+- Two applies at once is normal. Whoever is turned away (a replaced
+  administrator password, Cloud SQL busy with another change) is told to run
+  again; it is never reported as damage.
+- Tearing down an environment, or removing its database from the spec, deletes
+  only its own database after confirmation, and keeps its record until its
+  logins are gone too. "Server not found" is never read as "database gone".
+- Connection limits: 15 for an environment whose name contains "prod", 5 for
+  every other, so a test environment cannot use up production's.
+
+Removing the server: the module plans it in two confirmed steps (protection
+off, then delete). Each step holds the lock every allocation needs, reads the
+server's own list and refuses while any database is on it, marked by Hypervibe
+or not. **No command reaches this yet**, so a shared server stays, and stays
+billed, after its last environment is torn down, and
+`hv_connections action="remove-project"` reports it as a leftover resource.
+
+Not available on the shared server yet; each is refused with a plain message
+before anything is requested or created: on-demand workers that count pending
+work, migration to or from it (by spec or by saved record), declarative
+`dataMigration`, direct queries (`hv_db_query`), `database.size`,
+`database.version`, `deletionProtection: true` (only the server is protected;
+removing an environment's database always asks for confirmation), and moving
+an existing database on or off it. Backups, checkpoints and restore drills
+from the spec are refused for every engine database already. Extensions that
+need Cloud SQL's elevated role cannot be installed by the app's logins there,
+and Hypervibe cannot detect that a migration needs one: such an app must keep
+its own server for now.
+
+Not yet confirmed against Google Cloud (each needs a live run):
+
+- A login created through the Cloud SQL Admin API can create roles and
+  databases and manage the roles it creates on PostgreSQL 16.
+- Setting that login's password through the Admin API on every apply is quick
+  enough, keeps sessions that are already open, and answers HTTP 409 when the
+  server is busy with another change.
+- Cloud SQL accepts pre-hashed (SCRAM) passwords and `PASSWORD NULL` for the
+  environments' logins under its password rules.
+- The instance list carries labels, region, state, deletion protection and
+  the warnings field as read here; the connection name is
+  `project:region:instance`.
+- The smallest tier allows about 25 connections.
+- The deployment identity may create the instance; the import id format is
+  right; OpenTofu can turn protection off and then delete.
+- Deleting the Google project is not held up by the server's deletion
+  protection.
+
 ## Evidence boundaries and later implementation
 
 The November 5–6 evidence leaves browser sign-in, a confirmed from-scratch

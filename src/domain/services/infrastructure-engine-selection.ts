@@ -71,6 +71,31 @@ function googleOnlyProblems(environment: EnvironmentSpec): string[] {
   }
   if (environment.database?.size) problems.push(`database.size is not yet supported on ${cloud}.`);
   if (environment.database?.deletionProtection !== undefined) problems.push(`database.deletionProtection is not yet supported on ${cloud}.`);
+  if (environment.database?.placement === 'app') problems.push(`database.placement="app" (one database server shared by the app's environments) is not yet supported on ${cloud}; it is tracked in issue #831. Remove it to give this environment its own database.`);
+  return problems;
+}
+
+/**
+ * What `database.placement: "app"` (the environment's own database on one server the app's environments use together)
+ * cannot be combined with yet. Each is refused whole, before anything is requested or created, never half done.
+ */
+export function sharedDatabaseSpecProblems(spec: ProjectSpec, environmentName: string): string[] {
+  const environment = spec.environments[environmentName];
+  const database = environment?.database;
+  const problems: string[] = [];
+  const onServer = 'on the app\'s shared database server';
+  const from = environment?.dataMigration?.fromEnvironment;
+  if (from && environment?.dataMigration?.include.database && spec.environments[from]?.database?.placement === 'app') {
+    problems.push(`dataMigration copies the database of ${from}, which is ${onServer}. That is not available yet.`);
+  }
+  if (database?.placement !== 'app') return problems;
+  if (Object.values(environment!.services).some((service) => service.workloadKind === 'worker' && service.onDemand)) {
+    problems.push(`${environmentName} has an on-demand worker that counts pending work in the database. That is not available yet ${onServer}; give ${environmentName} its own database (remove "placement") or run the worker all the time.`);
+  }
+  if (database.size !== undefined) problems.push(`database.size cannot be set for ${environmentName}: its database is ${onServer}, whose size is not chosen by one environment. Remove "size", or remove "placement" to give ${environmentName} its own database.`);
+  if (database.version !== undefined) problems.push(`database.version cannot be set for ${environmentName}: its database is ${onServer} (PostgreSQL 16), and one environment cannot change the version for the others. Remove "version", or remove "placement".`);
+  if (database.deletionProtection === true) problems.push(`database.deletionProtection cannot be turned on for ${environmentName}: ${onServer} only the server is protected, and removing ${environmentName}'s database always asks for confirmation. Remove "deletionProtection", or remove "placement" to give ${environmentName} a protected database of its own.`);
+  if (environment!.dataMigration) problems.push(`dataMigration is not available yet for ${environmentName}, whose database is ${onServer}.`);
   return problems;
 }
 
@@ -94,7 +119,7 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   // A secret limited to named services must never fall back to every service.
   const scopeProblems = secretServiceScopeProblems(spec, environmentName);
   if ((environment.hosting.provider === 'aws' || environment.hosting.provider === 'azure') && isEngineManaged(environment)) return [...commonEngineProblems(environment), ...scopeProblems];
-  const problems: string[] = [...scopeProblems, ...gcpSecretScopeProblems(spec, environmentName), ...gcpDatabaseAliasProblems(environment)];
+  const problems: string[] = [...scopeProblems, ...gcpSecretScopeProblems(spec, environmentName), ...gcpDatabaseAliasProblems(environment), ...sharedDatabaseSpecProblems(spec, environmentName)];
   if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   problems.push(...commonEngineProblems(environment));
   if (environment.domainRegistration?.register) {

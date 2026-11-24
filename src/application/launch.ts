@@ -1,5 +1,5 @@
 import { browserApprovedRunActions } from './browser-approved-run.js';
-import { environmentDomains } from '../domain/services/infrastructure-engine-selection.js';
+import { environmentDomains, sharedDatabaseSpecProblems } from '../domain/services/infrastructure-engine-selection.js';
 import { effectiveBranchCiAutoDeploy } from '../domain/spec/spec.schema.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
 import { createHash } from 'node:crypto';
@@ -144,7 +144,8 @@ export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
     }
     lines.push({ item: `Worker ${name} (always on, ${cpu} vCPU, ${memory})`, estimate: `about $${monthly} per month` });
   }
-  if (environment.database) lines.push({ item: 'Cloud SQL Postgres (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month' });
+  if (environment.database?.placement === 'app') lines.push({ item: 'Its own Postgres database on the app\'s one shared Cloud SQL server (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month for the server, charged once for the whole app, not per environment' });
+  else if (environment.database) lines.push({ item: 'Cloud SQL Postgres (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month' });
   if (environment.cache) lines.push({ item: `Memorystore Redis (${environment.cache.tier ?? 'BASIC'}, ${environment.cache.size ?? '1gb'})`, estimate: environment.cache.tier === 'STANDARD_HA' ? 'about $90 per month' : 'about $35 per month' });
   const queues = Object.keys(environment.queues ?? {}).length;
   if (queues) lines.push({ item: `${queues} Pub/Sub queue(s)`, estimate: 'free up to 10 GB of messages per month, then about $40 per TB' });
@@ -466,6 +467,10 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
       if (connected.status !== 'connected') return { status: 'needs_connection', provider: 'cloudflare', ...(connected.url ? { url: connected.url } : {}), message: connected.message };
     }
   }
+
+  // Refused before any access is requested: a grant must never be approved for something the plan will then turn down.
+  const sharedDatabaseProblems = sharedDatabaseSpecProblems(params.spec, params.environmentName);
+  if (sharedDatabaseProblems.length) return { status: 'blocked', message: sharedDatabaseProblems.join(' ') };
 
   // Each access approval applies its saved engine preview; never refresh that
   // preview between the user's approval and application.

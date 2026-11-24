@@ -122,6 +122,8 @@ export interface GcpCloudRunEngineInput {
   database?: GcpCloudSqlInput;
   /** A database this environment previously created that is no longer desired. */
   retiredDatabase?: boolean;
+  /** A database this configuration does not create: workloads are simply connected to it. Never given together with `database`. */
+  databaseConnection?: GcpDatabaseConnection;
   /** Custom domains mapped to services. Ownership verification and DNS stay with Hypervibe. */
   domains?: Array<{ domain: string; service: string }>;
   /** Domains this environment previously mapped that are no longer desired. */
@@ -520,7 +522,7 @@ export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): Engin
   const iam: Record<string, unknown> = {};
   const resources: Record<string, EngineResourceMapping> = {};
   const seen = new Set<string>();
-  const connection = dedicatedDatabaseConnection(input.projectId, input.database);
+  const connection = dedicatedDatabaseConnection(input.projectId, input.database) ?? input.databaseConnection;
   const onDemand = input.services.some((service) => service.workload === 'worker' && service.pendingWorkQuery);
   const jobs: Record<string, unknown> = {};
   const schedules: Record<string, unknown> = {};
