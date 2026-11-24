@@ -53,7 +53,13 @@ export interface SharedDatabaseCloud {
 
 /** The lifecycle engine, already bound to the caller's credentials. The module supplies its own configuration and state. */
 export interface SharedDatabaseEngine {
-  plan(configuration: EngineConfiguration, state: EngineStateIdentity, planId: string, destroy?: boolean): Promise<
+  /**
+   * `review` is shown the engine's own complete plan (OpenTofu's JSON form) before it is saved, and again, read back
+   * from the saved plan, before it is applied. Unless it answers true the plan is not saved, or nothing is applied.
+   */
+  plan(configuration: EngineConfiguration, state: EngineStateIdentity, planId: string, review: EnginePlanReview, destroy?: boolean): Promise<
     { ok: true; actions: PlanAction[]; blockers: string[]; segment: Omit<EngineActionSegment, 'addresses'> } | { ok: false; error: string }>;
-  apply(state: EngineStateIdentity, planId: string, segment: EngineActionSegment): Promise<EngineSegmentResult>;
+  apply(state: EngineStateIdentity, planId: string, segment: EngineActionSegment, review: EnginePlanReview): Promise<EngineSegmentResult>;
 }
+
+export type EnginePlanReview = (shownPlan: unknown) => boolean;

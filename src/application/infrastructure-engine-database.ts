@@ -99,9 +99,15 @@ export async function withCloudSqlSession<T>(serviceAccount: Record<string, unkn
   try {
     await connector.startLocalProxy({ instanceConnectionName: connectionName, ipType: IpAddressTypes.PUBLIC, listenOptions: { path: path.join(directory, '.s.PGSQL.5432') } });
     const client = new pg.Client({ host: directory, user, password: secret, database, connectionTimeoutMillis: 30_000 });
+    // A server can go away under an open session (deleting it does exactly that). Without a listener that event
+    // ends the whole process. Keep the first one as the reason should the work in flight then fail.
+    let lost: unknown;
+    client.on('error', (error) => { lost ??= error; });
     await client.connect();
     try {
       return await work(client);
+    } catch (error) {
+      throw lost ?? error;
     } finally {
       await client.end().catch(() => {});
     }

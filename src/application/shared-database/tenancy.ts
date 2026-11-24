@@ -9,7 +9,7 @@ import { gcpDatabaseOnSharedServer, type GcpDatabaseBinding } from '../gcp-datab
 import { connectionUrl } from '../infrastructure-engine-database.js';
 import { SERVER_BUSY, Stop, blocked, newPassword, pending, withAdministrator, type ServerAddress } from './administrator.js';
 import type { Seen, SeenConnectionSecret, SharedDatabaseCloud, SharedDatabaseEngine } from './ports.js';
-import { MAINTENANCE_DATABASE, findSharedServer, sharedServerState, type SharedServerScope } from './server.js';
+import { MAINTENANCE_DATABASE, findSharedServer, serverPlanReview, sharedServerState, type SharedServerScope } from './server.js';
 
 /**
  * One environment's database on the shared server: allocation, its login and
@@ -152,7 +152,14 @@ export async function runningServer(cloud: SharedDatabaseCloud, scope: SharedSer
 async function applyEnginePlan(context: StepContext): Promise<ActionResult> {
   const reviewed = context.server!;
   const { step, instanceName } = context.metadata;
-  const outcome = await context.engine.apply(reviewed.state, reviewed.planId, reviewed.segment);
+  // What the saved plan does is read from the plan itself, now, never from how its step was worded.
+  const operation = step === 'server' ? 'create' : step === 'remove-server' ? 'delete' : 'update';
+  let matched = true;
+  const review = serverPlanReview(operation, instanceName);
+  const outcome = await context.engine.apply(reviewed.state, reviewed.planId, reviewed.segment, (shown) => (matched = review(shown)));
+  if (!matched) {
+    return { success: false, status: 'blocked', message: `The saved plan for the app's shared database server would not ${operation} exactly ${instanceName}, the server this step was reviewed for. Nothing was changed. Run hv_plan again.` };
+  }
   const states = Object.values(outcome.outcomes);
   if (states.length && states.every((state) => state === 'succeeded')) {
     return { success: true, message: step === 'remove-server' ? `The app's shared database server (${instanceName}) was deleted.`

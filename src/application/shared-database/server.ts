@@ -114,3 +114,31 @@ export function sharedServerCost(): string {
 export function sharedServerProtection(): string {
   return `It starts with ${RETAINED_BACKUPS} daily backups and ${TRANSACTION_LOG_DAYS} days of point-in-time recovery, and deletion protection is on.`;
 }
+
+export type ServerOperation = 'create' | 'update' | 'delete';
+
+/**
+ * Checks the engine's own plan: it changes the shared server and nothing else, does exactly `operation` to it, and the
+ * server it names (in its saved state for an update or delete, in the configuration for a create) is `instanceName`,
+ * the one found by its label in Google's list. A plan that only takes the server over counts as an update.
+ */
+export function serverPlanReview(operation: ServerOperation, instanceName: string): (shownPlan: unknown) => boolean {
+  return (shownPlan) => {
+    const rows = (shownPlan as { resource_changes?: unknown } | null)?.resource_changes;
+    if (!Array.isArray(rows)) return false;
+    type Change = { actions?: unknown; before?: { name?: unknown } | null; after?: { name?: unknown } | null; importing?: unknown };
+    const changing = (rows as Array<{ address?: unknown; change?: Change }>).filter((row) => {
+      const actions = row.change?.actions;
+      return !(Array.isArray(actions) && actions.length === 1 && (actions[0] === 'no-op' || actions[0] === 'read')) || Boolean(row.change?.importing);
+    });
+    if (changing.length !== 1 || changing[0]!.address !== SERVER_ADDRESS) return false;
+    const change = changing[0]!.change!;
+    const actions = Array.isArray(change.actions) ? change.actions.join(',') : '';
+    const takeover = Boolean(change.importing) && (actions === 'no-op' || actions === 'update');
+    if (!(actions === operation || (operation === 'update' && takeover))) return false;
+    const named = (side: { name?: unknown } | null | undefined) => side?.name === instanceName;
+    return operation === 'create' ? named(change.after) && change.before == null
+      : operation === 'delete' ? named(change.before) && change.after == null
+        : named(change.before) && named(change.after);
+  };
+}

@@ -46,7 +46,7 @@ import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../ap
 import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
 import { planHostedDns } from '../application/dns-hosting.js';
 import { planEmailDns } from '../application/dns-integrations.js';
-import { awsEngine, cloudEngineFor } from '../application/cloud-engines.js';
+import { awsEngine, cloudEngineFor, planSharedDatabaseRemoval } from '../application/cloud-engines.js';
 import {
   actionScopedBlocksAllowedDuringApply,
   actionScopedBlocksRequiringConnectBeforeApply,
@@ -673,8 +673,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       project: projectField,
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
-      intent: z.enum(['adopt', 'rotate']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement. Requires scope=credentials.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown']).optional().describe('Default full. Google Cloud, AWS and Azure environments always plan infrastructure with OpenTofu; infrastructure is an explicit alias. The plan includes Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it does not release code (use hv_deploy). teardown plans removing an entire Google Cloud, AWS or Azure environment (every resource, its files and settings; on AWS the database keeps a final snapshot, and on Google Cloud the project setup stays); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      intent: z.enum(['adopt', 'rotate', 'remove']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement; both require scope=credentials. Remove requires scope=shared-database.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown', 'shared-database']).optional().describe('Default full. shared-database with intent="remove" plans removing the app\'s shared database server (Google Cloud) once no environment has a database on it: two confirmed steps, each its own plan and apply (turn off deletion protection, then delete); it takes project only, plus env when the app spans several Google projects or regions. Google Cloud, AWS and Azure environments always plan infrastructure with OpenTofu; infrastructure is an explicit alias. The plan includes Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it does not release code (use hv_deploy). teardown plans removing an entire Google Cloud, AWS or Azure environment (every resource, its files and settings; on AWS the database keeps a final snapshot, and on Google Cloud the project setup stays); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -686,6 +686,33 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const project = ctx.resolveProjectOrThrow({ project: projectRef, readOnly: scope === 'backups' });
       if (deleteFinalSnapshot !== undefined && scope !== 'teardown') {
         return commandError('VALIDATION', 'deleteFinalSnapshot applies to scope="teardown" only.', { next: ['hv_plan'] });
+      }
+      if ((scope === 'shared-database') !== (intent === 'remove')) {
+        return commandError('VALIDATION', 'To remove the app\'s shared database server use scope="shared-database" together with intent="remove".', { next: ['hv_plan'] });
+      }
+      if (scope === 'shared-database') {
+        // The server belongs to the app, not to an environment: this plan takes no deploy inputs and no environment's spec.
+        if ([services, envVars, envFile, includeEnvFile, secretRefs, credential].some((value) => value !== undefined)) {
+          return commandError('VALIDATION', 'Removing the shared database server takes only project, scope and intent (and env when the app spans several Google projects or regions).', { next: ['hv_plan'] });
+        }
+        const saved = specStore.get(project);
+        if (!saved) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
+        const planned = await planSharedDatabaseRemoval(ctx, { project, specRevision: saved.revision, ...(env?.trim() ? { environmentName: env.trim() } : {}) });
+        if ('blocked' in planned) {
+          return commandError('VALIDATION', 'Removing the shared database server is blocked.', {
+            details: { blocked: planned.blocked },
+            agentInstruction: { action: 'stop_and_report', message: 'Report each blocker in plain language. Do not work around it with provider CLIs or APIs.' },
+            next: ['hv_plan'],
+          });
+        }
+        return commandSuccess({
+          planId: planned.planRunId, ...ctx.repos.runs.planReport(planned.planRunId), scope, specRevision: planned.specRevision,
+          actions: planned.actions.map(({ metadata: _metadata, ...action }) => action), confirmActions: planned.confirmActions,
+        }, {
+          warnings: planned.warnings,
+          hint: `Review this with the user, then hv_apply with planId and confirmActions exactly ${JSON.stringify(planned.confirmActions)}. The step is refused, with nothing changed, if any database is on the server at that moment.${planned.actions[0]?.type === 'destroy' ? '' : ' Afterwards run this same hv_plan again to plan the deletion itself.'}`,
+          next: ['hv_apply'],
+        });
       }
       const routingSpec = scope === 'backups' ? specStore.getForInspection(project) : specStore.get(project);
       const routingEnvironment = routingSpec ? commandEnvironment(routingSpec.spec, env) : env?.trim() || 'staging';
@@ -800,7 +827,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const result = await planService.plan(project, plannedEnvironment, {
         ...(scope ? { scope } : {}),
         ...(credential ? { credential } : {}),
-        ...(intent ? { intent } : {}),
+        ...(intent && intent !== 'remove' ? { intent } : {}),
         ...(services !== undefined && (scope === 'secrets' || services.length > 0) ? { serviceFilter: services } : {}),
         ...(envVars !== undefined && (scope === 'secrets' || Object.keys(envVars).length > 0) ? { envVarOverrides: envVars } : {}),
         ...(envFile !== undefined && (scope === 'secrets' || envFile) ? { envFile } : {}),

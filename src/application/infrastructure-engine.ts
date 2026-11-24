@@ -812,18 +812,18 @@ async function findOwnLeftovers(
 }
 
 /** The engine, bound to this environment's credentials, for a module that plans and applies in a saved state of its own. */
-function boundEngine(auth: EngineContext['auth']): SharedDatabaseEngine {
+export function boundEngine(auth: EngineContext['auth']): SharedDatabaseEngine {
   return {
-    async plan(configuration, state, planId, destroy) {
+    async plan(configuration, state, planId, review, destroy) {
       const engine = await openTofuEngine();
       if ('blocked' in engine) return { ok: false, error: engine.blocked };
-      const planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth, state, planId, ...(destroy ? { destroy } : {}) });
+      const planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth, state, planId, verifyPlannedChanges: review, ...(destroy ? { destroy } : {}) });
       return planned.ok ? planned : { ok: false, error: redactEngineOutput(planned.error, auth.redact) };
     },
-    async apply(state, planId, segment) {
+    async apply(state, planId, segment, review) {
       const engine = await openTofuEngine();
       if ('blocked' in engine) return { outcomes: Object.fromEntries(segment.addresses.map((address) => [address, 'not_started' as const])), diagnostics: [engine.blocked] };
-      const outcome = await engine.apply({ backend: gcpEngineBackend, auth, state, planId, segment, approvedAddresses: segment.addresses });
+      const outcome = await engine.apply({ backend: gcpEngineBackend, auth, state, planId, segment, approvedAddresses: segment.addresses, verifySavedPlan: review });
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, auth.redact)) };
     },
   };
@@ -1689,6 +1689,8 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
     sharedDatabase?: unknown;
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
+  // A plan about the app's shared database server belongs to no environment's lifecycle; it is only filed under one.
+  if ((document.engine as { serverRemoval?: unknown } | undefined)?.serverRemoval === true) return (await import('./gcp-shared-database-removal.js')).applyGcpSharedDatabaseRemoval(ctx, params);
   if (!document.engine || !isEngineManaged(params.spec.environments[environmentName])) {
     return { kind: 'blocked', reason: 'This plan is not an OpenTofu engine plan for an engine-managed environment. Re-run hv_plan.' };
   }
@@ -1816,6 +1818,8 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         // Read each time: the step records secret details on the same binding as it goes.
         const bindingNow = () => (ctx.repos.environments.findById(context.environment.id) ?? context.environment).platformBindings as { engine?: EngineBinding };
         return sharedDatabase.apply({ ...sharedDatabaseTarget(context, params.project, token), binding: bindingNow().engine, action, reviewed: reviewed.sharedDatabase,
+          others: ctx.repos.environments.findByProjectId(params.project.id).filter((other) => other.id !== context.environment.id)
+            .map((other) => ({ environment: other.name, binding: (other.platformBindings as { engine?: EngineBinding }).engine })),
           record: (database) => ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...bindingNow().engine, kind: 'opentofu', database: database ?? undefined } }) });
       });
       return { success: false, status: 'blocked', message: `No engine-stage authority exists for ${action.id}.` };

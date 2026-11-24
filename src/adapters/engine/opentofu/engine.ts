@@ -352,6 +352,8 @@ export class OpenTofuEngine {
     segment: EngineActionSegment;
     /** Every address the approved actions authorize. */
     approvedAddresses: string[];
+    /** Inspect the saved plan itself, as read back at this moment, before anything is applied. Anything but `true` applies nothing. */
+    verifySavedPlan?: (shownPlan: unknown) => boolean;
   }): Promise<EngineSegmentResult> {
     const paths = engineStatePaths(params.state, this.options.dataDir);
     const planFile = path.join(paths.plans, `${params.planId}.tfplan`);
@@ -390,6 +392,12 @@ export class OpenTofuEngine {
       const mutations = parsed.changes.filter((change) => change.action !== 'noop').map((change) => change.address);
       if (parsed.unsupported.length || mutations.length !== approved.size || mutations.some((address) => !approved.has(address))) {
         return notStarted('The saved engine plan does not match the approved changes. Re-run hv_plan.');
+      }
+      if (params.verifySavedPlan) {
+        // Addresses say where a plan acts, not what it does there. The caller checks the operations and identities it approved.
+        let matches = false;
+        try { matches = params.verifySavedPlan(JSON.parse(shown.stdout)) === true; } catch { /* a failed review is a mismatch; its error may quote private values */ }
+        if (!matches) return notStarted('The saved engine plan does not do what was reviewed. Nothing was applied. Re-run hv_plan.');
       }
       backupState(paths, params.planId);
       const before = await this.run({ kind: 'show-state' }, prepared.directory, prepared.env, prepared.redact);

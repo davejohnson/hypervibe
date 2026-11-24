@@ -64,6 +64,8 @@ vi.mock('../infrastructure-engine-database.js', async (original) => {
 const google = {
   servers: [] as Array<{ name: string; region: string; state: string; settings: { userLabels: Record<string, string>; deletionProtectionEnabled: boolean } }>,
   listWarning: false,
+  /** The server name OpenTofu's saved state holds; set when the stand-in creates one. */
+  stateServerName: undefined as string | undefined,
   /** The next secret version is stored, and its answer never arrives. */
   loseNextAnswer: false,
   secrets: new Map<string, { labels: Record<string, string>; versions: string[] }>(),
@@ -109,10 +111,11 @@ async function answer(input: string | URL, init?: RequestInit): Promise<Response
 
 /** The engine stand-in: what each saved plan would do when applied. */
 const enginePlans = new Map<string, Array<() => void>>();
+const shownPlans = new Map<string, unknown>();
 const configurations: Array<{ partition: string; configuration: EngineConfiguration }> = [];
 const segmentOf = (planId: string) => ({ id: `opentofu:${planId}`, engine: 'opentofu' as const, planDigest: 'a'.repeat(64), configurationDigest: 'b'.repeat(64), engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } });
 
-function standInPlan({ configuration, state, planId }: Parameters<OpenTofuEngine['plan']>[0]): ReturnType<OpenTofuEngine['plan']> {
+function standInPlan({ configuration, state, planId, verifyPlannedChanges }: Parameters<OpenTofuEngine['plan']>[0]): ReturnType<OpenTofuEngine['plan']> {
   configurations.push({ partition: state.partition, configuration });
   const segment = segmentOf(planId);
   const effects: Array<() => void> = [];
@@ -143,6 +146,17 @@ function standInPlan({ configuration, state, planId }: Parameters<OpenTofuEngine
         add(address, 'destroy', () => { google.secrets.delete(mapping.name); });
       }
     }
+  }
+  if (state.partition === 'project-shared') {
+    // What OpenTofu's own plan says: the operation, the server named in saved state, and the one in the configuration.
+    const name = (configuration.files['shared-database.tf.json'] as { resource: { google_sql_database_instance: { shared: { name: string } } } }).resource.google_sql_database_instance.shared.name;
+    const type = actions[0]?.type ?? 'noop';
+    const before = type === 'create' ? null : { name: google.stateServerName ?? name };
+    const shown = { format_version: '1.2', resource_changes: [{ address: 'google_sql_database_instance.shared', type: 'google_sql_database_instance',
+      change: { actions: [type === 'destroy' ? 'delete' : type === 'noop' ? 'no-op' : type], before, after: type === 'destroy' ? null : { name } } }] };
+    if (verifyPlannedChanges && !verifyPlannedChanges(shown)) return Promise.resolve({ ok: false, stage: 'plan review', error: 'The saved engine plan does not match the reviewed change.' });
+    shownPlans.set(planId, shown);
+    if (type === 'create') effects.push(() => { google.stateServerName = name; });
   }
   enginePlans.set(planId, effects);
   return Promise.resolve({ ok: true, segmentId: segment.id, segment, planFile: '/not-executed', blockers: [], unmanagedDeletes: [], actions });
@@ -216,7 +230,8 @@ beforeAll(async () => {
   vi.spyOn(install, 'enginePluginCacheDir').mockReturnValue(home);
   vi.spyOn(CloudRunAdapter.prototype, 'engineAccessToken').mockResolvedValue('synthetic-token');
   vi.spyOn(OpenTofuEngine.prototype, 'plan').mockImplementation(standInPlan);
-  vi.spyOn(OpenTofuEngine.prototype, 'apply').mockImplementation(async ({ planId, approvedAddresses }) => {
+  vi.spyOn(OpenTofuEngine.prototype, 'apply').mockImplementation(async ({ planId, approvedAddresses, verifySavedPlan }) => {
+    if (verifySavedPlan && !verifySavedPlan(shownPlans.get(planId))) return { outcomes: Object.fromEntries(approvedAddresses.map((address) => [address, 'not_started' as const])), diagnostics: ['The saved engine plan does not do what was reviewed.'] };
     for (const effect of enginePlans.get(planId) ?? []) effect();
     return { outcomes: Object.fromEntries(approvedAddresses.map((address) => [address, 'succeeded' as const])), diagnostics: [] };
   });

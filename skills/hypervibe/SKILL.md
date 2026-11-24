@@ -201,6 +201,15 @@ always use the managed OpenTofu engine, and `hv_plan` routes to it by default;
 there is no engine setting, so never add one to a spec or ask the user about it.
 Resources reported as unsupported stay blocked; do not work around them.
 
+An app whose environments use `database.placement: "app"` on Google Cloud shares
+one database server. Tearing down an environment removes only its own database;
+the server keeps running and keeps costing money until it is removed on its own
+with `hv_plan project="<name>" scope="shared-database" intent="remove"` and
+`hv_apply`. That takes two rounds (turn off deletion protection, then run the
+same `hv_plan` again and delete), each confirmed by the user, and is refused
+while any environment still has a database on the server. Offer it when a
+result says the server is still running and billed; never delete it another way.
+
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`
 requires explicit intent to adopt and the exact reviewed mapping.

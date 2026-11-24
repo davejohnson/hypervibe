@@ -12,6 +12,7 @@ import { GCP_PROJECT_REMOVAL_CHECKED, readGcpProjectContents, readGcpProjectLife
 import { redactExactValues } from '../utils/redact-exact-values.js';
 import type { Project } from '../domain/entities/project.entity.js';
 import { gcpDatabaseLocation, type GcpDatabaseBinding } from './gcp-database-location.js';
+import { sharedServerRemovalCall } from './shared-database/index.js';
 import { buildSourceBucketName, getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
 import { GCP_PROJECT_ID_PATTERN } from '../domain/services/gcp-environment-target.js';
 import { readGcpBootstrappedProject } from '../domain/services/gcp-project-setup.service.js';
@@ -168,7 +169,10 @@ export async function runGcpProjectRemoval(
   const contents = await readGcpProjectContents(deps.fetch, token, gcpProjectId, buildSourceBucketName(gcpProjectId));
   if (contents.state === 'unknown') return blocked(`${contents.reason} Whether the project is empty is unknown, so nothing was deleted.`);
   if (contents.found.length) {
-    return blocked(`Google project ${gcpProjectId} still holds resources, so it was not deleted. Remove them first, or delete the project yourself in the Google Cloud console if you are sure nothing depends on them.`,
+    // A database left behind after every environment is torn down is usually the app's shared database server, which has its own removal.
+    const serverHint = contents.found.some((entry) => entry.startsWith('databases:'))
+      ? ` If a database listed is ${params.project.name}'s shared database server, it is still running and billed; remove it with ${sharedServerRemovalCall(params.project.name)}.` : '';
+    return blocked(`Google project ${gcpProjectId} still holds resources, so it was not deleted. Remove them first, or delete the project yourself in the Google Cloud console if you are sure nothing depends on them.${serverHint}`,
       { found: contents.found, checked: GCP_PROJECT_REMOVAL_CHECKED.filter((label) => !contents.notChecked.includes(label)), notChecked: contents.notChecked, projectNumber });
   }
 
