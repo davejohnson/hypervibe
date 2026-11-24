@@ -81,24 +81,38 @@ function inventory(side: 'source' | 'target'): string[] {
        WHERE c.relkind = 'S' AND ${USER_SCHEMA} AND ${NOT_EXTENSION} ORDER BY n.nspname COLLATE "C", c.relname COLLATE "C";`,
     `\\o ${WORK}/${side}.sequencenames`,
     `SELECT json_build_array(n.nspname, c.relname)::text ${USER_RELATION} WHERE c.relkind = 'S' AND ${USER_SCHEMA} AND ${NOT_EXTENSION} ORDER BY n.nspname COLLATE "C", c.relname COLLATE "C";`,
+    `\\o ${WORK}/${side}.extensions`,
+    'SELECT json_build_array(x.extname, x.extversion)::text FROM pg_extension x ORDER BY x.extname COLLATE "C";',
     `\\o ${WORK}/${side}.largeobjects`,
     'SELECT json_build_array(m.oid::text, encode(sha256(lo_get(m.oid)), \'hex\'))::text FROM pg_largeobject_metadata m ORDER BY m.oid;',
     '\\o',
   ];
 }
 
+const ME = `(SELECT r.oid FROM pg_roles r WHERE r.rolname = current_user)`;
+const THIS_DATABASE = `(SELECT d.oid FROM pg_database d WHERE d.datname = current_database())`;
 /**
- * What must be known before the dump, or that its listing cannot show: `extensions with their own data|database-level
- * settings|large objects of another owner or with privileges|tables and the like of another owner` (which the dump itself
- * could not even read; every other kind of object is judged from the dump's own owner statements).
+ * What a dump does not show, or that must be known before one is taken, as six counts:
+ * `extensions with data of their own | settings on the database or on the app's roles, other than each login acting as
+ * its owner role | large objects of another owner or with privileges | tables and the like of another owner (a dump could
+ * not even read them) | subscriptions (a plain role's dump skips them silently) | other roles the database itself grants
+ * access to (a dump of one database leaves the database's own privileges out)`.
  */
 const FACTS = `SELECT (SELECT count(*) FROM pg_extension WHERE extconfig IS NOT NULL)::text || '|' ||
-  (SELECT count(*) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = current_database())::text || '|' ||
-  (SELECT count(*) FROM pg_largeobject_metadata m WHERE m.lomacl IS NOT NULL OR m.lomowner <> (SELECT r.oid FROM pg_roles r WHERE r.rolname = current_user))::text || '|' ||
-  (SELECT count(*) ${USER_RELATION} WHERE ${USER_SCHEMA} AND ${NOT_EXTENSION} AND c.relowner <> (SELECT r.oid FROM pg_roles r WHERE r.rolname = current_user))::text;`;
+  (SELECT count(*) FROM pg_db_role_setting s WHERE s.setdatabase = ${THIS_DATABASE} OR (s.setdatabase = 0
+    AND s.setrole IN (SELECT r.oid FROM pg_roles r WHERE r.rolname IN (current_user, session_user)) AND s.setconfig IS DISTINCT FROM ARRAY['role=' || current_user]))::text || '|' ||
+  (SELECT count(*) FROM pg_largeobject_metadata m WHERE m.lomacl IS NOT NULL OR m.lomowner <> ${ME})::text || '|' ||
+  (SELECT count(*) ${USER_RELATION} WHERE ${USER_SCHEMA} AND ${NOT_EXTENSION} AND c.relowner <> ${ME})::text || '|' ||
+  (SELECT count(*) FROM pg_subscription u WHERE u.subdbid = ${THIS_DATABASE})::text || '|' ||
+  (SELECT count(DISTINCT a.grantee) FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a WHERE d.oid = ${THIS_DATABASE} AND a.grantee NOT IN (0, d.datdba, ${ME}))::text;`;
+
+/** How the database itself was created: what decides how text is stored and sorted. Read as JSON so a column a version lacks is simply absent. */
+const CREATED_AS = `SELECT json_build_array(pg_encoding_to_char(d.encoding), d.datcollate, d.datctype, to_jsonb(d) -> 'datlocprovider', coalesce(to_jsonb(d) -> 'datlocale', to_jsonb(d) -> 'daticulocale'), to_jsonb(d) -> 'daticurules')::text
+  FROM pg_database d WHERE d.oid = ${THIS_DATABASE};`;
 
 const heredoc = (command: string, lines: string[]) => [`${command} <<'HV_MOVE_SQL'`, ...lines, 'HV_MOVE_SQL'];
 const quietly = (line: string) => line.replace('2>/tmp/identity-guard.log', '2>/dev/null');
+const UNREADABLE = 'The dump of the source database could not be read back; nothing was changed.';
 
 export function databaseMoveCopyScript(): string {
   return [
@@ -114,9 +128,12 @@ export function databaseMoveCopyScript(): string {
     'count() { case "$1" in ""|*[!0-9]*) return 1 ;; esac; }',
     'plain() { case "$1" in ""|*[!a-z0-9_]*) return 1 ;; esac; }',
     'lines() { wc -l < "$1" | tr -d " "; }',
+    // grep's "no line matched" is an answer; anything worse (a file that cannot be read or written) is a failure and must stop the job.
+    'sift() { s=0; grep "$@" || s=$?; [ "$s" -le 1 ]; }',
     `rm -rf ${WORK}; mkdir -p ${WORK}`,
 
-    // 1. The two connections must be exactly the two databases the caller expects, the right way round.
+    // 1. Each connection must lead to one server only, and the two must be exactly the two databases the caller expects, the right way round.
+    'case "$SOURCE_DATABASE_URL$DATABASE_URL" in *,*) blocked "A connection names more than one server; nothing was changed." ;; esac',
     'if ! valid_identity "${MOVE_SOURCE_IDENTITY:-}" || ! valid_identity "${MOVE_TARGET_IDENTITY:-}" || [ "$MOVE_SOURCE_IDENTITY" = "$MOVE_TARGET_IDENTITY" ]; then',
     '  blocked "The job was not told which two different databases to expect; nothing was changed."',
     'fi',
@@ -130,18 +147,43 @@ export function databaseMoveCopyScript(): string {
     // Definitions are compared as dumped text, which is only the same text within one major version.
     'if [ "${SRC_VERSION%????}" != "${DST_VERSION%????}" ]; then blocked "The two databases run different PostgreSQL major versions; nothing was changed."; fi',
     'SOURCE_OWNER=$(ask "$SOURCE_DATABASE_URL" "SELECT current_user") && TARGET_OWNER=$(ask "$DATABASE_URL" "SELECT current_user") && plain "$SOURCE_OWNER" && plain "$TARGET_OWNER" || blocked "The roles the copy runs as could not be read; nothing was changed."',
+    ...heredoc('created_as() { psql "$1" -X -At -q -v ON_ERROR_STOP=1 2>/dev/null', ['SET search_path = pg_catalog;', CREATED_AS]),
+    '}',
+    'SRC_CREATED=$(created_as "$SOURCE_DATABASE_URL") && DST_CREATED=$(created_as "$DATABASE_URL") && [ -n "$SRC_CREATED" ] || blocked "How the two databases were created could not be read; nothing was changed."',
+    'if [ "$SRC_CREATED" != "$DST_CREATED" ]; then blocked "The two databases were created with a different text encoding or sort order; nothing was changed."; fi',
+
+    // What no dump shows is counted on each side and refused in the same words for both.
+    'NOT_OURS="object(s) owned by a role other than the app\'s own, or large objects with privileges of their own; they cannot be carried over, so nothing was changed."',
+    'judge() {',
+    '  F=$2; OWNDATA=${F%%|*}; F=${F#*|}; SETTINGS=${F%%|*}; F=${F#*|}; LARGE=${F%%|*}; F=${F#*|}; OTHERS=${F%%|*}; F=${F#*|}; SUBSCRIBED=${F%%|*}; GRANTED=${F#*|}',
+    '  count "$OWNDATA" && count "$SETTINGS" && count "$LARGE" && count "$OTHERS" && count "$SUBSCRIBED" && count "$GRANTED" || blocked "$1 could not be inspected; nothing was changed."',
+    '  if [ "$OWNDATA" -gt 0 ]; then blocked "$1 uses $OWNDATA extension(s) that keep data of their own, which this copy cannot check; nothing was changed."; fi',
+    '  if [ "$SETTINGS" -gt 0 ]; then blocked "$1 has $SETTINGS setting(s) made on the database or the app\'s role, which a copy does not carry over; nothing was changed."; fi',
+    '  if [ "$SUBSCRIBED" -gt 0 ]; then blocked "$1 has $SUBSCRIBED subscription(s) to another database, which cannot be moved yet; nothing was changed."; fi',
+    '  if [ "$GRANTED" -gt 0 ]; then blocked "$1 itself grants access to $GRANTED other role(s), which a copy does not carry over; nothing was changed."; fi',
+    '  if [ "$((LARGE + OTHERS))" -gt 0 ]; then blocked "$1 holds $((LARGE + OTHERS)) $NOT_OURS"; fi',
+    '}',
+    ...heredoc('if ! TARGET_FACTS=$(psql "$DATABASE_URL" -X -At -q -v ON_ERROR_STOP=1 2>/dev/null', ['SET search_path = pg_catalog;', FACTS]),
+    '); then blocked "The new database could not be inspected; nothing was changed."; fi',
+    'judge "The new database" "$TARGET_FACTS"',
 
     // 2. Empty means: PostgreSQL's own dump of the target lists nothing but the public schema every database starts with.
-    `standard() { printf '${ENTRY} ((SCHEMA - public|COMMENT - SCHEMA public) %s|(EXTENSION - plpgsql|COMMENT - EXTENSION plpgsql) ?)$' "$1"; }`,
+    `standard() { printf '${ENTRY} (SCHEMA - public %s|(EXTENSION - plpgsql|COMMENT - EXTENSION plpgsql) ?)$' "$1"; }`,
     'target_extra() {',
     `  pg_dump --format=custom "$DATABASE_URL" > ${WORK}/target.before 2>/dev/null || return 1`,
     `  pg_restore -l ${WORK}/target.before > ${WORK}/target.before.list 2>/dev/null || return 1`,
-    `  grep -E '${ENTRY} ' ${WORK}/target.before.list > ${WORK}/target.before.all || true`,
-    `  grep -Ev "$(standard "$TARGET_OWNER")" ${WORK}/target.before.all > ${WORK}/target.before.extra || true`,
+    `  sift -E '${ENTRY} ' ${WORK}/target.before.list > ${WORK}/target.before.all || return 1`,
+    `  sift -Ev "$(standard "$TARGET_OWNER")" ${WORK}/target.before.all > ${WORK}/target.before.extra || return 1`,
     `  lines ${WORK}/target.before.extra`,
     '}',
     'if ! EXISTING=$(target_extra) || ! count "$EXISTING"; then blocked "The new database could not be inspected; nothing was changed."; fi',
-    'if [ "$EXISTING" -gt 0 ] && [ "${MOVE_RESET_TARGET:-0}" != 1 ]; then blocked "The new database is not empty; nothing was changed."; fi',
+    'if [ "$EXISTING" -gt 0 ]; then',
+    '  if [ "${MOVE_RESET_TARGET:-0}" != 1 ]; then blocked "The new database is not empty; nothing was changed."; fi',
+    // Clearing removes only what the copy's own role owns. Anything of another owner would survive it, so it is found now, before anything is deleted.
+    `  pg_restore --schema-only -f ${WORK}/target.before.full ${WORK}/target.before 2>/dev/null && sift -E ' OWNER TO ' ${WORK}/target.before.full > ${WORK}/target.before.owners || blocked "The new database could not be inspected; nothing was changed."`,
+    `  sift -Ev " OWNER TO $TARGET_OWNER;\\$" ${WORK}/target.before.owners > ${WORK}/target.before.foreign || blocked "The new database could not be inspected; nothing was changed."`,
+    `  if [ "$(lines ${WORK}/target.before.foreign)" -gt 0 ]; then blocked "The new database holds $(lines ${WORK}/target.before.foreign) $NOT_OURS"; fi`,
+    'fi',
 
     // 3. One snapshot for the dump, for what the copy is compared against, and for what is refused: a session holds it open throughout.
     'STAGE=dump',
@@ -153,45 +195,50 @@ export function databaseMoveCopyScript(): string {
     ...heredoc('if ! cat >&3 2>/dev/null', [...PINNED, `\\o ${WORK}/snapshot`, 'SELECT pg_export_snapshot();', `\\o ${WORK}/facts`, FACTS, '\\o']),
     `then blocked "The source database could not be read at one point in time; nothing was changed."; fi`,
     `if ! said ${WORK}/snapshot 60 || ! said ${WORK}/facts 60; then blocked "The source database could not be read at one point in time; nothing was changed."; fi`,
-    `SNAPSHOT=$(cat ${WORK}/snapshot); FACTS=$(cat ${WORK}/facts)`,
+    `SNAPSHOT=$(cat ${WORK}/snapshot)`,
     'case "$SNAPSHOT" in ""|*[!0-9A-Fa-f-]*) blocked "The source database could not be read at one point in time; nothing was changed." ;; esac',
-    'OWNDATA=${FACTS%%|*}; REST=${FACTS#*|}; SETTINGS=${REST%%|*}; REST=${REST#*|}; LARGE=${REST%%|*}; OTHERS=${REST#*|}',
-    'count "$OWNDATA" && count "$SETTINGS" && count "$LARGE" && count "$OTHERS" || blocked "The source database could not be inspected; nothing was changed."',
-    'NOT_OURS="object(s) owned by a role other than the app\'s own, or large objects with privileges of their own; they cannot be carried over, so nothing was changed."',
-    'if [ "$OWNDATA" -gt 0 ]; then blocked "The database uses $OWNDATA extension(s) that keep data of their own, which this copy cannot check; nothing was changed."; fi',
-    'if [ "$SETTINGS" -gt 0 ]; then blocked "The database has $SETTINGS setting(s) made on the database itself, which a copy does not carry over; nothing was changed."; fi',
-    'if [ "$((LARGE + OTHERS))" -gt 0 ]; then blocked "The database holds $((LARGE + OTHERS)) $NOT_OURS"; fi',
+    `judge "The database" "$(cat ${WORK}/facts)"`,
     'STARTED=$(date +%s)',
     // With owners and privileges in it, so both can be judged from the dump itself; the restore applies neither.
     `if pg_dump --format=custom --snapshot="$SNAPSHOT" "$SOURCE_DATABASE_URL" > ${WORK}/source.dump 2>/dev/null; then :; else`,
     '  DUMP=$?; blocked "The source database could not be read (pg_dump exit $DUMP); nothing was changed."',
     'fi',
-    `pg_restore -l ${WORK}/source.dump > ${WORK}/source.list 2>/dev/null && pg_restore --schema-only -f ${WORK}/source.full ${WORK}/source.dump 2>/dev/null || blocked "The dump of the source database could not be read back; nothing was changed."`,
-    `grep -E '${ENTRY} ' ${WORK}/source.list > ${WORK}/source.all || true`,
+    `pg_restore -l ${WORK}/source.dump > ${WORK}/source.list 2>/dev/null && pg_restore --schema-only -f ${WORK}/source.full ${WORK}/source.dump 2>/dev/null && sift -E '${ENTRY} ' ${WORK}/source.list > ${WORK}/source.all || blocked "${UNREADABLE}"`,
     // What the copy cannot carry over is refused here, from the same moment the data was read.
-    `grep -E '${ENTRY} EXTENSION - ' ${WORK}/source.all | grep -Ev '${ENTRY} EXTENSION - plpgsql ?$' > ${WORK}/source.extensions || true`,
-    `EXTENSIONS=$(lines ${WORK}/source.extensions)`,
+    `sift -E '${ENTRY} EXTENSION - ' ${WORK}/source.all > ${WORK}/source.extensions.all && sift -Ev '${ENTRY} EXTENSION - plpgsql ?$' ${WORK}/source.extensions.all > ${WORK}/source.extensions.used || blocked "${UNREADABLE}"`,
+    `EXTENSIONS=$(lines ${WORK}/source.extensions.used)`,
     'if [ "${MOVE_BLOCK_EXTENSIONS:-0}" = 1 ] && [ "$EXTENSIONS" -gt 0 ]; then blocked "The database uses $EXTENSIONS extension(s) that cannot be installed on the new server yet; nothing was changed."; fi',
-    `grep -E '${ENTRY} (PUBLICATION|SUBSCRIPTION|EVENT TRIGGER|SERVER|FOREIGN DATA WRAPPER|USER MAPPING|FOREIGN TABLE) ' ${WORK}/source.all > ${WORK}/source.unsupported || true`,
+    `sift -E '${ENTRY} (PUBLICATION|SUBSCRIPTION|EVENT TRIGGER|SERVER|FOREIGN DATA WRAPPER|USER MAPPING|FOREIGN TABLE) ' ${WORK}/source.all > ${WORK}/source.unsupported || blocked "${UNREADABLE}"`,
     `UNSUPPORTED=$(lines ${WORK}/source.unsupported)`,
     'if [ "$UNSUPPORTED" -gt 0 ]; then blocked "The database has $UNSUPPORTED publication(s), subscription(s), event trigger(s) or foreign data object(s), which cannot be moved yet; nothing was changed."; fi',
-    `grep -E ' OWNER TO ' ${WORK}/source.full | grep -Ev " OWNER TO $SOURCE_OWNER;\\$" > ${WORK}/source.foreign || true`,
+    `sift -E ' OWNER TO ' ${WORK}/source.full > ${WORK}/source.owners && sift -Ev " OWNER TO $SOURCE_OWNER;\\$" ${WORK}/source.owners > ${WORK}/source.foreign || blocked "${UNREADABLE}"`,
     `FOREIGN=$(lines ${WORK}/source.foreign)`,
     'if [ "$FOREIGN" -gt 0 ]; then blocked "The database holds $FOREIGN $NOT_OURS"; fi',
-    // Any privilege statement at all, on any kind of object, except grants to the roles Hypervibe gives access again itself.
-    `grep -E '^(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES) ' ${WORK}/source.full > ${WORK}/source.grants || true`,
+    // Any privilege statement at all, on any kind of object. The one exception is the exact access Hypervibe gives a named role again after
+    // the copy: use of the public schema, reading every table and view in it, and reading tables made there later. A role with all three and
+    // nothing else is left out; a role with less, more or anything different is not, because giving that access again would change it.
+    `sift -E '^(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES) ' ${WORK}/source.full > ${WORK}/source.grants || blocked "${UNREADABLE}"`,
+    `READABLE=$(sift -Ec '${ENTRY} (TABLE|VIEW|MATERIALIZED VIEW|FOREIGN TABLE) public ' ${WORK}/source.all) || blocked "${UNREADABLE}"`,
     'OLDIFS=$IFS; IFS=,',
     'for ROLE in ${MOVE_IGNORED_GRANTEES:-}; do',
-    `  grep -v -F -e " TO $ROLE;" -e " TO \\"$ROLE\\";" ${WORK}/source.grants > ${WORK}/source.grants.kept || true`,
-    `  mv ${WORK}/source.grants.kept ${WORK}/source.grants`,
+    '  IFS=$OLDIFS',
+    '  WHO="\\"?$(printf \'%s\' "$ROLE" | sed \'s/[.]/[.]/g\')\\"?"',
+    '  USE="^GRANT USAGE ON SCHEMA public TO $WHO;\\$"',
+    '  LATER="^ALTER DEFAULT PRIVILEGES FOR ROLE $SOURCE_OWNER IN SCHEMA public GRANT SELECT ON TABLES TO $WHO;\\$"',
+    '  READ="^GRANT SELECT ON TABLE public[.].+ TO $WHO;\\$"',
+    `  USES=$(sift -Ec "$USE" ${WORK}/source.grants) && LATERS=$(sift -Ec "$LATER" ${WORK}/source.grants) && READS=$(sift -Ec "$READ" ${WORK}/source.grants) || blocked "${UNREADABLE}"`,
+    '  if [ "$USES" = 1 ] && [ "$LATERS" = 1 ] && [ "$READS" = "$READABLE" ]; then',
+    `    sift -Ev "($USE|$LATER|$READ)" ${WORK}/source.grants > ${WORK}/source.grants.kept && mv ${WORK}/source.grants.kept ${WORK}/source.grants || blocked "${UNREADABLE}"`,
+    '  fi',
+    '  IFS=,',
     'done',
     'IFS=$OLDIFS',
     `GRANTS=$(lines ${WORK}/source.grants)`,
     'if [ "$GRANTS" -gt 0 ]; then blocked "The database has $GRANTS privilege(s) granted or taken away that the copy cannot carry over; nothing was changed."; fi',
-    `grep -Ev "$(standard "$SOURCE_OWNER")" ${WORK}/source.list > ${WORK}/source.entries || true`,
+    `sift -Ev "$(standard "$SOURCE_OWNER")" ${WORK}/source.list > ${WORK}/source.entries || blocked "${UNREADABLE}"`,
     // A materialized view's refresh is data: its rows are compared with every table's, and a dump of definitions alone leaves the statement out.
-    `grep -Ev '${ENTRY} MATERIALIZED VIEW DATA ' ${WORK}/source.entries > ${WORK}/source.defined || true`,
-    `pg_restore --schema-only --no-owner --no-privileges -L ${WORK}/source.defined -f ${WORK}/source.sql ${WORK}/source.dump 2>/dev/null || blocked "The dump of the source database could not be read back; nothing was changed."`,
+    `sift -Ev '${ENTRY} MATERIALIZED VIEW DATA ' ${WORK}/source.entries > ${WORK}/source.defined || blocked "${UNREADABLE}"`,
+    `pg_restore --schema-only --no-owner --no-privileges -L ${WORK}/source.defined -f ${WORK}/source.definitions ${WORK}/source.dump 2>/dev/null && [ -s ${WORK}/source.definitions ] || blocked "${UNREADABLE}"`,
     ...heredoc('if ! cat >&3 2>/dev/null', [...inventory('source'), `\\o ${WORK}/source.done`, 'SELECT 1;', '\\o', 'COMMIT;']),
     'then blocked "The source database could not be inventoried; nothing was changed."; fi',
     'exec 3>&-',
@@ -207,7 +254,7 @@ export function databaseMoveCopyScript(): string {
     ...guardedTargetReset().map((line) => quietly(line).replace('blocked "The target database could not be safely prepared; its identity must remain verified and different from the source."',
       'blocked "The new database could not be cleared; its identity must remain verified and different from the source."')),
     // As every new database has it, so that an emptied target reads as an empty one.
-    '  ask "$DATABASE_URL" "GRANT USAGE ON SCHEMA public TO PUBLIC" >/dev/null || blocked "The new database could not be cleared."',
+    '  ask "$DATABASE_URL" "GRANT USAGE ON SCHEMA public TO PUBLIC; COMMENT ON SCHEMA public IS \'standard public schema\'" >/dev/null || blocked "The new database could not be cleared."',
     'fi',
     'if ! EXISTING=$(target_extra) || [ "$EXISTING" != 0 ]; then blocked "The new database is not empty just before the copy; nothing was written to it by this step."; fi',
 
@@ -222,16 +269,18 @@ export function databaseMoveCopyScript(): string {
     ...heredoc('if ! psql "$DATABASE_URL" -X -At -q -v ON_ERROR_STOP=1 > /dev/null 2> /dev/null', [...PINNED, ...inventory('target'), 'COMMIT;']),
     'then blocked "The new database could not be inventoried after the copy."; fi',
     `split_counted ${WORK}/target || blocked "The new database could not be inventoried after the copy."`,
-    `pg_dump --format=custom --schema-only "$DATABASE_URL" > ${WORK}/target.dump 2>/dev/null && pg_restore -l ${WORK}/target.dump > ${WORK}/target.list 2>/dev/null || blocked "The new database's definitions could not be read after the copy."`,
-    `grep -Ev "$(standard "$TARGET_OWNER")" ${WORK}/target.list > ${WORK}/target.entries || true`,
-    `pg_restore --no-owner --no-privileges -L ${WORK}/target.entries -f ${WORK}/target.sql ${WORK}/target.dump 2>/dev/null || blocked "The new database's definitions could not be read after the copy."`,
-    // Comment lines carry dump positions and times; everything else must be the same text.
-    `for SIDE in source target; do grep -Ev '^(--|$)' ${WORK}/$SIDE.sql > ${WORK}/$SIDE.definitions || true; done`,
+    // The same text PostgreSQL writes for the source's definitions, whole: no line of it is left out of the comparison.
+    `pg_dump --format=custom --schema-only "$DATABASE_URL" > ${WORK}/target.dump 2>/dev/null && pg_restore -l ${WORK}/target.dump > ${WORK}/target.list 2>/dev/null \\`,
+    `  && sift -Ev "$(standard "$TARGET_OWNER")" ${WORK}/target.list > ${WORK}/target.entries \\`,
+    `  && pg_restore --no-owner --no-privileges -L ${WORK}/target.entries -f ${WORK}/target.definitions ${WORK}/target.dump 2>/dev/null && [ -s ${WORK}/target.definitions ] \\`,
+    '  || blocked "The new database\'s definitions could not be read after the copy."',
     // A sequence's value is not part of any snapshot, so with the app still running only its presence can be compared.
     'if [ "${MOVE_REHEARSAL:-0}" = 1 ]; then REHEARSAL=true; SEQUENCES=sequencenames; else REHEARSAL=false; SEQUENCES=sequences; fi',
     'DIFFERENT=',
-    'for PART in tables "$SEQUENCES" largeobjects definitions; do',
+    'for PART in tables "$SEQUENCES" largeobjects extensions definitions; do',
     '  case "$PART" in sequencenames) LABEL=sequences ;; *) LABEL=$PART ;; esac',
+    // Both files must exist: a missing one is a failure of the job, never a difference and never a match.
+    `  [ -f ${WORK}/source.$PART ] && [ -f ${WORK}/target.$PART ] || blocked "Part of the comparison was never written."`,
     `  cmp -s ${WORK}/source.$PART ${WORK}/target.$PART || DIFFERENT="$DIFFERENT\${DIFFERENT:+,}\\"$LABEL\\""`,
     'done',
     `SRC=$(cat ${WORK}/source.summary); DST=$(cat ${WORK}/target.summary)`,
@@ -255,7 +304,7 @@ export interface DatabaseMoveCopyResult {
   /** A copy made while the app could still write: it proves the copy works and how long it takes, never that the two databases are the same now. */
   rehearsal?: boolean;
   match?: boolean;
-  /** Which parts of the copy differ from the source: tables, sequences, largeobjects, definitions. */
+  /** Which parts of the copy differ from the source: tables, sequences, largeobjects, extensions, definitions. */
   different?: string[];
   source?: Partial<MoveSideCounts>;
   target?: Partial<MoveSideCounts>;

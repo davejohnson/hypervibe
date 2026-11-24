@@ -58,14 +58,14 @@ const identityOf = async (side: 'own' | 'shared', name: string) => {
 let counter = 0;
 
 /** A database as Hypervibe leaves a dedicated one: owned by app_owner, which both logins act as. One server holds several here; each has its own roles. */
-async function ownDatabase(): Promise<Database> {
+async function ownDatabase(create = ''): Promise<Database> {
   const id = ++counter;
   const name = `own_${id}`, owner = `own_${id}_owner`, login = `own_${id}_a`;
   const { boot } = servers.own;
   await boot.query(`CREATE ROLE ${owner} NOLOGIN`);
   await boot.query(`CREATE ROLE ${login} LOGIN PASSWORD '${PASSWORD}' IN ROLE ${owner}`);
   await boot.query(`ALTER ROLE ${login} SET role = '${owner}'`);
-  await boot.query(`CREATE DATABASE ${name} OWNER ${owner} TEMPLATE template0`);
+  await boot.query(`CREATE DATABASE ${name} OWNER ${owner} TEMPLATE template0 ${create}`);
   const inside = await connect('own', 'boot', undefined, name);
   await inside.query(`ALTER SCHEMA public OWNER TO ${owner}`);
   await close(inside);
@@ -102,6 +102,10 @@ const FIXTURE = [
   `CREATE MATERIALIZED VIEW totals AS SELECT customer, sum(total) AS total FROM orders GROUP BY customer`,
   `CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN NEW.name := trim(NEW.name); RETURN NEW; END $$`,
   `CREATE TRIGGER tidy BEFORE INSERT ON customers FOR EACH ROW EXECUTE FUNCTION touch()`,
+  `CREATE FUNCTION banner() RETURNS text LANGUAGE sql AS $$ SELECT 'first
+-- kept as written
+
+last' $$`,
   `CREATE SCHEMA audit`,
   `CREATE SEQUENCE audit.ticket START 500 INCREMENT 5`,
   `SELECT nextval('audit.ticket')`,
@@ -344,6 +348,15 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     ['a sequence one step behind', `SELECT setval('public.customers_id_seq', 199)`, ['sequences']],
     ['different bytes in a large object', `SELECT lo_put(oid, 3, '\\xff') FROM pg_largeobject_metadata`, ['largeobjects']],
     ['a function with a different body', `CREATE OR REPLACE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`, ['definitions']],
+    ['a function body that differs only in a line that looks like a comment', `CREATE OR REPLACE FUNCTION banner() RETURNS text LANGUAGE sql AS $$ SELECT 'first
+-- changed
+
+last' $$`, ['definitions']],
+    ['a function body that differs only in blank lines', `CREATE OR REPLACE FUNCTION banner() RETURNS text LANGUAGE sql AS $$ SELECT 'first
+-- kept as written
+
+
+last' $$`, ['definitions']],
     ['a missing index', `DROP INDEX customers_by_name`, ['definitions']],
     ['a dropped column default', `ALTER TABLE customers ALTER COLUMN mood DROP DEFAULT`, ['definitions']],
     ['a disabled trigger', `ALTER TABLE customers DISABLE TRIGGER tidy`, ['definitions']],
@@ -390,7 +403,7 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     const boot = await connect('own', 'boot', undefined, source.name);
     await boot.query(`ALTER DATABASE ${source.name} SET work_mem = '8MB'`);
     const early = await copy(source, target, { MOVE_RESET_TARGET: '1' });
-    expect(early.result).toMatchObject({ ok: false, stage: 'dump', targetChanged: false, error: expect.stringMatching(/setting\(s\) made on the database itself.*nothing was changed/) });
+    expect(early.result).toMatchObject({ ok: false, stage: 'dump', targetChanged: false, error: expect.stringMatching(/setting\(s\) made on the database or the app's role.*nothing was changed/) });
     expect(await scalar(target, 'SELECT count(*)::text FROM left_behind')).toBe('1');
     expect(await scalar(target, 'SELECT count(*)::text FROM old.things')).toBe('0');
     await boot.query(`ALTER DATABASE ${source.name} RESET work_mem`);
@@ -423,7 +436,7 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
   it.each([
     ['an extension, when moving onto the shared server', 'boot', [`CREATE EXTENSION pgcrypto`], { MOVE_BLOCK_EXTENSIONS: '1' }, /uses 1 extension\(s\) that cannot be installed on the new server yet/],
     ['an extension that keeps data of its own, wherever it moves', 'boot', [`CREATE EXTENSION citext`, `CREATE TABLE citext_settings (k text)`, `UPDATE pg_extension SET extconfig = ARRAY['citext_settings'::regclass::oid] WHERE extname = 'citext'`], {}, /1 extension\(s\) that keep data of their own/],
-    ['a setting made on the database itself', 'boot', [`DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET statement_timeout = 5000', current_database()); END $$`], {}, /1 setting\(s\) made on the database itself/],
+    ['a setting made on the database itself', 'boot', [`DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET statement_timeout = 5000', current_database()); END $$`], {}, /1 setting\(s\) made on the database or the app's role/],
     ['execute taken away from everyone on a function', 'app', [`CREATE FUNCTION secret() RETURNS int LANGUAGE sql AS 'SELECT 1'`, `REVOKE EXECUTE ON FUNCTION secret() FROM PUBLIC`], {}, /privilege\(s\) granted or taken away that the copy cannot carry over/],
     ['a table readable by another role', 'app', [`CREATE TABLE shared_out (id int)`, `GRANT SELECT ON shared_out TO reporting`], {}, /1 privilege\(s\) granted or taken away/],
     ['a column readable by another role', 'app', [`CREATE TABLE shared_out (id int, secret text)`, `GRANT SELECT (id) ON shared_out TO reporting`], {}, /privilege\(s\) granted or taken away/],
@@ -479,6 +492,8 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     const { result, output } = await copy(source, target);
     expect(result, output).toMatchObject({ ok: true, match: true, source: { tables: 2, rows: '3' } });
     expect(await scalar(target, `SELECT count(*)::text FROM "public ${source.owner}".also_kept`)).toBe('2');
+    // What the person wrote on the public schema comes along.
+    expect(await scalar(target, `SELECT obj_description('public'::regnamespace)`)).toBe('recreated');
   }, 60_000);
 
   it('reports a restore that stopped part-way as a changed target, and says nothing of what the database said', async () => {
@@ -500,8 +515,8 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     await fill(source, ['CREATE TABLE one (id int)']);
     const dying = path.join(root!, 'dying-psql');
     mkdirSync(dying, { recursive: true });
-    // The only psql call with no -c and the source first is the session that holds the snapshot.
-    writeFileSync(path.join(dying, 'psql'), '#!/bin/sh\ncase " $* " in *" -c "*) exec "$REAL_BIN/psql" "$@" ;; esac\nif [ "$1" = "$SOURCE_DATABASE_URL" ]; then exit 3; fi\nexec "$REAL_BIN/psql" "$@"\n');
+    // The session that holds the snapshot is the only psql call on the source whose answers are not read back through a pipe.
+    writeFileSync(path.join(dying, 'psql'), '#!/bin/sh\ncase " $* " in *" -c "*) exec "$REAL_BIN/psql" "$@" ;; esac\nif [ "$1" = "$SOURCE_DATABASE_URL" ] && [ ! -p /dev/stdout ]; then exit 3; fi\nexec "$REAL_BIN/psql" "$@"\n');
     chmodSync(path.join(dying, 'psql'), 0o755);
     const { result } = await copy(source, target, {}, undefined, `${dying}:`);
     expect(result).toEqual({ ok: false, stage: 'dump', targetChanged: false, error: 'The source database could not be read at one point in time; nothing was changed.' });
@@ -516,5 +531,115 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     writeFileSync(path.join(older, 'psql'), `#!/bin/sh\ncase "$*" in *server_version_num*) if [ "$1" = "$SOURCE_DATABASE_URL" ]; then echo ${(major - 1) * 10000 + 8}; exit 0; fi ;; esac\nexec "$REAL_BIN/psql" "$@"\n`);
     chmodSync(path.join(older, 'psql'), 0o755);
     expect((await copy(source, target, {}, undefined, `${older}:`)).result).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'The two databases run different PostgreSQL major versions; nothing was changed.' });
+  }, 60_000);
+
+  it('carries a comment someone put on an ordinary public schema', async () => {
+    const source = await sharedDatabase();
+    const target = await ownDatabase();
+    await fill(source, [`COMMENT ON SCHEMA public IS 'billing data'`, 'CREATE TABLE one (id int)']);
+    expect((await copy(source, target)).result).toMatchObject({ ok: true, match: true });
+    expect(await scalar(target, `SELECT obj_description('public'::regnamespace)`)).toBe('billing data');
+  }, 60_000);
+
+  it('does not certify a copy whose extension arrived at another version', async () => {
+    const source = await sharedDatabase();
+    const target = await ownDatabase();
+    const inside = await connect('shared', 'boot', undefined, source.name);
+    await inside.query(`CREATE EXTENSION citext VERSION '1.5'`);
+    await close(inside);
+    await fill(source, [`CREATE TABLE people (email citext)`]);
+    const { result, output } = await copy(source, target);
+    expect(result, output).toMatchObject({ ok: true, match: false, different: ['extensions'] });
+    expect(databaseMoveCopyVerified(result)).toBe(false);
+  }, 60_000);
+
+  it.each([
+    ['another role may connect to the source database', 'source', (name: string) => [`GRANT CONNECT ON DATABASE ${name} TO reporting`], 'dump', /database itself grants access to 1 other role/],
+    ['another role may connect to the new database', 'target', (name: string) => [`GRANT CONNECT ON DATABASE ${name} TO reporting`], 'check', /new database itself grants access to 1 other role/],
+    ['the new database has a setting of its own', 'target', (name: string) => [`ALTER DATABASE ${name} SET work_mem = '8MB'`], 'check', /new database has 1 setting\(s\) made on the database or the app's role/],
+    ['the app\'s role on the source has a setting of its own', 'source', (_name: string, owner: string) => [`ALTER ROLE ${owner} SET search_path = audit`], 'dump', /1 setting\(s\) made on the database or the app's role/],
+    ['the source database subscribes to another', 'source', () => [`CREATE SUBSCRIPTION hv_test_in CONNECTION 'dbname=nowhere' PUBLICATION p WITH (connect = false)`], 'dump', /1 subscription\(s\)/],
+    ['the new database subscribes to another', 'target', () => [`CREATE SUBSCRIPTION hv_test_out CONNECTION 'dbname=nowhere' PUBLICATION p WITH (connect = false)`], 'check', /new database has 1 subscription\(s\)/],
+  ] as Array<[string, 'source' | 'target', (name: string, owner: string) => string[], string, RegExp]>)('refuses when %s', async (_what, where, statements, stage, message) => {
+    const source = await ownDatabase();
+    const target = await sharedDatabase();
+    await fill(source, ['CREATE TABLE one (id int)']);
+    const changed = where === 'source' ? source : target;
+    for (const server of [servers.own.boot, servers.shared.boot]) await server.query(`DO $$ BEGIN CREATE ROLE reporting NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
+    const inside = await connect(changed.side, 'boot', undefined, changed.name);
+    for (const statement of statements(changed.name, changed.owner)) await inside.query(statement);
+    const { result, output } = await copy(source, target);
+    expect(result, output).toMatchObject({ ok: false, stage, targetChanged: false, error: expect.stringMatching(message) });
+    expect(await publicRelations(target)).toBe('0');
+    await inside.query(`DROP SUBSCRIPTION IF EXISTS hv_test_in`).catch(() => {});
+    await inside.query(`DROP SUBSCRIPTION IF EXISTS hv_test_out`).catch(() => {});
+    await close(inside);
+  }, 60_000);
+
+  it('refuses two databases created with a different encoding or sort order', async () => {
+    const source = await ownDatabase(`ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C'`);
+    const target = await sharedDatabase();
+    await fill(source, ['CREATE TABLE one (id int)']);
+    expect((await copy(source, target)).result).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'The two databases were created with a different text encoding or sort order; nothing was changed.' });
+  }, 60_000);
+
+  it.each([
+    ['may also change rows', [`GRANT UPDATE ON jobs TO "waker@demo-project.iam"`]],
+    ['may read only one of the tables, which giving access again would widen', [`REVOKE SELECT ON more_jobs FROM "waker@demo-project.iam"`]],
+    ['has no default access to new tables, which giving access again would add', [`ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE SELECT ON TABLES FROM "waker@demo-project.iam"`]],
+    ['may read a single column elsewhere', [`CREATE SCHEMA audit`, `CREATE TABLE audit.log (id int, who text)`, `GRANT SELECT (id) ON audit.log TO "waker@demo-project.iam"`]],
+  ])('refuses when a role whose access Hypervibe gives again %s', async (_what, extra) => {
+    const source = await ownDatabase();
+    const target = await sharedDatabase();
+    await servers.own.boot.query(`DO $$ BEGIN CREATE ROLE "waker@demo-project.iam" NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
+    await fill(source, [`CREATE TABLE jobs (id int)`, `CREATE TABLE more_jobs (id int)`, `CREATE VIEW open_jobs AS SELECT id FROM jobs`, `GRANT USAGE ON SCHEMA public TO "waker@demo-project.iam"`,
+      `GRANT SELECT ON ALL TABLES IN SCHEMA public TO "waker@demo-project.iam"`, `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "waker@demo-project.iam"`]);
+    // Exactly what Hypervibe grants, on every table and view: carried on.
+    expect((await copy(source, target, { MOVE_IGNORED_GRANTEES: 'waker@demo-project.iam', MOVE_REHEARSAL: '1' })).result).toMatchObject({ ok: true, match: true });
+    await fill(source, extra);
+    const { result, output } = await copy(source, target, { MOVE_IGNORED_GRANTEES: 'waker@demo-project.iam', MOVE_RESET_TARGET: '1' });
+    expect(result, output).toMatchObject({ ok: false, stage: 'dump', targetChanged: false, error: expect.stringMatching(/privilege\(s\) granted or taken away/) });
+  }, 60_000);
+
+  it('refuses a connection that names more than one server', async () => {
+    const source = await ownDatabase();
+    const target = await sharedDatabase();
+    await fill(source, ['CREATE TABLE one (id int)']);
+    const elsewhere = `postgresql://${target.login}:${PASSWORD}@${encodeURIComponent(servers.shared.socket)},${encodeURIComponent(servers.own.socket)}:5432/${target.name}`;
+    for (const pair of [[source, { ...target, url: elsewhere }], [{ ...source, url: `${source.url}?host=${servers.own.socket},${servers.shared.socket}` }, target]] as const) {
+      expect((await copy(pair[0], pair[1], { MOVE_RESET_TARGET: '1' })).result).toEqual({ ok: false, stage: 'check', targetChanged: false, error: 'A connection names more than one server; nothing was changed.' });
+    }
+  }, 60_000);
+
+  it('deletes nothing from a target that also holds something of another owner, even when clearing is allowed', async () => {
+    const source = await ownDatabase();
+    const target = await sharedDatabase();
+    await fill(source, ['CREATE TABLE one (id int)']);
+    await fill(target, ['CREATE TABLE ours (id int)', 'INSERT INTO ours VALUES (1)']);
+    const boot = await connect('shared', 'boot', undefined, target.name);
+    await boot.query(`CREATE FUNCTION public.theirs() RETURNS int LANGUAGE sql AS 'SELECT 1'`);
+    const { result, output } = await copy(source, target, { MOVE_RESET_TARGET: '1' });
+    expect(result, output).toMatchObject({ ok: false, stage: 'check', targetChanged: false, error: expect.stringMatching(/new database holds .*owned by a role other than the app's own.*nothing was changed/) });
+    expect(await scalar(target, 'SELECT count(*)::text FROM ours')).toBe('1');
+    // The same for a table of another owner, which cannot even be read.
+    await boot.query('DROP FUNCTION public.theirs()');
+    await boot.query('CREATE TABLE public.their_table (id int)');
+    await close(boot);
+    expect((await copy(source, target, { MOVE_RESET_TARGET: '1' })).result).toMatchObject({ ok: false, stage: 'check', targetChanged: false });
+    expect(await scalar(target, 'SELECT count(*)::text FROM ours')).toBe('1');
+  }, 60_000);
+
+  it('fails, never passes, when the definitions of one side cannot be written out', async () => {
+    const source = await ownDatabase();
+    const target = await sharedDatabase();
+    await fill(source, ['CREATE TABLE one (id int)']);
+    const broken = path.join(root!, 'broken-restore');
+    mkdirSync(broken, { recursive: true });
+    // Writing a definitions file "succeeds" and leaves it empty, as a full disk can.
+    writeFileSync(path.join(broken, 'pg_restore'), '#!/bin/sh\ncase " $* " in *" -f "*) for A in "$@"; do case "$A" in *.definitions) : > "$A"; exit 0 ;; esac; done ;; esac\nexec "$REAL_BIN/pg_restore" "$@"\n');
+    chmodSync(path.join(broken, 'pg_restore'), 0o755);
+    const { result } = await copy(source, target, {}, undefined, `${broken}:`);
+    expect(result).toMatchObject({ ok: false, targetChanged: false });
+    expect(databaseMoveCopyVerified(result)).toBe(false);
   }, 60_000);
 });
