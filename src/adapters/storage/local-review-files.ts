@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { PlanReport } from '../../domain/plan/plan-report.js';
+import { planIdInSavedReport, type PlanReport } from '../../domain/plan/plan-report.js';
 import { parseAccessProbeFileEvidence } from '../providers/gcp/gcp-transfer-probe-workload.js';
 
 export interface ReviewArtifact {
@@ -90,7 +90,7 @@ export function addSavedFiles(directory: string, items: Map<string, NativeReview
       const filenameId = entry.name.slice(0,-5);
       // Resolve a friendly copy only through its native report identity. Never serve its markup or trust its outcome.
       const id = nativeId.test(filenameId) ? filenameId
-        : /<dt>Plan ID<\/dt>\s*<dd>([a-z0-9-]{36,42})<\/dd>/i.exec(reviewFile(file)?.toString('utf8') ?? '')?.[1];
+        : planIdInSavedReport(reviewFile(file)?.toString('utf8') ?? '');
       if (id && items.has(id)) {
         const aliases = items.get(id)!.aliases;
         if (nativeId.test(filenameId)) aliases.push(entry.name);

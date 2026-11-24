@@ -4,6 +4,7 @@ import { renderPlanReportContent } from './plan-report-html.js';
 import { planReportBrowser } from './plan-report-browser.js';
 import { planReportStyle } from './plan-report-style.js';
 import { LOCAL_PAGE_ICON_LINK } from '../utils/local-page-icon.js';
+import { localTimeScript, timeTag } from './local-time.js';
 
 const escape = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
   .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
@@ -108,7 +109,8 @@ filter();
 const hashSource = (text: string) => "'sha256-" + createHash('sha256').update(text).digest('base64') + "'";
 export function reviewPagePolicy(withReport = false) {
   const styles = withReport ? [style, planReportStyle] : [style];
-  const scripts = withReport ? [approvalScript, filterScript, planReportBrowser] : [approvalScript, filterScript];
+  // The report's own script already sets local times.
+  const scripts = withReport ? [approvalScript, filterScript, planReportBrowser] : [approvalScript, filterScript, localTimeScript];
   return `default-src 'none'; img-src data:; style-src ${styles.map(hashSource).join(' ')}; script-src ${scripts.map(hashSource).join(' ')}; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'`;
 }
 
@@ -117,7 +119,7 @@ function page(title: string, home: string, body: string, script?: string, withRe
 <title>${escape(title)} · Hypervibe</title>${LOCAL_PAGE_ICON_LINK}${withReport ? `<style>${planReportStyle}</style>` : ''}<style>${style}</style></head><body>
 ${withReport ? '<a class="skip" href="#review">Skip to plan actions</a>' : ''}<header><div class="bar"><a class="brand" href="${home}"><svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.3"><path d="m3 18 5-12m1 12 5-12m1 12 5-12"/></svg>Hypervibe</a>
 <nav aria-label="Review navigation"><a href="${home}">Saved reviews</a></nav></div></header>
-<main>${body}</main>${withReport ? `<script>${planReportBrowser}</script>` : ''}${script ? `<script>${script}</script>` : ''}</body></html>`;
+<main>${body}</main>${withReport ? `<script>${planReportBrowser}</script>` : `<script>${localTimeScript}</script>`}${script ? `<script>${script}</script>` : ''}</body></html>`;
 }
 function state(item: ReviewArtifact) {
   const status = item.status;
@@ -126,16 +128,11 @@ function state(item: ReviewArtifact) {
     : /approved|applied|success|completed|passed/i.test(status) ? 'done' : '';
   return `<span class="state ${tone}">${escape(label)}</span>`;
 }
-const savedTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'UTC' });
-function date(value?: string) {
-  if (!value || !Number.isFinite(Date.parse(value))) return '';
-  return savedTime.format(new Date(value)) + ' UTC';
-}
 const kind = (item: ReviewArtifact) => item.kind === 'plan' ? 'Plan' : 'Result';
 
 function recordList(items: ReviewArtifact[], home: string) {
   return `<ul class="records">${items.map(item => {
-    const context = [kind(item), item.project, date(item.createdAt)].filter(Boolean).map(value => escape(value!)).join(' · ');
+    const context = [escape(kind(item)), item.project && escape(item.project), timeTag(item.createdAt)].filter(Boolean).join(' · ');
     const slug = encodeURIComponent(item.aliases[0] ?? item.id);
     return `<li><a class="record" href="${home}r/${slug}"><span><span class="name">${escape(item.title)}</span><span class="sub">${context}</span></span>${state(item)}<span class="arrow" aria-hidden="true">→</span></a></li>`;
   }).join('')}</ul>`;
@@ -147,15 +144,15 @@ export function reviewIndex(items: ReviewArtifact[], home: string) {
     : '<p class="empty">Plans and results saved by Hypervibe will appear here.</p>'), items.length ? filterScript : undefined);
 }
 export function reviewDetail(item: ReviewArtifact, home: string, path: string, related: ReviewArtifact[], csrf?: string) {
-  const meta = [['Project', item.project], ['Environment', item.report?.environment], ['Saved', date(item.createdAt)]]
-    .filter(([, value]) => value).map(([key, value]) => `<div><dt>${key}</dt><dd>${escape(value!)}</dd></div>`).join('');
+  const meta = [['Project', item.project && escape(item.project)], ['Environment', item.report?.environment && escape(item.report.environment)], ['Saved', timeTag(item.createdAt)]]
+    .filter(([, value]) => value).map(([key, value]) => `<div><dt>${key}</dt><dd>${value}</dd></div>`).join('');
   const details = item.details.length ? `<section class="evidence"><h2>${item.kind === 'result' ? 'Recorded outcome' : 'Plan summary'}</h2>
 <ul>${item.details.map(detail => `<li>${escape(detail)}</li>`).join('')}</ul></section>` : '';
   const report = item.report ? `<section class="plan-details" aria-label="Plan details">${renderPlanReportContent(item.report, { localReview: true })}</section>` : '';
   const approval = csrf && item.approval ? `<div class="decision"><form hidden id="approval" method="post" action="${path}/approve">
 <input type="hidden" name="csrf" value="${csrf}"><input type="hidden" name="digest" value="${escape(item.approval.digest)}"><button type="submit" aria-describedby="approval-note">Approve plan</button></form>
-<p id="approval-note">Your agent can run this saved plan once you approve.</p><p id="feedback" role="status" aria-live="polite"></p><noscript>Enable JavaScript to approve this plan.</noscript></div>`
-    : item.approval?.approvedAt ? `<div class="decision"><h2>Approval recorded</h2><p>Approved ${escape(date(item.approval.approvedAt))}.</p></div>` : '';
+<p id="approval-note">Once you approve, your agent carries out exactly what is listed here, nothing more.</p><p id="feedback" role="status" aria-live="polite"></p><noscript>Enable JavaScript to approve this plan.</noscript></div>`
+    : item.approval?.approvedAt ? `<div class="decision"><h2>Approval recorded</h2><p>Approved ${timeTag(item.approval.approvedAt)}.</p></div>` : '';
   const links = related.length ? `<section><h2>Related reviews</h2>${recordList(related, home)}</section>` : '';
   const heading = `<div class="review-heading"><div><p class="kind">${kind(item)}</p><h1>${escape(item.title)}</h1><dl class="review-meta">${meta}</dl><div class="current-state">${state(item)}</div></div>${approval}</div>`;
   return page(item.title, home, heading + details + report + links, csrf ? approvalScript : undefined, Boolean(item.report));

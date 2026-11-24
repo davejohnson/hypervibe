@@ -1,16 +1,23 @@
 import { createHash } from 'node:crypto';
-import { transferAccessCheckScope, transferFileAccessCheckScope, type PlanReport, type PlanReportAction } from '../domain/plan/plan-report.js';
+import { planIdMeta, transferAccessCheckScope, transferFileAccessCheckScope, type PlanReport, type PlanReportAction } from '../domain/plan/plan-report.js';
 import type { PlanActionType } from '../domain/plan/plan.types.js';
 import { actionTitle, buildReportMap, humanize, isNamedResource, isSecretReadPermission, lanes, providerName, type MapGroup } from './plan-report-map.js';
 import { planReportBrowser } from './plan-report-browser.js';
 import { cloudFacts } from './plan-report-links.js';
 import { groupPlanNotices } from './plan-report-notices.js';
 import { planReportStyle } from './plan-report-style.js';
+import { timeTag } from './local-time.js';
 
 type ReviewActionType = PlanActionType | 'grant' | 'revoke';
+/** The verb on each action. */
 const types: Record<ReviewActionType, string> = {
-  create: 'Create', update: 'Update', replace: 'Replace', destroy: 'Destroy', noop: 'No change',
-  grant: 'Grant access', revoke: 'Revoke access',
+  create: 'Add', update: 'Change', replace: 'Replace', destroy: 'Delete', noop: 'No change',
+  grant: 'Grant access', revoke: 'Remove access',
+};
+/** The same types as a count: "3 new", "1 deleted". */
+const tallies: Record<ReviewActionType, string> = {
+  create: 'New', update: 'Changed', replace: 'Replaced', destroy: 'Deleted', noop: 'Unchanged',
+  grant: 'Access granted', revoke: 'Access removed',
 };
 
 function reviewType(action: PlanReportAction): ReviewActionType {
@@ -52,10 +59,10 @@ function node(group: MapGroup, accessCheck: boolean) {
   const named = isNamedResource(first);
   const title = named || (accessCheck && group.actions.length === 1) ? first.name : group.title;
   const subtitle = [provider, named ? humanize(first.kind) : '', quantity(group.actions.length, 'action')].filter(Boolean).join(' · ');
-  const changes = Object.entries(types).flatMap(([type, label]) => {
+  const changes = Object.keys(types).flatMap((type) => {
     const count = group.actions.filter(action => reviewType(action) === type).length;
     if (!count) return [];
-    const summary = type === 'grant' ? quantity(count, 'new permission') : type === 'revoke' ? quantity(count, 'permission removal') : `${count} ${label.toLowerCase()}`;
+    const summary = type === 'grant' ? quantity(count, 'new permission') : type === 'revoke' ? quantity(count, 'permission removal') : `${count} ${tallies[type as ReviewActionType].toLowerCase()}`;
     return [`<span class="status" data-type="${type}">${summary}</span>`];
   }).join(' · ');
   return `<a class="map-node" href="#group-${group.index}" data-group="${group.index}">
@@ -80,45 +87,59 @@ function mapSection(map: ReturnType<typeof buildReportMap>, accessCheck: boolean
     <p class="map-note">${map.edges.length ? 'Arrows point from a prerequisite to a group that depends on it.' : 'The plan records no dependencies between these groups.'}</p></div></section>`;
 }
 
-const codeList = (values: string[]) => values.length ? `<ul>${values.map(value => `<li><code>${escape(value)}</code></li>`).join('')}</ul>` : '';
+const listed = (parts: string[]) => parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
 
-function actionRow(action: PlanReportAction, index: number, group: MapGroup, indexes: Map<string, number | null>, accessCheck: boolean) {
+/** Already as it should be, and nothing for the reader to decide. */
+const leftAlone = (action: PlanReportAction) => action.type === 'noop' && !action.requiresConfirm;
+
+/** One sentence in everyday words, so the reader knows the size of the plan before any detail. Deletion is always stated. */
+function headline(actions: PlanReportAction[]): string {
+  const count = (type: ReviewActionType) => actions.filter(action => reviewType(action) === type).length;
+  const verbs: Array<[ReviewActionType, string]> = [['create', 'adds'], ['update', 'changes'], ['replace', 'replaces'], ['destroy', 'deletes'], ['grant', 'grants access for'], ['revoke', 'removes access for']];
+  const parts = verbs.filter(([type]) => count(type)).map(([type, verb]) => `${verb} ${quantity(count(type), 'thing')}`);
+  if (!parts.length) return actions.length ? 'Nothing needs to change. Everything already matches.' : 'This plan has nothing in it.';
+  const removal = count('destroy') ? '' : count('replace') ? ' Replacing removes the old one; nothing else is deleted.' : ' Nothing is deleted.';
+  const alone = actions.filter(leftAlone).length;
+  const untouched = alone ? ` ${alone === 1 ? '1 other thing already matches and is' : `${alone} other things already match and are`} left alone.` : '';
+  return `This plan ${listed(parts)}.${removal}${untouched}`;
+}
+
+
+function actionRow(action: PlanReportAction, index: number, group: MapGroup, indexes: Map<string, number | null>, titles: string[], accessCheck: boolean) {
   const type = reviewType(action);
   const title = actionTitle(action);
   const name = title !== action.name ? fact('Resource name', escape(action.name)) : '';
   const flags = [
-    action.billable && 'May incur charges', action.dataBearing && 'Contains data', action.requiresConfirm && 'Confirmation required',
+    action.billable && 'Costs money', action.dataBearing && 'Holds data', action.requiresConfirm && 'Needs your OK',
   ].filter(Boolean);
-  const dependencies = action.dependsOn.map(id => {
+  // A prerequisite is named the way its own row is. One the plan does not list has no name to show.
+  const dependencies = action.dependsOn.flatMap(id => {
     const target = indexes.get(id);
-    const code = `<code>${escape(id)}</code>`;
-    return `<li>${typeof target === 'number' ? `<a href="#action-${target}">${code}</a>` : code}</li>`;
+    return typeof target === 'number' ? [`<li><a href="#action-${target}">${escape(titles[target]!)}</a></li>`] : [];
   });
   const anchor = group.actions[0] === action ? `<span id="group-${group.index}"></span>` : '';
-  return `<li id="action-${index}" class="action-row" data-type="${escape(type)}" data-group="${group.index}">${anchor}
+  return `<li id="action-${index}" class="action-row" data-action="${escape(action.id)}" data-type="${escape(type)}" data-group="${group.index}">${anchor}
     <details><summary><span class="status">${types[type]}</span>
     <span class="action-main"><span class="action-name">${escape(title)}</span><span class="action-kind">${escape(group.title)} · ${escape(providerName(action.provider))}</span></span></summary>
     <div class="detail"><div class="bits">${flags.map(label => `<span>${label}</span>`).join('')}</div>
     ${action.reason ? `<p>${escape(action.reason)}</p>` : ''}<dl>
-    ${fact('Action ID', `<code>${escape(action.id)}</code>`)}${name}
-    ${accessCheck ? '' : fact('Plan evidence', action.verified ? 'Verified at planning time' : 'Unverified at planning time')}
-    ${fact('Changed fields', codeList(action.fields))}${fact('Resource addresses', codeList(action.addresses))}
-    ${fact('Depends on', dependencies.length ? `<ul>${dependencies.join('')}</ul>` : 'No recorded prerequisites')}</dl></div></details></li>`;
+    ${name}
+    ${accessCheck ? '' : fact('Checked', action.verified ? 'Confirmed with the provider when this plan was made' : 'Not confirmed with the provider when this plan was made')}
+    ${fact('Happens after', dependencies.length ? `<ul>${dependencies.join('')}</ul>` : undefined)}</dl></div></details></li>`;
 }
 
 export function renderPlanReportContent(report: PlanReport, options: { localReview?: boolean } = {}): string {
   const accessCheck = report.scope === transferFileAccessCheckScope || report.scope === transferAccessCheckScope;
-  const map = buildReportMap(report.actions);
+  // Things that already match are not listed: nothing happens to them, so they are only counted in the sentence.
+  // One that still needs the reader's OK stays. An access check is a list of checks, not changes, so it shows every one.
+  const actions = accessCheck ? report.actions : report.actions.filter(action => !leftAlone(action));
+  const map = buildReportMap(actions);
   const indexes = new Map<string, number | null>();
-  report.actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
-  const visibleTypes = Object.entries(types).filter(([type]) =>
-    (type !== 'grant' && type !== 'revoke') || report.actions.some(action => reviewType(action) === type));
-  const stats = visibleTypes.map(([type, label]) => {
-    const count = report.actions.filter(action => reviewType(action) === type).length;
-    return `<div class="stat${count ? ' has-actions' : ''}" data-type="${type}"><strong>${count}</strong><span>${label}</span></div>`;
-  }).join('');
-  const rows = report.actions.map((action, index) =>
-    actionRow(action, index, map.groupByAction.get(action)!, indexes, accessCheck)).join('');
+  actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
+  const visibleTypes = Object.entries(types).filter(([type]) => actions.some(action => reviewType(action) === type));
+  const titles = actions.map(actionTitle);
+  const rows = actions.map((action, index) =>
+    actionRow(action, index, map.groupByAction.get(action)!, indexes, titles, accessCheck)).join('');
   const { warnings, costs, next, detail } = groupPlanNotices(report);
   const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', warnings, 'warning')
     + notice('GitHub release access', report.ciReleaseAccess ?? [], 'info')
@@ -133,21 +154,24 @@ export function renderPlanReportContent(report: PlanReport, options: { localRevi
       fact('Google Cloud destination bucket', `<a href="https://console.cloud.google.com/storage/browser/${encodeURIComponent(report.bucketCopy.targetBucket)}" target="_blank" rel="noopener noreferrer">${escape(report.bucketCopy.targetBucket)}</a>`),
       fact('Copy job account', escape(report.bucketCopy.copyAccount)),
     ] : []),
-    fact('Plan ID', escape(report.planId)), fact('Created', report.createdAt && escape(report.createdAt)),
+    fact('Created', timeTag(report.createdAt)),
     fact('Approval', !options.localReview && report.approval === 'whole-plan' ? 'Approve the whole plan in the chat or terminal where you requested it.' : undefined),
   ].join('');
-  const flaggedCounts = [
-    [report.actions.filter(action => action.requiresConfirm).length, 'Confirmation required'],
-    [report.actions.filter(action => action.billable).length, 'May incur charges'],
-    [report.actions.filter(action => action.dataBearing).length, 'Handle persistent data'],
-  ].filter(([count]) => count).map(([count, label]) => `<span>${label} <b>${count}</b></span>`).join('');
-  return `<dl class="meta">${metadata}</dl><div class="counts" aria-label="Action counts">${stats}</div>
-${flaggedCounts ? `<div class="review-flags" aria-label="Actions to review">${flaggedCounts}</div>` : ''}
+  // Small badges beside the sentence; the explanation is in each badge's tooltip and accessible name.
+  const steps = (count: number) => count === 1 ? '1 step' : `${count} steps`;
+  const badges = ([
+    [report.actions.filter(action => action.requiresConfirm).length, 'confirm', (n: number) => n === 1 ? 'needs your OK' : 'need your OK', (n: number) => `${steps(n)} will not run until you approve.`],
+    [report.actions.filter(action => action.billable).length, 'cost', (n: number) => n === 1 ? 'costs money' : 'cost money', (n: number) => `${steps(n)} ${n === 1 ? 'creates or changes' : 'create or change'} something you pay for.`],
+    [report.actions.filter(action => action.dataBearing).length, 'data', (n: number) => n === 1 ? 'holds data' : 'hold data', (n: number) => `${steps(n)} ${n === 1 ? 'touches' : 'touch'} something that stores your data.`],
+  ] as Array<[number, string, (n: number) => string, (n: number) => string]>).filter(([count]) => count)
+    .map(([count, kind, label, tip]) => `<span class="badge" data-badge="${kind}" title="${escape(tip(count))}" aria-label="${escape(tip(count))}">${count} ${label(count)}</span>`).join('');
+  const lead = [accessCheck ? '' : `<span>${escape(headline(report.actions))}</span>`, badges ? `<span class="badges">${badges}</span>` : ''].join('');
+  return `${lead ? `<p class="headline">${lead}</p>` : ''}<dl class="meta">${metadata}</dl>
 ${notices ? `<section class="notices" aria-label="Plan notices">${notices}</section>` : ''}
 ${mapSection(map, accessCheck)}
-<section aria-labelledby="review"><div class="section-head"><h2 tabindex="-1" id="review">Plan actions</h2><span class="muted">${quantity(report.actions.length, 'action')}</span></div>
+<section aria-labelledby="review"><div class="section-head"><h2 tabindex="-1" id="review">Plan actions</h2><span class="muted">${quantity(actions.length, 'action')}</span></div>
 ${rows ? `<div class="review-scope" id="selected-group" hidden><a id="back-map" class="button" href="#resource-map">← Back to map</a><strong id="group-name"></strong></div>
-<div class="tools" data-interactive hidden><label>Search actions<input type="search" id="search" placeholder="Name, field or action ID"></label>
+<div class="tools" data-interactive hidden><label>Search actions<input type="search" id="search" placeholder="Search by name"></label>
 <label>Action type<select id="action-type"><option value="">All types</option>${visibleTypes.map(([type, label]) => `<option value="${type}">${label}</option>`).join('')}</select></label>
 <button class="button" id="reset" type="button">Clear filters</button></div>
 <p class="result-count" role="status" aria-live="polite" id="result-count"></p>
@@ -160,7 +184,7 @@ export function renderPlanReportHtml(report: PlanReport, options: { localReview?
     : report.scope === transferAccessCheckScope ? 'Transfer access check' : 'Infrastructure plan';
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${planReportPolicy}">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(report.project)} · ${title} · Hypervibe</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">${planIdMeta(report.planId)}<title>${escape(report.project)} · ${title} · Hypervibe</title>
 <style>${planReportStyle}</style></head><body>
 <a class="skip" href="#review">Skip to plan actions</a>
 ${options.localReview ? '' : `<header class="mast"><div class="mast-inner"><div class="brand">
