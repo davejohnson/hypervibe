@@ -88,12 +88,12 @@ function password(): string {
  * query; tools that parse only the URL host (sequelize-cli) fall back to PGHOST,
  * which services also receive. A `localhost` host would send those tools to TCP.
  */
-export function connectionUrl(login: DatabaseLogin, secret: string, databaseName: string, connectionName: string): string {
+export function connectionUrl(login: string, secret: string, databaseName: string, connectionName: string): string {
   return `postgresql://${login}:${encodeURIComponent(secret)}@/${databaseName}?host=/cloudsql/${connectionName}`;
 }
 
 /** Runs statements in one session through the Cloud SQL connector as the deployment identity. */
-async function withSession<T>(serviceAccount: Record<string, unknown>, connectionName: string, user: string, secret: string, database: string, work: (client: pg.Client) => Promise<T>): Promise<T> {
+export async function withCloudSqlSession<T>(serviceAccount: Record<string, unknown>, connectionName: string, user: string, secret: string, database: string, work: (client: pg.Client) => Promise<T>): Promise<T> {
   const connector = new Connector({ auth: new GoogleAuth({ credentials: serviceAccount as never, scopes: ['https://www.googleapis.com/auth/sqlservice.admin'] }) });
   const directory = await mkdtemp(path.join(tmpdir(), 'hv-sql-'));
   try {
@@ -111,7 +111,8 @@ async function withSession<T>(serviceAccount: Record<string, unknown>, connectio
   }
 }
 
-async function setLoginPassword(token: string, gcpProjectId: string, instanceName: string, login: DatabaseLogin, secret: string, exists: boolean): Promise<'done' | ActionResult> {
+/** Creates a built-in Cloud SQL login, or sets an existing one's password, through Google's API. */
+export async function setCloudSqlLoginPassword(token: string, gcpProjectId: string, instanceName: string, login: string, secret: string, exists: boolean): Promise<'done' | ActionResult> {
   let response: Response;
   try {
     response = exists
@@ -129,7 +130,7 @@ async function setLoginPassword(token: string, gcpProjectId: string, instanceNam
 
 /** Makes `login` act as the shared owner role on every connection, then proves it. */
 async function verifyLogin(serviceAccount: Record<string, unknown>, connectionName: string, login: DatabaseLogin, secret: string, databaseName: string): Promise<boolean> {
-  return withSession(serviceAccount, connectionName, login, secret, databaseName, async (client) => {
+  return withCloudSqlSession(serviceAccount, connectionName, login, secret, databaseName, async (client) => {
     // Setup gives each login a default of acting as app_owner. Only set it when missing, and
     // only as the login itself: SET ROLE NONE returns to the session user, whereas RESET ROLE
     // would return to that very default.
@@ -166,11 +167,11 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
     if (meta.mode === 'initialize') {
       const secrets: Record<DatabaseLogin, string> = { app_a: password(), app_b: password() };
       for (const login of DATABASE_LOGINS) {
-        const set = await setLoginPassword(token, meta.gcpProjectId, meta.instanceName, login, secrets[login], existing.has(login));
+        const set = await setCloudSqlLoginPassword(token, meta.gcpProjectId, meta.instanceName, login, secrets[login], existing.has(login));
         if (set !== 'done') return set;
       }
       // app_a creates the shared owner role (and so may grant it), then hands it the database.
-      await withSession(serviceAccount, instance.connectionName, 'app_a', secrets.app_a, meta.databaseName, async (client) => {
+      await withCloudSqlSession(serviceAccount, instance.connectionName, 'app_a', secrets.app_a, meta.databaseName, async (client) => {
         await client.query(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${DATABASE_OWNER_ROLE}') THEN CREATE ROLE ${DATABASE_OWNER_ROLE} NOLOGIN; END IF; END $$`);
         await client.query(`GRANT ${DATABASE_OWNER_ROLE} TO app_a, app_b`);
         await client.query(`ALTER DATABASE ${meta.databaseName} OWNER TO ${DATABASE_OWNER_ROLE}`);
@@ -191,7 +192,7 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
     if (meta.mode === 'rotate') {
       const next = meta.login!;
       const secret = password();
-      const set = await setLoginPassword(token, meta.gcpProjectId, meta.instanceName, next, secret, existing.has(next));
+      const set = await setCloudSqlLoginPassword(token, meta.gcpProjectId, meta.instanceName, next, secret, existing.has(next));
       if (set !== 'done') return set;
       if (!await verifyLogin(serviceAccount, instance.connectionName, next, secret, meta.databaseName)) {
         return { success: false, message: `The new password for ${next} did not work; the app keeps using its current login.` };
@@ -203,7 +204,7 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
 
     // revoke: every service now runs the new secret version, so the old password can go.
     const retired = meta.login!;
-    const set = await setLoginPassword(token, meta.gcpProjectId, meta.instanceName, retired, password(), true);
+    const set = await setCloudSqlLoginPassword(token, meta.gcpProjectId, meta.instanceName, retired, password(), true);
     if (set !== 'done') return set;
     const observed = await observeSecret(token, meta.gcpProjectId, meta.secretId);
     if (observed.state !== 'present') return { success: false, status: 'pending', message: `${meta.secretId} could not be read after revoking ${retired}.` };
@@ -249,7 +250,7 @@ export async function grantWorkerWakeRead(token: string, serviceAccount: Record<
   const parsed = /^postgresql:\/\/([a-z_]+):([^@]+)@/.exec(url);
   if (!parsed || !isLogin(parsed[1])) return { success: false, status: 'blocked', message: `${meta.secretId} does not hold a Hypervibe database login.` };
   try {
-    await withSession(serviceAccount, instance.connectionName, parsed[1], decodeURIComponent(parsed[2]!), meta.databaseName, async (client) => {
+    await withCloudSqlSession(serviceAccount, instance.connectionName, parsed[1], decodeURIComponent(parsed[2]!), meta.databaseName, async (client) => {
       const user = client.escapeIdentifier(meta.iamUser);
       await client.query(`SET ROLE ${DATABASE_OWNER_ROLE}`);
       await client.query(`GRANT USAGE ON SCHEMA public TO ${user}`);

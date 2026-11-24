@@ -342,6 +342,10 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   const { sourceEnvironment } = source;
   const sourceSpec = specResult.spec.environments[params.from]!;
   const declaredTarget = specResult.spec.environments[params.to];
+  // Copy, verification and cutover all identify a database by its server; two databases on one server look the same to them.
+  if (sourceSpec.database?.placement === 'app' || declaredTarget?.database?.placement === 'app') {
+    return { status: 'blocked', message: `Migration is not available yet for a database on the app's shared database server (${sourceSpec.database?.placement === 'app' ? params.from : params.to}). Nothing was changed.` };
+  }
   if (params.gcpProjectId && declaredTarget && declaredTarget.hosting.gcpProjectId !== params.gcpProjectId) {
     return { status: 'blocked', message: `Migration target ${params.to} already selects ${declaredTarget.hosting.gcpProjectId ?? 'the repository default'}. Choose a new target environment to migrate to ${params.gcpProjectId}.` };
   }

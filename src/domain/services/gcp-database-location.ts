@@ -22,7 +22,14 @@ export interface GcpDatabaseLocation {
 }
 
 export interface GcpDatabaseBinding {
-  database?: { instanceName: string; gcpProjectId?: string; databaseName?: string; region?: string };
+  database?: {
+    instanceName: string; gcpProjectId?: string; databaseName?: string; region?: string;
+    /** 'app' when the database is one of several on a server the app's environments use together. Absent: the environment's own instance. */
+    placement?: 'app';
+    /** On such a server: the environment the database was made for, and the login its services use now. */
+    tenantId?: string;
+    activeLogin?: string;
+  };
 }
 
 const filled = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
@@ -45,19 +52,46 @@ export function gcpDatabaseConnectionName(database: GcpDatabaseLocation, environ
 }
 
 /**
+ * True when the binding says the database is one of several on a server used by
+ * more than this environment, whether or not the rest of the record is sound.
+ * Everything that assumes the environment owns its whole instance asks this first.
+ */
+export function gcpDatabaseOnSharedServer(binding: GcpDatabaseBinding | undefined): boolean {
+  return (binding?.database as { placement?: unknown } | undefined)?.placement !== undefined;
+}
+
+/**
+ * The record of a database on a shared server is trusted only when every part is
+ * present and the parts agree: made for this environment, in this environment's
+ * Google project, with a database name and an active login that belong together.
+ */
+function sharedRecordProblem(environmentGcpProjectId: string, binding: GcpDatabaseBinding, environmentId: string | undefined): string | undefined {
+  const record = binding.database as Record<string, unknown>;
+  const database = typeof record.databaseName === 'string' ? record.databaseName : '';
+  const complete = record.placement === 'app' && filled(record.instanceName) && filled(record.region) && record.gcpProjectId === environmentGcpProjectId
+    && /^app_[a-z0-9]+(?:_[a-z0-9]+)*$/.test(database) && (record.activeLogin === `${database}_a` || record.activeLogin === `${database}_b`) && filled(record.tenantId);
+  if (!complete) return 'The saved record of this environment\'s database on the shared server is incomplete, so Hypervibe will not plan changes to it.';
+  if (!environmentId || record.tenantId !== environmentId) return 'The saved record says this database on the shared server was made for a different environment, so Hypervibe will not plan changes to it.';
+  return undefined;
+}
+
+/**
  * Why Hypervibe must not plan changes for this environment's database, if it must not.
  *
- * Reading a location is safe anywhere. Changing things is not: the login,
- * rotation, adoption and teardown steps all assume the environment owns the
- * whole instance, and on a server shared with other environments they would
- * reset the other environments' passwords or report the database gone. Until
- * those steps act on a verified allocation, a database that is not the
- * environment's own instance blocks planning.
+ * Reading a location is safe anywhere. Changing things is not: the dedicated
+ * login, rotation, adoption and teardown steps all assume the environment owns
+ * the whole instance, and on a server used by other environments they would
+ * reset the others' passwords or report the database gone. A database that is
+ * not the environment's own instance is therefore plannable only when the
+ * binding carries a complete record that it was allocated for this very
+ * environment (`environmentId`); that record routes every change through the
+ * shared-server module. Anything else blocks.
  */
-export function gcpDatabasePlanBlocker(environmentGcpProjectId: string, binding: GcpDatabaseBinding | undefined): string | undefined {
+export function gcpDatabasePlanBlocker(environmentGcpProjectId: string, binding: GcpDatabaseBinding | undefined, environmentId?: string): string | undefined {
   if (binding?.database === undefined || binding.database === null) return undefined;
   const database = gcpDatabaseLocation(environmentGcpProjectId, binding);
   if (!database) return 'The saved record of this environment\'s database is damaged, so Hypervibe will not plan changes to it.';
+  if (gcpDatabaseOnSharedServer(binding)) return sharedRecordProblem(environmentGcpProjectId, binding, environmentId);
   if (database.gcpProjectId !== environmentGcpProjectId || database.databaseName !== GCP_DEFAULT_DATABASE_NAME || database.region !== undefined) {
     return 'This environment\'s database is on a server the environment does not own. Hypervibe cannot manage that yet.';
   }

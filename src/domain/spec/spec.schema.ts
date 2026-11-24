@@ -297,6 +297,13 @@ export const databaseSpecSchema = z.object({
    * change. On by default for production and staging.
    */
   deletionProtection: z.boolean().optional(),
+  /**
+   * Where the database lives. Omitted or 'dedicated': a database server of the
+   * environment's own (today's behaviour). 'app': the environment's own database
+   * on one server shared by this app's environments. Google Cloud only for now;
+   * moving an existing database between the two is not available yet.
+   */
+  placement: z.enum(['app', 'dedicated']).optional(),
 }).strict();
 
 export const cacheSpecSchema = z.object({

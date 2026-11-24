@@ -604,6 +604,63 @@ environment's engine does not manage, so it is never silently ignored.
 
 No live run has been made of this setting on any cloud.
 
+## One database server per app (opt-in, 2026-11-23)
+
+Status: implemented for Google Cloud behind `database.placement: "app"`, verified
+offline only (fakes for Google, a real local PostgreSQL for every SQL statement).
+It has not been run against Google Cloud. Without the field nothing changes: an
+environment keeps a database server of its own. The plan is in
+[#830](https://github.com/davejohnson/hypervibe/issues/830).
+
+What the person gets: every environment that opts in has its own PostgreSQL
+database and its own logins on one Cloud SQL server per app (per Hypervibe
+project, Google project and region). The server is paid for once (the smallest
+size, about US$10 a month plus storage, the same approximate list price quoted
+for the smallest dedicated database), however many environments use it. Their
+data is separate; the machine is shared, so heavy load in one can slow the
+others, and a restore or a PostgreSQL upgrade covers the whole server.
+
+| Piece | Owner |
+| --- | --- |
+| The server and the empty container for its administrator password | OpenTofu, in a saved state of its own (`project-shared` partition), never in an environment's state |
+| The administrator password | Hypervibe: generated, set through Google's API, kept in Secret Manager in the app's Google project. Never in OpenTofu, plans, results or logs |
+| An environment's database, owner role and two logins | Hypervibe, as SQL through the administrator login (`tenant-database.ts`), marked with the environment's id |
+| `DATABASE_URL` | The environment's own secret, same id and labels as for a dedicated database. Services get the server's literal connection name; the environment's configuration contains no Cloud SQL resource |
+
+All of it sits in `src/application/shared-database/`, and the Google planner
+reaches it only through `index.ts`: plan (actions, the connection for workloads,
+the secret version), apply (run one action and say what to record), and a
+separate server-removal plan. Guard tests fail if the planner, the workload
+generator or the dedicated-database module mention its internals, and the
+architecture test refuses imports of its other files.
+
+Rules it enforces:
+
+- A new database is created only when the server itself says none exists for
+  that environment and none was ever recorded for it. A recorded database that
+  is missing blocks; it is never replaced by an empty one.
+- A new password is proven to open that environment's database before it is
+  published. Rotation (`passwordGeneration`) sets the idle login, publishes,
+  waits for services to move, then switches the old login off. It cannot touch
+  another environment's logins.
+- Tearing down an environment, or removing its database from the spec, deletes
+  only its own database after confirmation. The server is never changed by an
+  environment's plan, and "server not found" is never read as "database gone".
+- The server is removed only through its own plan, in two confirmed steps
+  (protection off, then delete), and only while its own list of databases is
+  empty. No command reaches that plan yet.
+- Connection limits: 15 for an environment whose name contains "prod", 5 for
+  every other, so a test environment cannot use up production's.
+
+Not available on the shared server yet; each is refused with a plain message:
+on-demand workers that count pending work, migration to or from it, direct
+queries (`hv_db_query`), `database.size`, `database.version`, and moving an
+existing database on or off it. Backups, checkpoints and restore drills from
+the spec are refused for every engine database already. Extensions that need
+Cloud SQL's elevated role cannot be installed by the app's logins there, and
+Hypervibe cannot detect that a migration needs one: such an app must keep its
+own server for now.
+
 ## Evidence boundaries and later implementation
 
 The November 5–6 evidence leaves browser sign-in, a confirmed from-scratch

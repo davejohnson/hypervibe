@@ -26,6 +26,11 @@ const SIZES = {
 } as const;
 const SHARED = { tier: 'db-f1-micro', label: 'shared CPU, 0.6 GB', monthlyUsd: 10 } as const;
 
+/** The cheapest instance Google offers, with the same list price the plan quotes for it elsewhere. */
+export function gcpSmallestDatabaseSize(): { tier: string; label: string; monthlyUsd: number } {
+  return SHARED;
+}
+
 export function gcpDatabaseShape(environmentName: string, database: NonNullable<EnvironmentSpec['database']>): GcpDatabaseShape {
   const production = environmentProfile(environmentName) === 'production';
   const size = database.size ? SIZES[database.size] : production ? SIZES.small : SHARED;

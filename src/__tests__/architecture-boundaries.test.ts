@@ -70,6 +70,13 @@ const rules: Rule[] = [
       && (target.startsWith('src/adapters/providers/') || PER_CLOUD_APPLICATION.test(target)),
   },
   {
+    name: 'shared-database-internals',
+    why: 'The app\'s shared database server is reached only through src/application/shared-database/index. Nothing outside that folder may import its other files or the tenant SQL module.',
+    violates: ({ file, target, external }) => !external && !file.startsWith('src/application/shared-database/')
+      && ((target.startsWith('src/application/shared-database/') && target !== 'src/application/shared-database/index')
+        || target === 'src/adapters/providers/database/tenant-database'),
+  },
+  {
     name: 'railway-dependency',
     why: 'Railway is frozen. Nothing outside its own folder may take a new dependency on it.',
     violates: ({ file, target, external }) => !external && target.startsWith('src/adapters/providers/railway/')

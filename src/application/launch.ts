@@ -144,7 +144,8 @@ export function estimateMonthlyCost(environment: EnvironmentSpec): CostLine[] {
     }
     lines.push({ item: `Worker ${name} (always on, ${cpu} vCPU, ${memory})`, estimate: `about $${monthly} per month` });
   }
-  if (environment.database) lines.push({ item: 'Cloud SQL Postgres (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month' });
+  if (environment.database?.placement === 'app') lines.push({ item: 'Its own Postgres database on the app\'s one shared Cloud SQL server (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month for the server, charged once for the whole app, not per environment' });
+  else if (environment.database) lines.push({ item: 'Cloud SQL Postgres (db-f1-micro, 10 GB, daily backups)', estimate: 'about $10–12 per month' });
   if (environment.cache) lines.push({ item: `Memorystore Redis (${environment.cache.tier ?? 'BASIC'}, ${environment.cache.size ?? '1gb'})`, estimate: environment.cache.tier === 'STANDARD_HA' ? 'about $90 per month' : 'about $35 per month' });
   const queues = Object.keys(environment.queues ?? {}).length;
   if (queues) lines.push({ item: `${queues} Pub/Sub queue(s)`, estimate: 'free up to 10 GB of messages per month, then about $40 per TB' });

@@ -71,6 +71,7 @@ function googleOnlyProblems(environment: EnvironmentSpec): string[] {
   }
   if (environment.database?.size) problems.push(`database.size is not yet supported on ${cloud}.`);
   if (environment.database?.deletionProtection !== undefined) problems.push(`database.deletionProtection is not yet supported on ${cloud}.`);
+  if (environment.database?.placement === 'app') problems.push(`database.placement="app" (one database server shared by the app's environments) is not yet supported on ${cloud}; it is tracked in issue #831. Remove it to give this environment its own database.`);
   return problems;
 }
 

@@ -32,7 +32,8 @@ import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-dedicated-database.js';
-import { gcpDatabaseLocation, gcpDatabasePlanBlocker, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
+import { gcpDatabaseLocation, gcpDatabaseOnSharedServer, gcpDatabasePlanBlocker, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
+import { googleSharedDatabaseCloud, sharedDatabase, type SharedDatabaseEngine } from './shared-database/index.js';
 import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -154,7 +155,7 @@ export interface EngineBinding {
    * the database is not the environment's own instance; without them it is instance `instanceName` in the
    * environment's project, database `app`.
    */
-  database?: { instanceName: string; connectionName?: string; gcpProjectId?: string; databaseName?: string; region?: string };
+  database?: NonNullable<GcpDatabaseBinding['database']> & { connectionName?: string };
   domains?: string[];
   /** Retained before attempting a mapping, including cancellation before DNS starts. */
   domainClaims?: Record<string, { zone: DnsZoneIdentity; connectionScope?: string; owner?: string }>;
@@ -801,6 +802,33 @@ async function findOwnLeftovers(
   return result;
 }
 
+/** The engine, bound to this environment's credentials, for a module that plans and applies in a saved state of its own. */
+function boundEngine(auth: EngineContext['auth']): SharedDatabaseEngine {
+  return {
+    async plan(configuration, state, planId, destroy) {
+      const engine = await openTofuEngine();
+      if ('blocked' in engine) return { ok: false, error: engine.blocked };
+      const planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth, state, planId, ...(destroy ? { destroy } : {}) });
+      return planned.ok ? planned : { ok: false, error: redactEngineOutput(planned.error, auth.redact) };
+    },
+    async apply(state, planId, segment) {
+      const engine = await openTofuEngine();
+      if ('blocked' in engine) return { outcomes: Object.fromEntries(segment.addresses.map((address) => [address, 'not_started' as const])), diagnostics: [engine.blocked] };
+      const outcome = await engine.apply({ backend: gcpEngineBackend, auth, state, planId, segment, approvedAddresses: segment.addresses });
+      return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, auth.redact)) };
+    },
+  };
+}
+
+/** What the module for a database on the app's shared server is told about this environment. */
+function sharedDatabaseTarget(context: EngineContext, project: Project, token: string) {
+  return {
+    project: { id: project.id, name: project.name }, environment: { id: context.environment.id, name: context.environment.name },
+    gcpProjectId: context.gcpProjectId, region: context.region, engine: boundEngine(context.auth),
+    cloud: googleSharedDatabaseCloud({ token, credentials: () => JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown> }),
+  };
+}
+
 // ---------------------------------------------------------------- Plan
 
 export interface InfrastructurePlanResult {
@@ -866,7 +894,9 @@ export async function observeStorageS3Access(token: string, context: EngineConte
 /** Adds what only a teardown does to the ordinary plan: empty each bucket first, and finish by checking nothing is left. */
 function gcpTeardownActions(planned: PlanAction[], context: EngineContext, environmentName: string, binding: EngineBinding): PlanAction[] {
   // The cleanup confirms the instance this environment owns is gone, so it reads the environment's own project.
-  const boundDatabase = gcpDatabaseLocation(context.gcpProjectId, binding);
+  // A database on the app's shared server is not an instance of this environment's: that server stays, and the
+  // database's own removal step (which the cleanup waits for) is what proves it gone.
+  const boundDatabase = gcpDatabaseOnSharedServer(binding) ? undefined : gcpDatabaseLocation(context.gcpProjectId, binding);
   const bucketOf = (name: string) => engineBucketName(context.gcpProjectId, environmentName, name);
   const removed = planned.filter((action) => action.id.startsWith('storage:') && action.type === 'destroy');
   const empties: PlanAction[] = removed.map((action) => ({
@@ -1044,15 +1074,23 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const databaseSpec = environmentSpec!.database;
   const engineBinding = (context.environment.platformBindings as { engine?: EngineBinding }).engine ?? {};
   // Reuse a recorded identity before inventing one: an interrupted create may have succeeded on Google.
-  const databaseBlocker = gcpDatabasePlanBlocker(context.gcpProjectId, engineBinding);
+  const databaseBlocker = gcpDatabasePlanBlocker(context.gcpProjectId, engineBinding, context.environment.id);
   if (databaseBlocker) return { blocked: [databaseBlocker] };
-  const boundDatabase = gcpDatabaseLocation(context.gcpProjectId, engineBinding);
+  const databaseSecretId = engineSecretId(environmentName, ENGINE_DATABASE_URL_KEY);
+  // A database on the app's shared server belongs to its own module. This planner places what the module returns
+  // (actions, the connection for workloads, the secret version) and plans no instance, login or removal of its own.
+  const placed = await sharedDatabase.plan({
+    ...sharedDatabaseTarget(context, project, token), binding: engineBinding, desired: databaseSpec, ...(options.teardown ? { teardown: true } : {}),
+    countsPendingWork: Object.values(environmentSpec!.services).some((service) => service.workloadKind === 'worker' && Boolean(service.onDemand)),
+    secret: { id: databaseSecretId, labels }, runningSecretVersions: () => pinnedDatabaseVersions(token, context),
+  });
+  if (placed && 'blocked' in placed) return { blocked: [placed.blocked] };
+  const boundDatabase = placed ? undefined : gcpDatabaseLocation(context.gcpProjectId, engineBinding);
   // An instance not recorded yet is one this environment is about to own, so it gets the defaults.
   const database = boundDatabase ?? gcpDatabaseLocation(context.gcpProjectId, { database: {
     instanceName: lastAttemptedDatabaseInstance(context.environment.id)
       ?? `hv-${environmentName}-db-${crypto.randomBytes(3).toString('hex')}`.toLowerCase().replace(/[^a-z0-9-]/g, '-') } })!;
   const instanceName = database.instanceName;
-  const databaseSecretId = engineSecretId(environmentName, ENGINE_DATABASE_URL_KEY);
   const databaseShape = databaseSpec ? gcpDatabaseShape(environmentName, databaseSpec) : undefined;
   if (!databaseSpec && boundDatabase) {
     // Removing the instance this environment owns: checked in the environment's own project.
@@ -1061,13 +1099,14 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     if (blocker) return { blocked: [blocker] };
   }
   let databaseCredential: DatabaseCredentialObservation = { ready: false, generation: 0 };
-  if (databaseSpec) {
+  if (databaseSpec && !placed) {
     const observed = await observeDatabaseCredential(token, context.gcpProjectId, databaseSecretId, instanceName, labels['hv-environment']);
     if ('blocked' in observed) return { blocked: [observed.blocked] };
     databaseCredential = observed;
     if (observed.ready && observed.latestVersion) secretVersions[ENGINE_DATABASE_URL_KEY] = observed.latestVersion;
   }
-  const databaseCredentialReady = databaseCredential.ready;
+  if (placed?.credential.version) secretVersions[ENGINE_DATABASE_URL_KEY] = placed.credential.version;
+  const databaseCredentialReady = placed ? placed.credential.ready : databaseCredential.ready;
   // Cache: OpenTofu owns the Redis instance; Hypervibe publishes REDIS_URL from Google's generated AUTH string.
   const cacheSpec = environmentSpec!.cache;
   const cacheInstanceName = engineBinding.cache?.instanceName
@@ -1255,11 +1294,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     environmentId: context.environment.id,
     ...input,
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
-    ...(databaseSpec && databaseShape ? { database: { instanceName, databaseName: database.databaseName, wireServices: databaseCredentialReady,
+    ...(placed?.connection ? { databaseConnection: placed.connection } : {}),
+    ...(databaseSpec && databaseShape && !placed ? { database: { instanceName, databaseName: database.databaseName, wireServices: databaseCredentialReady,
       tier: databaseShape.tier, deletionProtection: databaseShape.deletionProtection,
       retainedBackups: databaseShape.retainedBackups, transactionLogDays: databaseShape.transactionLogDays,
       ...(databaseSpec.version ? { majorVersion: databaseSpec.version } : {}) } } : {}),
-    ...(!databaseSpec && engineBinding.database ? { retiredDatabase: true } : {}),
+    ...(!databaseSpec && engineBinding.database && !placed ? { retiredDatabase: true } : {}),
     ...(cacheSpec ? { cache: {
       instanceName: cacheInstanceName, tier: (cacheSpec.tier === 'STANDARD_HA' ? 'STANDARD_HA' : 'BASIC') as 'BASIC' | 'STANDARD_HA',
       memorySizeGb: Math.max(1, parseInt(cacheSpec.size ?? '1', 10) || 1),
@@ -1296,7 +1336,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   // A create for something that already exists means engine state lost track of it (for example,
   // an apply interrupted mid-create). Adopt it only with proof it is ours; otherwise block.
-  const leftovers = await findOwnLeftovers(token, context, environmentName, planned.actions, databaseSpec ? instanceName : undefined,
+  const leftovers = await findOwnLeftovers(token, context, environmentName, planned.actions, databaseSpec && !placed ? instanceName : undefined,
     Object.keys(environmentSpec!.storage ?? {}));
   if ('blocked' in leftovers) return { blocked: [leftovers.blocked] };
   if (leftovers.databaseInstance || leftovers.buckets.length) {
@@ -1385,7 +1425,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     if (dependencies.length && action.type !== 'noop') action.dependsOn = dependencies;
   }
   const databaseAction = serviceActions.find((action) => action.id === 'database:postgres');
-  const credentialActions = databaseSpec
+  const placedActions = placed?.actions ?? [];
+  for (const action of placedActions) {
+    const dependencies = typeof action.metadata?.secretId === 'string' ? secretDependencies([action.metadata.secretId]) : [];
+    if (dependencies.length && action.type !== 'noop') action.dependsOn = [...new Set([...(action.dependsOn ?? []), ...dependencies])];
+  }
+  const credentialActions = databaseSpec && !placed
     ? await planDatabaseCredential({
       token, context, environmentName, database, databaseSecretId, labels, observation: databaseCredential,
       desiredGeneration: databaseSpec.passwordGeneration ?? 1,
@@ -1400,7 +1445,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const copiedAt = engineBinding.migration?.copiedAt ?? engineBinding.migration?.copyAttempt?.startedAt;
   const grantStale = engineBinding.workerWakeGrant !== wakeUser
     || Boolean(copiedAt && (!engineBinding.workerWakeGrantAt || engineBinding.workerWakeGrantAt < copiedAt));
-  const wakeGrantActions: PlanAction[] = databaseSpec && wakeUser && onDemandWorkers.length && grantStale ? [{
+  const wakeGrantActions: PlanAction[] = databaseSpec && !placed && wakeUser && onDemandWorkers.length && grantStale ? [{
     id: 'worker-wake-grant:postgres', type: 'update', verified: true,
     resource: { kind: 'database', name: 'postgres', provider: 'gcp' },
     reason: `Hypervibe will let the on-demand worker waker read pending work: read-only access to the app's tables for ${wakeUser}.`,
@@ -1438,7 +1483,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     reason: `Stop using previous imports for database aliases (${importBinding.retainedDatabaseAliasImports!.join(', ')}). Keep their existing secret containers.`,
     metadata: { operation: 'gcpRetainDatabaseAliasImports', gcpProjectId: context.gcpProjectId, keys: importBinding.retainedDatabaseAliasImports },
   }];
-  const ordinary = [...retireImports, ...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
+  const ordinary = [...retireImports, ...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...placedActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains];
   const actions = options.teardown ? gcpTeardownActions(ordinary, context, environmentName, engineBinding) : ordinary;
   describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
   describeStorageAutoTieringChanges(serviceActions, environmentSpec!, 'gcp');
@@ -1453,11 +1498,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     ...(databaseSpec && !databaseCredentialReady && anyService
       ? [gcpInfrastructureNotes.database]
       : []),
+    ...(placed?.warnings ?? []),
   ];
   if (options.teardown) {
     warnings.splice(0, warnings.length,
       `Removes Google Cloud environment ${environmentName} (project ${context.gcpProjectId}, ${context.region}). This cannot be undone.`,
-      ...(engineBinding.database ? ['The database is deleted with its backups; export it first if you need the data.'] : []),
+      ...(placed ? placed.warnings : engineBinding.database ? ['The database is deleted with its backups; export it first if you need the data.'] : []),
       `The project's own setup (enabled services, permissions, image repository and build storage) stays, for ${project.name}'s other environments.`);
   }
   const observedGenerations = await serviceGenerations(token, context, environmentName);
@@ -1469,7 +1515,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       ...(aliasKeys.size || retainedAliasIds.size ? { databaseAliasImports: importBinding.retainedDatabaseAliasImports ?? [] } : {}),
       ...(Object.keys(runtimeGrants).length ? { runtimeGrants } : {}),
       ...(scopeWorkloads ? { scopeWorkloads } : {}),
-      observedGenerations: observedGenerations.generations, ...(databaseSpec ? { database: { instanceName } } : {}),
+      observedGenerations: observedGenerations.generations, ...(databaseSpec && !placed ? { database: { instanceName } } : {}),
+      ...(placed ? { sharedDatabase: placed.reviewed } : {}),
       ...(imageRepository ? { imageRepository } : {}),
       ...(cacheSpec ? { cache: { instanceName: cacheInstanceName } } : {}),
       domainClaims, cancelledDomainProofs,
@@ -1622,6 +1669,7 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
     runtimeGrants?: Record<string, ReviewedRuntimeSecretGrant>;
     scopeWorkloads?: Record<string, GcpAppliedWorkload>;
     imageRepository?: { planId: string; state: EngineStateIdentity };
+    sharedDatabase?: unknown;
     domainClaims?: EngineBinding['domainClaims']; cancelledDomainProofs?: Record<string, { zoneFingerprint: string; connectionId: string }> } };
   const environmentName = document.environmentName;
   if (!document.engine || !isEngineManaged(params.spec.environments[environmentName])) {
@@ -1747,6 +1795,15 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
         }
         return granted;
       }
+      if (sharedDatabase.handles(action)) return applyToTarget(async () => {
+        const bindingNow = () => (ctx.repos.environments.findById(context.environment.id) ?? context.environment).platformBindings as { engine?: EngineBinding };
+        const applied = await sharedDatabase.apply({ ...sharedDatabaseTarget(context, params.project, token), binding: bindingNow().engine, action, reviewed: reviewed.sharedDatabase });
+        // Read again: the step itself may have recorded secret details on the binding.
+        if (applied.binding !== undefined) {
+          ctx.repos.environments.updatePlatformBindings(context.environment.id, { engine: { ...bindingNow().engine, kind: 'opentofu', database: applied.binding ?? undefined } });
+        }
+        return applied.result;
+      });
       return { success: false, status: 'blocked', message: `No engine-stage authority exists for ${action.id}.` };
     },
     segmentHandler: async (segment, members) => {

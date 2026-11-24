@@ -9,7 +9,7 @@ import type { TemporaryDatabaseAccess } from '../ports/provider.port.js';
 import { adapterFactory } from './adapter.factory.js';
 import { isExternallyUsableDatabaseUrl, resolveExternalDatabaseUrl } from './database-ops.service.js';
 import { ENGINE_DATABASE_URL_KEY, engineSecretId } from './engine-secret-id.js';
-import { gcpDatabaseLocation, type GcpDatabaseBinding } from './gcp-database-location.js';
+import { gcpDatabaseLocation, gcpDatabaseOnSharedServer, type GcpDatabaseBinding } from './gcp-database-location.js';
 
 const componentRepo = new ComponentRepository();
 const DEFAULT_LEASE_TTL_MS = 2 * 60 * 1000;
@@ -415,6 +415,10 @@ export async function acquireManagedDatabaseAccess(
       return { ok: false, code: 'provider_error', error: 'Both engine and legacy database bindings exist; resolve the conflicting targets before database access.', resourceCreated: false, cleanup: 'not_needed' };
     }
     return acquireEngineDatabaseAccess(project, environment);
+  }
+  // The Cloud SQL access path signs in to a whole instance; it has not been taught to stay inside one database of a shared one.
+  if (gcpDatabaseOnSharedServer((environment.platformBindings as { engine?: GcpDatabaseBinding }).engine)) {
+    return { ok: false, code: 'no_external_access', error: `Direct database access is not available yet for ${environment.name}, whose database is on the app's shared database server.`, resourceCreated: false, cleanup: 'not_needed' };
   }
   const component = componentRepo.findByEnvironmentAndType(environment.id, 'postgres') ?? engineDatabaseComponent(environment);
   const bindings = component?.bindings as Record<string, unknown> | undefined;
