@@ -9,7 +9,7 @@ import { gcpDatabaseOnSharedServer, type GcpDatabaseBinding } from '../gcp-datab
 import { Stop, blocked } from './administrator.js';
 import type { SharedDatabaseCloud, SharedDatabaseEngine } from './ports.js';
 import {
-  SERVER_ENGINE_ACTION, findSharedServer, newSharedServerName, sharedServerConfiguration, sharedServerCost, sharedServerProtection, sharedServerState, type SharedServerScope,
+  SERVER_ENGINE_ACTION, findSharedServer, serverPlanReview, newSharedServerName, sharedServerConfiguration, sharedServerCost, sharedServerProtection, sharedServerState, type SharedServerScope,
 } from './server.js';
 import {
   CONNECTION_LIMITS, SHARED_DATABASE_OPERATION, credentialState, recordedAllocation, runStep, tenantFor,
@@ -117,6 +117,12 @@ const serverMetadata = (scope: SharedServerScope, step: SharedDatabaseStep, inst
 
 type ServerChange = 'create' | 'take-over' | 'unprotect' | 'delete';
 
+/** A plan with nothing to do is not a wrong plan; the caller decides what an empty plan means. */
+const hasNoChange = (shown: unknown): boolean => {
+  const rows = (shown as { resource_changes?: Array<{ change?: { actions?: unknown[]; importing?: unknown } }> } | null)?.resource_changes;
+  return Array.isArray(rows) && rows.every((row) => !row.change?.importing && row.change?.actions?.length === 1 && ['no-op', 'read'].includes(String(row.change.actions[0])));
+};
+
 /**
  * Plans one change to the server through the engine, in the server's own saved state, and accepts the result only
  * when it is exactly that change. Anything else the engine wants to do to the server is refused, never folded in.
@@ -124,9 +130,12 @@ type ServerChange = 'create' | 'take-over' | 'unprotect' | 'delete';
 async function planServerChange(request: Pick<SharedDatabaseRequest, 'engine'>, scope: SharedServerScope, instanceName: string, change: ServerChange): Promise<ReviewedServerPlan | undefined> {
   const state = sharedServerState(scope);
   const planId = crypto.randomUUID();
+  // The engine's plan must be exactly this operation on exactly this server: its saved state may name another one.
+  let reviewed = false;
+  const review = serverPlanReview(change === 'create' ? 'create' : change === 'delete' ? 'delete' : 'update', instanceName);
   const planned = await request.engine.plan(sharedServerConfiguration({ scope, instanceName, ...(change === 'take-over' ? { adopt: true } : {}), ...(change === 'create' ? {} : { protect: false }) }),
-    state, planId, change === 'delete');
-  if (!planned.ok) throw blocked(planned.error);
+    state, planId, (shown) => { reviewed = true; return hasNoChange(shown) || review(shown); }, change === 'delete');
+  if (!planned.ok) throw blocked(reviewed ? `${planned.error} The engine's plan was not exactly "${change}" on shared database server ${instanceName}, the one Google lists for this app; its saved state may describe a different server. Nothing was planned.` : planned.error);
   if (planned.blockers.length) throw blocked(planned.blockers.join(' '));
   const changes = planned.actions.filter((action) => action.type !== 'noop');
   if (!changes.length) return undefined;

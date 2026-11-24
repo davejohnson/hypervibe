@@ -63,7 +63,8 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
     // can never present a deletion as an update or a new server as free.
     const destroys = sharedStep === 'release' || sharedStep === 'remove-server';
     const types: Record<string, string[]> = { server: ['create'], allocate: ['create', 'update'], rotate: ['update'], retire: ['update'], release: ['destroy'], 'unprotect-server': ['update'], 'remove-server': ['destroy'] };
-    const honest = action.resource.kind === 'database' && action.metadata?.engineSegment === undefined && (types[sharedStep] ?? []).includes(action.type)
+    // Confirmation is given by action id, so the id must name the step it runs.
+    const honest = action.id === `shared-database:${sharedStep}` && action.resource.kind === 'database' && action.metadata?.engineSegment === undefined && (types[sharedStep] ?? []).includes(action.type)
       && (!destroys || (action.dataBearing === true && action.requiresConfirm === true))
       && (sharedStep !== 'unprotect-server' || action.requiresConfirm === true)
       && (sharedStep !== 'server' || (action.billable === true && action.requiresConfirm === true));

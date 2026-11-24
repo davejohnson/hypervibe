@@ -707,6 +707,17 @@ Not yet confirmed against Google Cloud (each needs a live run):
 - Deleting the Google project is not held up by the server's deletion
   protection.
 
+Known limits of removing the server:
+
+- What Hypervibe has saved is read from this machine. A checkout that loads
+  older saved records, or an allocation that starts on another machine after
+  the check and before the lock is taken, can leave a recorded database with no
+  server. The step itself still refuses when any database is on the server.
+- "No database on it" means no database beyond `postgres` and the templates.
+  Tables someone made by hand inside `postgres`, or a template database of
+  their own, are not noticed, and a database created by someone else's own SQL
+  session between the check and the delete is not stopped by Hypervibe's lock.
+
 ## Evidence boundaries and later implementation
 
 The November 5–6 evidence leaves browser sign-in, a confirmed from-scratch

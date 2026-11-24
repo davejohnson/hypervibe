@@ -48,7 +48,8 @@ const google = {
   servers: [] as SeenServer[],
   connectionSecrets: new Map<string, { labels: Record<string, string>; versions: string[]; unrecorded?: boolean }>(),
   engineState: new Map<string, Set<string>>(),
-  plans: new Map<string, { configuration: EngineConfiguration; destroy: boolean }>(),
+  plans: new Map<string, { configuration: EngineConfiguration; destroy: boolean; shown: ReturnType<typeof shownPlan> }>(),
+  stateNames: new Map<string, string>(),
   enginePlans: 0,
   engineApplies: 0,
   administratorPasswords: [] as string[],
@@ -63,12 +64,15 @@ const instanceOf = (configuration: EngineConfiguration) => (configuration.files[
   shared: { name: string; region: string; settings: Array<{ deletion_protection_enabled: boolean; user_labels: Record<string, string> }> } } } }).resource.google_sql_database_instance.shared;
 const ADDRESS = 'google_sql_database_instance.shared';
 
+/** What OpenTofu's own JSON plan would say about the server: the operation, and the server's name in saved state and in configuration. */
+const shownPlan = (type: string, before: string | undefined, after: string | undefined, importing: boolean) => ({ format_version: '1.2', resource_changes: [{ address: ADDRESS, type: 'google_sql_database_instance',
+  change: { actions: [type === 'destroy' ? 'delete' : type === 'noop' ? 'no-op' : type], before: before ? { name: before } : null, after: after ? { name: after } : null, ...(importing ? { importing: { id: 'x' } } : {}) } }] });
+
 /** Plans what OpenTofu would: a create when saved state has no server, a takeover for an import, an update when protection differs. */
 const engine: SharedDatabaseEngine = {
-  async plan(configuration, state, planId, destroy) {
+  async plan(configuration, state, planId, review, destroy) {
     google.enginePlans++;
     const known = google.engineState.get(stateKey(state)) ?? new Set<string>();
-    google.plans.set(planId, { configuration, destroy: destroy === true });
     const instance = instanceOf(configuration);
     const live = google.servers.find((server) => server.instanceName === instance.name);
     // OpenTofu reads imports from the configuration's own file, not from Hypervibe's notes about it.
@@ -76,13 +80,20 @@ const engine: SharedDatabaseEngine = {
     const reprotect = live !== undefined && live.deletionProtection !== instance.settings[0]!.deletion_protection_enabled;
     const mapping = configuration.resources[ADDRESS]!;
     const type = destroy ? (known.has(ADDRESS) ? 'destroy' : 'noop') : !known.has(ADDRESS) && !imported ? 'create' : imported || reprotect ? 'update' : 'noop';
+    // Saved state remembers the server it made, whatever the configuration now says.
+    const inState = known.has(ADDRESS) ? google.stateNames.get(stateKey(state)) : imported ? instance.name : undefined;
+    const shown = shownPlan(type, inState, destroy ? undefined : instance.name, imported);
+    if (!review(shown)) return { ok: false, error: 'The saved engine plan does not match the reviewed change.' };
+    google.plans.set(planId, { configuration, destroy: destroy === true, shown });
     const segment = { id: `opentofu:${planId}`, engine: 'opentofu' as const, planDigest: 'digest', configurationDigest: 'digest', engineVersion: '1', providerVersions: {} };
     return { ok: true, blockers: [], segment,
       actions: [{ id: mapping.actionId, type, resource: { kind: mapping.kind, name: mapping.name, provider: 'gcp' }, verified: true, reason: 'engine', metadata: { engineSegment: { ...segment, addresses: [ADDRESS] } } }] };
   },
-  async apply(state, planId, segment) {
-    google.engineApplies++;
+  async apply(state, planId, segment, review) {
     const saved = google.plans.get(planId)!;
+    const notStarted = { outcomes: Object.fromEntries(segment.addresses.map((address) => [address, 'not_started' as const])), diagnostics: ['The saved engine plan does not do what was reviewed.'] };
+    if (!review(saved.shown)) return notStarted;
+    google.engineApplies++;
     const known = google.engineState.get(stateKey(state)) ?? new Set<string>();
     google.engineState.set(stateKey(state), known);
     const instance = instanceOf(saved.configuration);
@@ -91,6 +102,7 @@ const engine: SharedDatabaseEngine = {
       known.clear();
     } else {
       known.add(ADDRESS);
+      google.stateNames.set(stateKey(state), instance.name);
       const live = google.servers.find((server) => server.instanceName === instance.name);
       const seen = { instanceName: instance.name, region: instance.region, runnable: true, deletionProtection: instance.settings[0]!.deletion_protection_enabled, labels: instance.settings[0]!.user_labels };
       if (live) Object.assign(live, seen); else google.servers.push(seen);
@@ -473,6 +485,23 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     expect(await refusal(sharedDatabase.planServerRemoval({ ...serverRequest, recorded }))).toMatch(/^production, staging still have their database on the app's shared database server\. Tear those environments down/);
     expect(await sharedDatabase.applyServerRemoval({ ...serverRequest, recorded: recorded.slice(1), action: removal.action, reviewed: removal.reviewed }))
       .toMatchObject({ success: false, status: 'blocked', message: expect.stringMatching(/^staging still has its database/) });
+    // A step runs only the engine plan it claims to be. Here a saved delete is offered under the step, the id and the approval of a server create.
+    const forged = `forged-${Date.now()}`;
+    const state = { provider: 'gcp', projectId: project.id, environmentId: `shared_database_${GCP}_${REGION}`, partition: 'project-shared' as const };
+    const deleting = await engine.plan(google.plans.get((removal.reviewed as { server: { planId: string } }).server.planId)!.configuration, state, forged, () => true, true);
+    if (!deleting.ok) throw new Error(deleting.error);
+    const create: PlanAction = { id: 'shared-database:server', type: 'create', resource: removal.action.resource, verified: true, reason: '', billable: true, requiresConfirm: true,
+      metadata: { ...removal.action.metadata, step: 'server' } };
+    const ridden = await applyOne(production, create, { instanceName: removal.instanceName, server: { planId: forged, state, segment: { ...deleting.segment, addresses: [ADDRESS] } } });
+    expect(ridden).toMatchObject({ success: false, status: 'blocked', message: expect.stringMatching(/would not create exactly .*Nothing was changed/) });
+    expect(google.engineApplies).toBe(applies);
+    expect(google.servers).toHaveLength(1);
+    // Saved engine state that describes some other server is never acted on: the server changed must be the one Google lists for this app.
+    const key = [...google.stateNames.keys()][0]!;
+    const tracked = google.stateNames.get(key)!;
+    google.stateNames.set(key, 'hv-some-other-server');
+    expect(await refusal(sharedDatabase.planServerRemoval(serverRequest))).toMatch(/was not exactly "(unprotect|take-over)" on shared database server .*saved state may describe a different server\. Nothing was planned/);
+    google.stateNames.set(key, tracked);
     // The step cannot be smuggled into an environment's plan, nor an environment's step into the removal.
     expect(await applyOne(production, removal.action, removal.reviewed)).toMatchObject({ success: false, status: 'blocked' });
     const allocate = (await planned(planFor(staging, { ...shared, passwordGeneration: 9 }))).actions[0]!;
@@ -534,6 +563,16 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     expect(refused.message).toMatch(/still holds a database \(made_by_hand\)/);
     await boot.query('DROP DATABASE made_by_hand');
 
+    // Checked again at apply, against the saved plan as it reads then.
+    const saved = google.plans.get((unprotect.reviewed as { server: { planId: string } }).server.planId)!;
+    const honest = saved.shown;
+    saved.shown = shownPlan('update', 'hv-some-other-server', 'hv-some-other-server', false);
+    expect(await sharedDatabase.applyServerRemoval({ ...serverRequest, action: unprotect.action, reviewed: unprotect.reviewed }))
+      .toMatchObject({ success: false, status: 'blocked', message: expect.stringMatching(/would not update exactly/) });
+    saved.shown = shownPlan('destroy', honest.resource_changes[0]!.change.before!.name, undefined, false);
+    expect(await sharedDatabase.applyServerRemoval({ ...serverRequest, action: unprotect.action, reviewed: unprotect.reviewed })).toMatchObject({ success: false, status: 'blocked' });
+    expect(google.servers[0]!.deletionProtection).toBe(true);
+    saved.shown = honest;
     expect((await sharedDatabase.applyServerRemoval({ ...serverRequest, action: unprotect.action, reviewed: unprotect.reviewed })).success).toBe(true);
     expect(google.servers[0]!.deletionProtection).toBe(false);
     const remove = await removalStep();

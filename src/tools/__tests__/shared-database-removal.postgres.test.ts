@@ -67,6 +67,8 @@ vi.mock('../../application/infrastructure-engine-database.js', async (original) 
 const google = {
   servers: [] as Array<{ name: string; region: string; state: string; settings: { userLabels: Record<string, string>; deletionProtectionEnabled: boolean } }>,
   listWarning: false,
+  /** The server name OpenTofu's saved state holds; set when the stand-in creates one. */
+  stateServerName: undefined as string | undefined,
   /** The next secret version is stored, and its answer never arrives. */
   loseNextAnswer: false,
   secrets: new Map<string, { labels: Record<string, string>; versions: string[] }>(),
@@ -112,10 +114,11 @@ async function answer(input: string | URL, init?: RequestInit): Promise<Response
 
 /** The engine stand-in: what each saved plan would do when applied. */
 const enginePlans = new Map<string, Array<() => void>>();
+const shownPlans = new Map<string, unknown>();
 const configurations: Array<{ partition: string; configuration: EngineConfiguration }> = [];
 const segmentOf = (planId: string) => ({ id: `opentofu:${planId}`, engine: 'opentofu' as const, planDigest: 'a'.repeat(64), configurationDigest: 'b'.repeat(64), engineVersion: '1.13.9', providerVersions: { google: '8.9.0' } });
 
-function standInPlan({ configuration, state, planId, destroy }: Parameters<OpenTofuEngine['plan']>[0]): ReturnType<OpenTofuEngine['plan']> {
+function standInPlan({ configuration, state, planId, destroy, verifyPlannedChanges }: Parameters<OpenTofuEngine['plan']>[0]): ReturnType<OpenTofuEngine['plan']> {
   configurations.push({ partition: state.partition, configuration });
   const segment = segmentOf(planId);
   const effects: Array<() => void> = [];
@@ -151,6 +154,17 @@ function standInPlan({ configuration, state, planId, destroy }: Parameters<OpenT
         add(address, 'destroy', () => { google.secrets.delete(mapping.name); });
       }
     }
+  }
+  if (state.partition === 'project-shared') {
+    // What OpenTofu's own plan says: the operation, the server named in saved state, and the one in the configuration.
+    const name = (configuration.files['shared-database.tf.json'] as { resource: { google_sql_database_instance: { shared: { name: string } } } }).resource.google_sql_database_instance.shared.name;
+    const type = actions[0]?.type ?? 'noop';
+    const before = type === 'create' ? null : { name: google.stateServerName ?? name };
+    const shown = { format_version: '1.2', resource_changes: [{ address: 'google_sql_database_instance.shared', type: 'google_sql_database_instance',
+      change: { actions: [type === 'destroy' ? 'delete' : type === 'noop' ? 'no-op' : type], before, after: type === 'destroy' ? null : { name } } }] };
+    if (verifyPlannedChanges && !verifyPlannedChanges(shown)) return Promise.resolve({ ok: false, stage: 'plan review', error: 'The saved engine plan does not match the reviewed change.' });
+    shownPlans.set(planId, shown);
+    if (type === 'create') effects.push(() => { google.stateServerName = name; });
   }
   enginePlans.set(planId, effects);
   return Promise.resolve({ ok: true, segmentId: segment.id, segment, planFile: '/not-executed', blockers: [], unmanagedDeletes: [], actions });
@@ -209,7 +223,8 @@ beforeAll(async () => {
   vi.spyOn(install, 'enginePluginCacheDir').mockReturnValue(home);
   vi.spyOn(CloudRunAdapter.prototype, 'engineAccessToken').mockResolvedValue('synthetic-token');
   vi.spyOn(OpenTofuEngine.prototype, 'plan').mockImplementation(standInPlan);
-  vi.spyOn(OpenTofuEngine.prototype, 'apply').mockImplementation(async ({ planId, approvedAddresses }) => {
+  vi.spyOn(OpenTofuEngine.prototype, 'apply').mockImplementation(async ({ planId, approvedAddresses, verifySavedPlan }) => {
+    if (verifySavedPlan && !verifySavedPlan(shownPlans.get(planId))) return { outcomes: Object.fromEntries(approvedAddresses.map((address) => [address, 'not_started' as const])), diagnostics: ['The saved engine plan does not do what was reviewed.'] };
     for (const effect of enginePlans.get(planId) ?? []) effect();
     return { outcomes: Object.fromEntries(approvedAddresses.map((address) => [address, 'succeeded' as const])), diagnostics: [] };
   });
@@ -304,7 +319,11 @@ describe.runIf(major >= 15)('removing the app\'s shared database server with hv_
     expect(issues({ ...saved, actions: [] })).toContain(only);
     const shape = 'A shared database step must be shown as what it does.';
     expect(issues({ ...saved, actions: [{ ...step, requiresConfirm: false }] })).toContain(shape);
-    const destroy = { ...step, type: 'destroy', dataBearing: true, metadata: { ...step.metadata, step: 'remove-server' } };
+    // Confirmation is given by id: a delete can never travel under the first step's id, nor any step under another's.
+    const mislabelled = { ...step, type: 'destroy', dataBearing: true, metadata: { ...step.metadata, step: 'remove-server' } };
+    expect(issues({ ...saved, actions: [mislabelled] })).toContain(shape);
+    expect(issues({ ...saved, actions: [{ ...step, id: 'shared-database:remove-server' }] })).toContain(shape);
+    const destroy = { ...mislabelled, id: 'shared-database:remove-server' };
     expect(issues({ ...saved, actions: [destroy] })).toEqual([]);
     expect(issues({ ...saved, actions: [{ ...destroy, type: 'update' }] })).toContain(shape);
     expect(issues({ ...saved, actions: [{ ...destroy, dataBearing: false }] })).toContain(shape);
@@ -313,6 +332,24 @@ describe.runIf(major >= 15)('removing the app\'s shared database server with hv_
     // Unconfirmed, nothing happens.
     const held = await applyPlan(planned.data!.planId, []);
     expect(held.data!.applied).toBe(false);
+    expect(google.servers[0]!.settings.deletionProtectionEnabled).toBe(true);
+  });
+
+  it('is refused when the engine\'s saved state describes a different server than the one Google lists for the app', async () => {
+    const tracked = google.stateServerName;
+    google.stateServerName = 'hv-some-other-server';
+    expect(await blockers(removal())).toMatch(/was not exactly "(unprotect|take-over)" on shared database server .*saved state may describe a different server\. Nothing was planned/);
+    google.stateServerName = tracked;
+  });
+
+  it('refuses at apply when the saved engine plan no longer does what its step says', async () => {
+    const planned = await removal();
+    const reviewed = (savedPlan(planned.data!.planId).engine.sharedDatabase as { server: { planId: string } }).server.planId;
+    const honest = shownPlans.get(reviewed) as { resource_changes: Array<{ change: { actions: string[]; after: unknown } }> };
+    shownPlans.set(reviewed, { ...honest, resource_changes: [{ ...honest.resource_changes[0]!, change: { ...honest.resource_changes[0]!.change, actions: ['delete'], after: null } }] });
+    const result = await applyPlan(planned.data!.planId, planned.data!.confirmActions);
+    expect(receipt(result, 'shared-database:unprotect-server')).toMatchObject({ status: 'blocked', message: expect.stringMatching(/would not update exactly .*Nothing was changed/) });
+    expect(google.servers).toHaveLength(1);
     expect(google.servers[0]!.settings.deletionProtectionEnabled).toBe(true);
   });
 

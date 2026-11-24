@@ -814,16 +814,16 @@ async function findOwnLeftovers(
 /** The engine, bound to this environment's credentials, for a module that plans and applies in a saved state of its own. */
 export function boundEngine(auth: EngineContext['auth']): SharedDatabaseEngine {
   return {
-    async plan(configuration, state, planId, destroy) {
+    async plan(configuration, state, planId, review, destroy) {
       const engine = await openTofuEngine();
       if ('blocked' in engine) return { ok: false, error: engine.blocked };
-      const planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth, state, planId, ...(destroy ? { destroy } : {}) });
+      const planned = await engine.plan({ backend: gcpEngineBackend, configuration, auth, state, planId, verifyPlannedChanges: review, ...(destroy ? { destroy } : {}) });
       return planned.ok ? planned : { ok: false, error: redactEngineOutput(planned.error, auth.redact) };
     },
-    async apply(state, planId, segment) {
+    async apply(state, planId, segment, review) {
       const engine = await openTofuEngine();
       if ('blocked' in engine) return { outcomes: Object.fromEntries(segment.addresses.map((address) => [address, 'not_started' as const])), diagnostics: [engine.blocked] };
-      const outcome = await engine.apply({ backend: gcpEngineBackend, auth, state, planId, segment, approvedAddresses: segment.addresses });
+      const outcome = await engine.apply({ backend: gcpEngineBackend, auth, state, planId, segment, approvedAddresses: segment.addresses, verifySavedPlan: review });
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, auth.redact)) };
     },
   };

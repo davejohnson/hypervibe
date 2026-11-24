@@ -391,6 +391,34 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
     expect(fs.existsSync(approved.planFile)).toBe(true);
   }, 300_000);
 
+  it('reads the saved plan back at apply and applies nothing unless it does what was reviewed', async () => {
+    const isolatedState = { ...state, environmentId: 'review-apply' };
+    const params = { backend: builtinBackend, auth, state: isolatedState };
+    const addresses = ['terraform_data.server'];
+    type Shown = { resource_changes: Array<{ address: string; change: { actions: string[]; before: { input?: string } | null; after: { input?: string } | null } }> };
+    const does = (operation: string, name: string) => (shown: unknown) => {
+      const change = (shown as Shown).resource_changes.find((row) => row.address === addresses[0])?.change;
+      return change?.actions.join(',') === operation && (change.before ?? change.after)?.input === name;
+    };
+    const refused = { outcomes: { 'terraform_data.server': 'not_started' }, diagnostics: ['The saved engine plan does not do what was reviewed. Nothing was applied. Re-run hv_plan.'] };
+    const created = await engine.plan({ ...params, configuration: config({ server: { input: 'server-a' } }), planId: 'make' });
+    if (!created.ok) throw new Error(created.error);
+    const make = { ...created.segment, addresses };
+    // The same saved plan, offered as a delete, as a create of another server, and with a review that fails outright.
+    for (const verifySavedPlan of [does('delete', 'server-a'), does('create', 'server-b'), () => { throw new Error(SECRET); }]) {
+      expect(await engine.apply({ ...params, planId: 'make', segment: make, approvedAddresses: addresses, verifySavedPlan })).toEqual(refused);
+    }
+    expect((await engine.apply({ ...params, planId: 'make', segment: make, approvedAddresses: addresses, verifySavedPlan: does('create', 'server-a') })).outcomes).toEqual({ 'terraform_data.server': 'succeeded' });
+
+    // A saved delete cannot be applied under approval of anything else, and names what saved state holds.
+    const removed = await engine.plan({ ...params, configuration: config({ server: { input: 'server-a' } }), planId: 'unmake', destroy: true });
+    if (!removed.ok) throw new Error(removed.error);
+    const unmake = { ...removed.segment, addresses };
+    expect(await engine.apply({ ...params, planId: 'unmake', segment: unmake, approvedAddresses: addresses, verifySavedPlan: does('create', 'server-a') })).toEqual(refused);
+    expect(await engine.apply({ ...params, planId: 'unmake', segment: unmake, approvedAddresses: addresses, verifySavedPlan: does('delete', 'server-b') })).toEqual(refused);
+    expect((await engine.apply({ ...params, planId: 'unmake', segment: unmake, approvedAddresses: addresses, verifySavedPlan: does('delete', 'server-a') })).outcomes).toEqual({ 'terraform_data.server': 'succeeded' });
+  }, 300_000);
+
   it('reports partial failure per address', async () => {
     const failing = { input: 'boom', provisioner: [{ 'local-exec': { command: 'exit 1' } }] };
     const configuration = config({ app: { input: '${var.secret}' }, good: { input: 'ok' }, bad: failing });
