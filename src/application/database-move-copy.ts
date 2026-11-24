@@ -130,6 +130,13 @@ export function databaseMoveCopyScript(): string {
     'lines() { wc -l < "$1" | tr -d " "; }',
     // grep's "no line matched" is an answer; anything worse (a file that cannot be read or written) is a failure and must stop the job.
     'sift() { s=0; grep "$@" || s=$?; [ "$s" -le 1 ]; }',
+    // PostgreSQL 17.6 and later wrap a dump's text in one \\restrict line and one \\unrestrict line that carry a key made up for that run, so no
+    // two dumps are the same text. Exactly those two lines are left out: the key is read from the first \\restrict line, and only lines that are
+    // that command with that very key go. A line in the app's own definitions that merely looks alike has another key and stays.
+    'unkeyed() {',
+    '  KEY=$(sed -n \'s/^\\\\restrict \\([A-Za-z0-9]\\{1,\\}\\)$/\\1/p\' "$1" | sed -n 1p) || return 1',
+    '  if [ -z "$KEY" ]; then cp "$1" "$2"; else sift -v -x -F -e "\\\\restrict $KEY" -e "\\\\unrestrict $KEY" "$1" > "$2"; fi',
+    '}',
     `rm -rf ${WORK}; mkdir -p ${WORK}`,
 
     // 1. Each connection must lead to one server only, and the two must be exactly the two databases the caller expects, the right way round.
@@ -238,7 +245,7 @@ export function databaseMoveCopyScript(): string {
     `sift -Ev "$(standard "$SOURCE_OWNER")" ${WORK}/source.list > ${WORK}/source.entries || blocked "${UNREADABLE}"`,
     // A materialized view's refresh is data: its rows are compared with every table's, and a dump of definitions alone leaves the statement out.
     `sift -Ev '${ENTRY} MATERIALIZED VIEW DATA ' ${WORK}/source.entries > ${WORK}/source.defined || blocked "${UNREADABLE}"`,
-    `pg_restore --schema-only --no-owner --no-privileges -L ${WORK}/source.defined -f ${WORK}/source.definitions ${WORK}/source.dump 2>/dev/null && [ -s ${WORK}/source.definitions ] || blocked "${UNREADABLE}"`,
+    `pg_restore --schema-only --no-owner --no-privileges -L ${WORK}/source.defined -f ${WORK}/source.rendered ${WORK}/source.dump 2>/dev/null && unkeyed ${WORK}/source.rendered ${WORK}/source.definitions && [ -s ${WORK}/source.definitions ] || blocked "${UNREADABLE}"`,
     ...heredoc('if ! cat >&3 2>/dev/null', [...inventory('source'), `\\o ${WORK}/source.done`, 'SELECT 1;', '\\o', 'COMMIT;']),
     'then blocked "The source database could not be inventoried; nothing was changed."; fi',
     'exec 3>&-',
@@ -272,7 +279,7 @@ export function databaseMoveCopyScript(): string {
     // The same text PostgreSQL writes for the source's definitions, whole: no line of it is left out of the comparison.
     `pg_dump --format=custom --schema-only "$DATABASE_URL" > ${WORK}/target.dump 2>/dev/null && pg_restore -l ${WORK}/target.dump > ${WORK}/target.list 2>/dev/null \\`,
     `  && sift -Ev "$(standard "$TARGET_OWNER")" ${WORK}/target.list > ${WORK}/target.entries \\`,
-    `  && pg_restore --no-owner --no-privileges -L ${WORK}/target.entries -f ${WORK}/target.definitions ${WORK}/target.dump 2>/dev/null && [ -s ${WORK}/target.definitions ] \\`,
+    `  && pg_restore --no-owner --no-privileges -L ${WORK}/target.entries -f ${WORK}/target.rendered ${WORK}/target.dump 2>/dev/null && unkeyed ${WORK}/target.rendered ${WORK}/target.definitions && [ -s ${WORK}/target.definitions ] \\`,
     '  || blocked "The new database\'s definitions could not be read after the copy."',
     // A sequence's value is not part of any snapshot, so with the app still running only its presence can be compared.
     'if [ "${MOVE_REHEARSAL:-0}" = 1 ]; then REHEARSAL=true; SEQUENCES=sequencenames; else REHEARSAL=false; SEQUENCES=sequences; fi',

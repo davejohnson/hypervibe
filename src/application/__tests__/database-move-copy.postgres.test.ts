@@ -136,7 +136,7 @@ interface Run { result: DatabaseMoveCopyResult; output: string; code: number | n
 async function copy(source: Database, target: Database, env: Record<string, string> = {}, afterRestore?: string, before = ''): Promise<Run> {
   const script = databaseMoveCopyScript().replaceAll('/tmp/hv-move', work);
   const { output, code } = await new Promise<{ output: string; code: number | null }>((resolve) => {
-    const child = spawn(shell, ['-c', script], { env: { PATH: `${before}${afterRestore ? `${shims}:` : ''}${bin}:${process.env.PATH}`, SOURCE_DATABASE_URL: source.url, DATABASE_URL: target.url, PGTZ: 'UTC',
+    const child = spawn(shell, ['-c', script], { env: { PATH: `${before}${afterRestore || env.WRAP_KEYS ? `${shims}:` : ''}${bin}:${process.env.PATH}`, SOURCE_DATABASE_URL: source.url, DATABASE_URL: target.url, PGTZ: 'UTC',
       MOVE_SOURCE_IDENTITY: source.identity, MOVE_TARGET_IDENTITY: target.identity, REAL_BIN: bin, ...(afterRestore ? { AFTER_RESTORE: afterRestore } : {}), ...env } });
     let text = '';
     child.stdout.on('data', (chunk) => { text += String(chunk); });
@@ -158,7 +158,17 @@ beforeAll(async () => {
   shims = path.join(root, 'shims');
   mkdirSync(shims);
   // The real restore, then a change to the target the verification must notice.
-  writeFileSync(path.join(shims, 'pg_restore'), '#!/bin/sh\ncase " $* " in *" -d "*) ;; *) exec "$REAL_BIN/pg_restore" "$@" ;; esac\n"$REAL_BIN/pg_restore" "$@" || exit $?\n"$REAL_BIN/psql" "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -c "$AFTER_RESTORE" >/dev/null\n');
+  writeFileSync(path.join(shims, 'pg_restore'), [
+    '#!/bin/sh',
+    // Writing definitions out as text: with WRAP_KEYS, as newer PostgreSQL does it, between a \\restrict and an \\unrestrict line carrying a key made up for that one run.
+    'case " $* " in *" -f "*) "$REAL_BIN/pg_restore" "$@" || exit $?',
+    '  if [ "${WRAP_KEYS:-0}" = 1 ]; then for A in "$@"; do case "$A" in *.rendered) KEY=$(od -An -N16 -tx1 /dev/urandom | tr -d " \\n"); { printf "%s\\n" "\\\\restrict $KEY"; cat "$A"; printf "%s\\n" "\\\\unrestrict $KEY"; } > "$A.keyed" && mv "$A.keyed" "$A" ;; esac; done; fi',
+    '  exit 0 ;; esac',
+    'case " $* " in *" -d "*) ;; *) exec "$REAL_BIN/pg_restore" "$@" ;; esac',
+    '"$REAL_BIN/pg_restore" "$@" || exit $?',
+    'if [ -n "${AFTER_RESTORE:-}" ]; then "$REAL_BIN/psql" "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -c "$AFTER_RESTORE" >/dev/null; fi',
+    '',
+  ].join('\n'));
   chmodSync(path.join(shims, 'pg_restore'), 0o755);
   for (const side of ['own', 'shared'] as const) {
     const directory = path.join(root, side);
@@ -636,10 +646,44 @@ last' $$`, ['definitions']],
     const broken = path.join(root!, 'broken-restore');
     mkdirSync(broken, { recursive: true });
     // Writing a definitions file "succeeds" and leaves it empty, as a full disk can.
-    writeFileSync(path.join(broken, 'pg_restore'), '#!/bin/sh\ncase " $* " in *" -f "*) for A in "$@"; do case "$A" in *.definitions) : > "$A"; exit 0 ;; esac; done ;; esac\nexec "$REAL_BIN/pg_restore" "$@"\n');
+    writeFileSync(path.join(broken, 'pg_restore'), '#!/bin/sh\ncase " $* " in *" -f "*) for A in "$@"; do case "$A" in *.rendered) : > "$A"; exit 0 ;; esac; done ;; esac\nexec "$REAL_BIN/pg_restore" "$@"\n');
     chmodSync(path.join(broken, 'pg_restore'), 0o755);
     const { result } = await copy(source, target, {}, undefined, `${broken}:`);
     expect(result).toMatchObject({ ok: false, targetChanged: false });
     expect(databaseMoveCopyVerified(result)).toBe(false);
   }, 60_000);
+
+  describe('when PostgreSQL writes its definitions between per-run \\restrict and \\unrestrict lines (17.6 and later)', () => {
+    const keyed = { WRAP_KEYS: '1' };
+    const body = (line: string) => `CREATE OR REPLACE FUNCTION banner() RETURNS text LANGUAGE sql AS $$ SELECT 'first\n${line}\n\nlast' $$`;
+
+    it('still matches a faithful copy: the two keys differ on every run and say nothing about the database', async () => {
+      const source = await ownDatabase();
+      const target = await sharedDatabase();
+      await fill(source);
+      const { result, output } = await copy(source, target, keyed);
+      expect(result, output).toMatchObject({ ok: true, match: true, different: [] });
+      expect(databaseMoveCopyVerified(result)).toBe(true);
+    }, 60_000);
+
+    it.each([
+      ['a changed function body', body('-- changed')],
+      ['a body line that itself looks like such a line', body('\\restrict 0123456789abcdef')],
+      ['a body line that is such a line with another key', body('\\unrestrict ffffffffffffffffffffffffffffffff')],
+    ])('still does not certify a copy with %s', async (_what, change) => {
+      const source = await ownDatabase();
+      const target = await sharedDatabase();
+      await fill(source);
+      const { result, output } = await copy(source, target, keyed, change);
+      expect(result, output).toMatchObject({ ok: true, match: false, different: ['definitions'] });
+    }, 60_000);
+
+    it('keeps such a line that the app itself wrote, on both sides', async () => {
+      const source = await ownDatabase();
+      const target = await sharedDatabase();
+      await fill(source, [`CREATE FUNCTION banner() RETURNS text LANGUAGE sql AS $$ SELECT 'a\n\\restrict 0123456789abcdef\nb' $$`]);
+      expect((await copy(source, target, keyed)).result).toMatchObject({ ok: true, match: true });
+      expect((await copy(source, target, { ...keyed, MOVE_RESET_TARGET: '1' }, `CREATE OR REPLACE FUNCTION banner() RETURNS text LANGUAGE sql AS $$ SELECT 'a\nb' $$`)).result).toMatchObject({ ok: true, match: false, different: ['definitions'] });
+    }, 60_000);
+  });
 });
