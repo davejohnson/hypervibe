@@ -721,6 +721,28 @@ That is one run. Not exercised by it, and still unconfirmed:
 - Deleting the Google project while the server's deletion protection is on.
 - An app spanning more than one Google project or region.
 
+Moving a database between the shared server and a server of its own is not
+available yet; changing `placement` on an environment that has a database is
+still refused. One piece exists: the copy-and-verify job
+(`src/application/database-move-copy.ts`), tested offline against two local
+PostgreSQL servers and not yet run on Google Cloud. It reaches both databases
+through secret references, refuses a target that is not empty, refuses what it
+cannot carry over (granted or revoked privileges, objects of another owner and,
+onto the shared server, extensions), and compares every table's rows, every
+sequence, every large object's bytes and every object's definition with the
+source as it was when the dump was taken. Accepted limits of that job:
+
+- The secrets holding both connection strings can be read by the app's own
+  cloud identity, like every secret in the project. One person owns all of
+  them, so the copy has no separate identity; the rule is only that neither is
+  ever mounted into a service.
+- The dump is held in the job's own scratch space, so a database larger than
+  that cannot be moved this way.
+- Comments on objects and security labels are copied but not compared.
+- A sequence's value is outside any snapshot. A rehearsal made while the app
+  runs checks that every sequence arrived, not its value; the final copy,
+  made with the app paused, compares values too.
+
 Known limits of removing the server:
 
 - What Hypervibe has saved is read from this machine. A checkout that loads
