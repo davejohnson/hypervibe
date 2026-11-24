@@ -39,7 +39,10 @@ describe('standalone infrastructure plan report', () => {
     expect(html).toContain('<span class="status">Grant access</span>');
     expect(html).toContain('<span class="action-name">App read access to ' + key + '</span>');
     expect(html).toContain('<span class="node-title">Secret permissions</span>');
-    expect(html).toContain('<span class="node-title">Secrets</span>');
+    // The stored secret already exists and nothing happens to it, so it is counted, not listed.
+    expect(html).not.toContain('<span class="node-title">Secrets</span>');
+    expect(html).not.toContain('data-action="' + stored.id + '"');
+    expect(html).toContain('1 other thing already matches and is left alone.');
     expect(html).toContain('data-action="' + grant.id + '"');
     expect(html).toContain('Needs your OK');
 
@@ -103,6 +106,21 @@ describe('standalone infrastructure plan report', () => {
     expect(sentence([action('r', 'R', { type: 'replace' })])).toBe('This plan replaces 1 thing. Replacing removes the old one; nothing else is deleted.');
     expect(sentence([action('n', 'N', { type: 'noop' })])).toBe('Nothing needs to change. Everything already matches.');
     expect(sentence([])).toBe('This plan has nothing in it.');
+    expect(sentence([action('a', 'A'), action('n', 'N', { type: 'noop' }), action('m', 'M', { type: 'noop' })])).toBe('This plan adds 1 thing. Nothing is deleted. 2 other things already match and are left alone.');
+  });
+
+  it('lists only what changes, plus anything unchanged that still needs an OK', () => {
+    const html = renderPlanReportHtml(report([
+      action('web', 'web', { dependsOn: ['kept'] }), action('kept', 'kept', { type: 'noop' }), action('ask', 'ask', { type: 'noop', requiresConfirm: true }),
+    ]));
+    expect(html.match(/class="action-row"/g)).toHaveLength(2);
+    expect(html).not.toContain('data-action="kept"');
+    expect(html).toContain('data-action="ask"');
+    // A prerequisite that is already in place is not something that still has to happen first.
+    expect(html).not.toContain('Happens after');
+    expect(html).toContain('1 other thing already matches and is left alone.');
+    // With nothing unchanged left on the page, the filter does not offer it.
+    expect(renderPlanReportHtml(report([action('web', 'web'), action('kept', 'kept', { type: 'noop' })]))).not.toContain('<option value="noop">');
   });
 
   it('shows no ids, engine addresses or raw timestamps, and still names its plan for the saved-review catalog', () => {

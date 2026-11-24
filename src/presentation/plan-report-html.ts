@@ -89,6 +89,9 @@ function mapSection(map: ReturnType<typeof buildReportMap>, accessCheck: boolean
 
 const listed = (parts: string[]) => parts.length < 2 ? parts.join('') : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
 
+/** Already as it should be, and nothing for the reader to decide. */
+const leftAlone = (action: PlanReportAction) => action.type === 'noop' && !action.requiresConfirm;
+
 /** One sentence in everyday words, so the reader knows the size of the plan before any detail. Deletion is always stated. */
 function headline(actions: PlanReportAction[]): string {
   const count = (type: ReviewActionType) => actions.filter(action => reviewType(action) === type).length;
@@ -96,7 +99,9 @@ function headline(actions: PlanReportAction[]): string {
   const parts = verbs.filter(([type]) => count(type)).map(([type, verb]) => `${verb} ${quantity(count(type), 'thing')}`);
   if (!parts.length) return actions.length ? 'Nothing needs to change. Everything already matches.' : 'This plan has nothing in it.';
   const removal = count('destroy') ? '' : count('replace') ? ' Replacing removes the old one; nothing else is deleted.' : ' Nothing is deleted.';
-  return `This plan ${listed(parts)}.${removal}`;
+  const alone = actions.filter(leftAlone).length;
+  const untouched = alone ? ` ${alone === 1 ? '1 other thing already matches and is' : `${alone} other things already match and are`} left alone.` : '';
+  return `This plan ${listed(parts)}.${removal}${untouched}`;
 }
 
 
@@ -125,13 +130,15 @@ function actionRow(action: PlanReportAction, index: number, group: MapGroup, ind
 
 export function renderPlanReportContent(report: PlanReport, options: { localReview?: boolean } = {}): string {
   const accessCheck = report.scope === transferFileAccessCheckScope || report.scope === transferAccessCheckScope;
-  const map = buildReportMap(report.actions);
+  // Things that already match are not listed: nothing happens to them, so they are only counted in the sentence.
+  // One that still needs the reader's OK stays. An access check is a list of checks, not changes, so it shows every one.
+  const actions = accessCheck ? report.actions : report.actions.filter(action => !leftAlone(action));
+  const map = buildReportMap(actions);
   const indexes = new Map<string, number | null>();
-  report.actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
-  const visibleTypes = Object.entries(types).filter(([type]) =>
-    (type !== 'grant' && type !== 'revoke') || report.actions.some(action => reviewType(action) === type));
-  const titles = report.actions.map(actionTitle);
-  const rows = report.actions.map((action, index) =>
+  actions.forEach((action, i) => indexes.set(action.id, indexes.has(action.id) ? null : i));
+  const visibleTypes = Object.entries(types).filter(([type]) => actions.some(action => reviewType(action) === type));
+  const titles = actions.map(actionTitle);
+  const rows = actions.map((action, index) =>
     actionRow(action, index, map.groupByAction.get(action)!, indexes, titles, accessCheck)).join('');
   const { warnings, costs, next, detail } = groupPlanNotices(report);
   const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', warnings, 'warning')
@@ -162,7 +169,7 @@ export function renderPlanReportContent(report: PlanReport, options: { localRevi
   return `${lead ? `<p class="headline">${lead}</p>` : ''}<dl class="meta">${metadata}</dl>
 ${notices ? `<section class="notices" aria-label="Plan notices">${notices}</section>` : ''}
 ${mapSection(map, accessCheck)}
-<section aria-labelledby="review"><div class="section-head"><h2 tabindex="-1" id="review">Plan actions</h2><span class="muted">${quantity(report.actions.length, 'action')}</span></div>
+<section aria-labelledby="review"><div class="section-head"><h2 tabindex="-1" id="review">Plan actions</h2><span class="muted">${quantity(actions.length, 'action')}</span></div>
 ${rows ? `<div class="review-scope" id="selected-group" hidden><a id="back-map" class="button" href="#resource-map">← Back to map</a><strong id="group-name"></strong></div>
 <div class="tools" data-interactive hidden><label>Search actions<input type="search" id="search" placeholder="Search by name"></label>
 <label>Action type<select id="action-type"><option value="">All types</option>${visibleTypes.map(([type, label]) => `<option value="${type}">${label}</option>`).join('')}</select></label>
