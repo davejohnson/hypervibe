@@ -81,10 +81,12 @@ export interface SharedDatabaseApplyRequest extends SharedDatabaseRequest {
 }
 
 export interface SharedDatabasePauseRequest extends Pick<SharedDatabaseRequest, 'project' | 'environment' | 'gcpProjectId' | 'region' | 'binding' | 'cloud'> {
-  /** The environment's own connection secret, and the exact version its services are pinned to. */
+  /**
+   * The environment's own connection secret, and the exact version its services are pinned to. The copy login's URL goes
+   * to the one secret named after it (`databaseCopySecretId`), which must exist, belong to the same environment, and never
+   * be mounted into a service.
+   */
   secret: { id: string; labels: Record<string, string>; version: string };
-  /** A secret for the copy login's URL. The caller must never mount it into a service. */
-  copySecret: { id: string; labels: Record<string, string> };
 }
 
 export type SharedServerRequest = Pick<SharedDatabaseRequest, 'project' | 'gcpProjectId' | 'region' | 'engine' | 'cloud'> & {
@@ -106,7 +108,7 @@ export interface SharedDatabaseEntry {
   planServerRemoval(request: SharedServerRequest): Promise<SharedServerRemovalPlan | { none: true } | { blocked: string }>;
   /**
    * Stops every way the app has into this environment's database and proves nobody is connected; then opens one other
-   * way in, for copying it, whose URL goes to `copySecret`. `resume` undoes it: the connection the services hold works again.
+   * way in, for copying it, whose URL goes to a secret of its own. `resume` undoes it: the connection the services hold works again.
    * Both can be repeated, in any order. Not part of any plan yet.
    */
   pause(request: SharedDatabasePauseRequest): Promise<ActionResult>;
@@ -325,7 +327,7 @@ async function run(request: Applying, serverSteps: boolean): Promise<ActionResul
     metadata, ...(reviewed.server ? { server: reviewed.server } : {}) });
 }
 
-const pauseContext = (request: SharedDatabasePauseRequest) => ({ cloud: request.cloud, scope: scopeOf(request), environment: request.environment, binding: request.binding, secret: request.secret, copySecret: request.copySecret });
+const pauseContext = (request: SharedDatabasePauseRequest) => ({ cloud: request.cloud, scope: scopeOf(request), environment: request.environment, binding: request.binding, secret: request.secret });
 
 export const sharedDatabase: SharedDatabaseEntry = {
   plan,

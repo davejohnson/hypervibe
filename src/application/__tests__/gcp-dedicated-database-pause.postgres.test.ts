@@ -1,186 +1,219 @@
 /**
  * Pausing a database on a server of the environment's own, and undoing it,
- * against a real, disposable PostgreSQL set up the way Hypervibe sets up a
- * dedicated database: two logins acting as `app_owner`, which owns the
- * database. Google's API for setting a login's password is replaced by the
- * local superuser doing exactly that; Secret Manager by a map.
+ * through the real Google ports: Secret Manager answered in memory (so the
+ * real secret write path and its records run), the Admin API's password change
+ * and the connector's sessions redirected to a real, disposable PostgreSQL set
+ * up the way Hypervibe sets up a dedicated database. No cloud is contacted.
  */
-import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
-import pg from 'pg';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type pg from 'pg';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
+import { SecretStore } from '../../adapters/secrets/secret-store.js';
 import type { ActionResult } from '../../domain/plan/converge.executor.js';
-import { pauseDedicatedDatabase, resumeDedicatedDatabase, type DedicatedPauseParams, type DedicatedPausePorts } from '../gcp-dedicated-database-pause.js';
-import { connectionUrl, parseConnectionUrl } from '../infrastructure-engine-database.js';
+import { createCommandContext, type CommandContext } from '../context.js';
+import { googleDedicatedPausePorts, pauseDedicatedDatabase, resumeDedicatedDatabase, type DedicatedPauseParams } from '../gcp-dedicated-database-pause.js';
+import { connectionUrl, databaseCopySecretId, parseConnectionUrl } from '../infrastructure-engine-database.js';
+import { writeSecretVersion } from '../infrastructure-engine.js';
+import { fakeSecretManager, startPostgres, type LocalPostgres } from './pause-fixtures.js';
 
-function postgresBin(): string {
-  const candidates = [process.env.HYPERVIBE_TEST_POSTGRES_BIN, '/Applications/Postgres.app/Contents/Versions/16/bin'].filter((entry): entry is string => Boolean(entry));
-  try { candidates.push(execFileSync('pg_config', ['--bindir'], { encoding: 'utf8' }).trim()); } catch { /* runner installation below */ }
-  if (existsSync('/usr/lib/postgresql')) for (const version of readdirSync('/usr/lib/postgresql').sort((a, b) => Number(b) - Number(a))) candidates.push(`/usr/lib/postgresql/${version}/bin`);
-  const bin = candidates.find((candidate) => existsSync(path.join(candidate, 'initdb')) && existsSync(path.join(candidate, 'pg_ctl')));
-  if (!bin) throw new Error('PostgreSQL tools are required for the database pause tests.');
-  return bin;
-}
+const GCP = 'demo-project';
+const INSTANCE = 'hv-production-db-a1b2c3';
+const CONNECTION = `${GCP}:us-central1:${INSTANCE}`;
 
-const bin = postgresBin();
-const CONNECTION = 'demo-project:us-central1:hv-production-db-a1b2c3';
-const labels = { 'managed-by': 'hypervibe', 'hv-environment': 'env-1' };
-let directory: string | undefined;
-let socket: string;
-let boot: pg.Client;
-const opened = new Set<pg.Client>();
-const stop = () => {
-  if (directory && existsSync(path.join(directory, 'data/postmaster.pid'))) spawnSync(`${bin}/pg_ctl`, ['-D', path.join(directory, 'data'), '-m', 'fast', '-w', 'stop'], { stdio: 'pipe' });
-};
-async function connect(user: string, password: string | undefined, database = 'app'): Promise<pg.Client> {
-  const client = new pg.Client({ host: socket, user, password, database, connectionTimeoutMillis: 10_000 });
-  client.on('error', () => {});
-  await client.connect();
-  opened.add(client);
-  return client;
-}
-const close = async (client: pg.Client) => { opened.delete(client); await client.end().catch(() => {}); };
+/** Reached by the mocked Admin API and connector below, which are hoisted above everything else in this file. */
+const local = vi.hoisted(() => ({
+  server: undefined as unknown as import('./pause-fixtures.js').LocalPostgres,
+  /** Passwords handed to the Admin API, applied or not. */
+  passwords: [] as string[],
+  /** The Admin API answers "another operation is in progress" this many times. */
+  busy: 0,
+  /** Password changes still to succeed before one is cut off with an unknown outcome. */
+  cutAfter: undefined as number | undefined,
+  /** Logins the server has no free connection for. */
+  full: new Set<string>(),
+  /** Sessions that ignore being ended. */
+  stubborn: false,
+}));
+
+vi.mock('../infrastructure-engine-database.js', async (original) => ({
+  ...await original<typeof import('../infrastructure-engine-database.js')>(),
+  setCloudSqlLoginPassword: async (_token: string, _project: string, _instance: string, login: string, password: string) => {
+    local.passwords.push(password);
+    if (local.busy > 0) { local.busy--; return { success: false, message: `Setting database login ${login} failed (HTTP 409).`, error: 'HTTP 409' }; }
+    if (local.cutAfter !== undefined && local.cutAfter-- === 0) { local.cutAfter = undefined; return { success: false, status: 'pending', message: `The change to database login ${login} has an unknown outcome.` }; }
+    await local.server.boot.query(`ALTER ROLE ${login} PASSWORD '${password}'`);
+    return 'done';
+  },
+  withCloudSqlSession: async (_account: unknown, _connectionName: string, user: string, password: string, database: string, work: (client: pg.Client) => Promise<unknown>) => {
+    if (local.full.has(user)) throw Object.assign(new Error('sorry, too many clients already'), { code: '53300' });
+    const client = await local.server.connect(user, password, database);
+    const real = client.query.bind(client);
+    if (local.stubborn) (client as { query: unknown }).query = (text: string, values?: unknown[]) => (text.includes('pg_terminate_backend') ? Promise.resolve({ rows: [] }) : real(text, values as never));
+    try { return await work(client); } finally { await local.server.close(client); }
+  },
+}));
+
+const google = fakeSecretManager(GCP);
+let logins = ['app_a', 'app_b', 'postgres'];
+let home: string;
+let ctx: CommandContext;
+let server: LocalPostgres;
+let params: DedicatedPauseParams;
+let counter = 0;
+let neighbours = 0;
+const shown: ActionResult[] = [];
+const ports = () => googleDedicatedPausePorts({ token: 'synthetic-token', credentials: () => ({}), gcpProjectId: GCP, instanceName: INSTANCE, connectionName: CONNECTION, databaseName: 'app' });
+const pause = async (override: Partial<DedicatedPauseParams> = {}) => { const result = await pauseDedicatedDatabase(ports(), { ...params, ...override }); shown.push(result); return result; };
+const resume = async (override: Partial<DedicatedPauseParams> = {}) => { const result = await resumeDedicatedDatabase(ports(), { ...params, ...override }); shown.push(result); return result; };
+const versions = (secretId: string) => google.state.secrets.get(secretId)!.versions;
+const appUrl = () => versions(params.secret.id).at(-1)!;
+const copyId = () => databaseCopySecretId(params.secret.id);
+const copyUrl = () => versions(copyId()).at(-1)!;
 /** Connects the way a service would, with a URL from a secret; resolves to the role it acts as or the PostgreSQL error code. */
 async function reach(url: string): Promise<string> {
   const parsed = parseConnectionUrl(url)!;
   try {
-    const client = await connect(parsed.login, parsed.password, parsed.databaseName);
-    try { return String((await client.query('SELECT current_user AS role')).rows[0].role); } finally { await close(client); }
+    const client = await server.connect(parsed.login, parsed.password, parsed.databaseName);
+    try { return String((await client.query('SELECT current_user AS role')).rows[0].role); } finally { await server.close(client); }
   } catch (error) { return String((error as { code?: string }).code); }
 }
 const alive = (client: pg.Client) => client.query('SELECT 1').then(() => true, () => false);
-
-/** Secret Manager and what Hypervibe records with each version. */
-const secrets = new Map<string, { labels: Record<string, string>; versions: string[] }>();
-const everyPassword: string[] = [];
-let failNext: 'publish' | 'set-second-password' | undefined;
-let passwordsSet = 0;
-const ports: DedicatedPausePorts = {
-  async observeSecret(secretId) {
-    const secret = secrets.get(secretId);
-    return secret ? { state: 'present', value: { labels: secret.labels, hasEnabledVersion: secret.versions.length > 0, ...(secret.versions.length ? { latestVersion: String(secret.versions.length) } : {}) } } : { state: 'absent' };
-  },
-  async readSecretVersion(secretId, version) {
-    const value = secrets.get(secretId)?.versions[Number(version) - 1];
-    return value ? { state: 'present', value } : { state: 'absent' };
-  },
-  async publishSecret(secretId, recorded, value) {
-    if (failNext === 'publish') { failNext = undefined; return { success: false, status: 'pending', message: 'The value write has an unknown outcome.' }; }
-    const secret = secrets.get(secretId)!;
-    secret.versions.push(value);
-    secret.labels = recorded;
-    return undefined;
-  },
-  async setLoginPassword(login, password) {
-    passwordsSet++;
-    if (failNext === 'set-second-password' && passwordsSet % 2 === 0) { failNext = undefined; return { success: false, status: 'pending', message: `The change to database login ${login} has not finished. Run the same command again.` }; }
-    everyPassword.push(password);
-    await boot.query(`ALTER ROLE ${login} PASSWORD '${password}'`);
-    return undefined;
-  },
-  async withSession(login, password, work) {
-    const client = await connect(login, password);
-    try { return await work({ query: (text, values) => client.query(text, values) }); } finally { await close(client); }
-  },
-};
-const params: DedicatedPauseParams = { environmentName: 'production', instanceName: 'hv-production-db-a1b2c3', connectionName: CONNECTION, databaseName: 'app',
-  secret: { id: 'hv-production-database-url', labels, version: '1' }, copySecret: { id: 'hv-production-database-copy', labels }, sessionWaitMs: 3000 };
-const appUrl = () => secrets.get(params.secret.id)!.versions[0]!;
-const copyUrl = () => secrets.get(params.copySecret.id)!.versions.at(-1)!;
+const session = (url: string) => { const parsed = parseConnectionUrl(url)!; return server.connect(parsed.login, parsed.password, parsed.databaseName); };
 const DENIED = ['28P01', '28000'];
-const shown: ActionResult[] = [];
-const pause = async (override: Partial<DedicatedPauseParams> = {}) => { const result = await pauseDedicatedDatabase(ports, { ...params, ...override }); shown.push(result); return result; };
-const resume = async (override: Partial<DedicatedPauseParams> = {}) => { const result = await resumeDedicatedDatabase(ports, { ...params, ...override }); shown.push(result); return result; };
+const SHUT_OUT = /^production-\d+'s app is shut out of its database, and the pause did not finish: .* Run the same command again to finish it, or undo the pause to let the app back in\.$/;
 
 beforeAll(async () => {
-  directory = mkdtempSync('/tmp/hv-pause-own-');
-  process.once('exit', stop);
-  socket = path.join(directory, 's');
-  mkdirSync(socket);
-  execFileSync(`${bin}/initdb`, ['-D', path.join(directory, 'data'), '-U', 'boot', '--auth-local=trust', '--auth-host=reject', '--no-locale'], { stdio: 'pipe' });
-  writeFileSync(path.join(directory, 'data/postgresql.conf'), `listen_addresses = ''\nunix_socket_directories = '${socket}'\nunix_socket_permissions = 0700\npassword_encryption = 'scram-sha-256'\nmax_connections = 60\n`);
-  writeFileSync(path.join(directory, 'data/pg_hba.conf'), 'local all boot trust\nlocal all all scram-sha-256\n');
-  execFileSync(`${bin}/pg_ctl`, ['-D', path.join(directory, 'data'), '-l', path.join(directory, 'postgres.log'), '-w', 'start'], { stdio: 'pipe' });
-  boot = await connect('boot', undefined, 'postgres');
+  server = local.server = await startPostgres('hv-pause-own');
   // As Hypervibe's first credential step leaves a dedicated database.
-  await boot.query(`CREATE ROLE app_owner NOLOGIN`);
+  await server.boot.query('CREATE ROLE app_owner NOLOGIN');
   for (const login of ['app_a', 'app_b']) {
-    await boot.query(`CREATE ROLE ${login} LOGIN PASSWORD 'never-published-${login}' IN ROLE app_owner`);
-    await boot.query(`ALTER ROLE ${login} SET role = 'app_owner'`);
+    await server.boot.query(`CREATE ROLE ${login} LOGIN PASSWORD 'never-published-${login}' IN ROLE app_owner`);
+    await server.boot.query(`ALTER ROLE ${login} SET role = 'app_owner'`);
   }
-  await boot.query(`CREATE ROLE reporting LOGIN PASSWORD 'reporting-password-0123'`);
-  await boot.query(`CREATE DATABASE app OWNER app_owner TEMPLATE template0`);
+  await server.boot.query(`CREATE ROLE reporting LOGIN PASSWORD 'reporting-password-0123'`);
+  await server.boot.query('CREATE DATABASE app OWNER app_owner TEMPLATE template0');
+  await server.boot.query('CREATE DATABASE elsewhere TEMPLATE template0');
+  home = mkdtempSync(path.join(tmpdir(), 'hv-pause-own-'));
+  vi.stubEnv('HYPERVIBE_DATA_DIR', home);
+  SecretStore.resetInstance();
+  SqliteAdapter.resetInstance();
+  SqliteAdapter.getInstance(path.join(home, 'test.db')).migrate();
+  vi.stubGlobal('fetch', vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const secret = await google.answer(input, init);
+    if (secret) return secret;
+    const url = new URL(String(input));
+    if (url.hostname === 'sqladmin.googleapis.com' && url.pathname.endsWith('/users')) return google.json({ items: logins.map((name) => ({ name })) });
+    throw new Error(`Unexpected request ${init?.method ?? 'GET'} ${url.hostname}${url.pathname}`);
+  }));
+  ctx = createCommandContext();
 }, 60_000);
 
-/** Each test starts from a running app: app_a's password is in version 1 of the connection secret; app_b's is one nobody has. */
+/** Each test is its own environment with a running app: app_a's password is in version 1 of its connection secret, stored the real way. */
 beforeEach(async () => {
-  failNext = undefined;
-  const password = 'app-password-published-0123456789';
-  everyPassword.push(password);
-  await boot.query(`ALTER ROLE app_a PASSWORD '${password}'`);
-  await boot.query(`ALTER ROLE app_b PASSWORD 'discarded-${Date.now()}'`);
-  secrets.clear();
-  secrets.set(params.secret.id, { labels: { ...labels, 'hv-db-instance': params.instanceName, 'hv-db-login': 'app_a', 'hv-db-generation': '1' }, versions: [connectionUrl('app_a', password, 'app', CONNECTION)] });
-  secrets.set(params.copySecret.id, { labels, versions: [] });
+  Object.assign(local, { busy: 0, cutAfter: undefined, stubborn: false });
+  local.full.clear();
+  logins = ['app_a', 'app_b', 'postgres'];
+  const name = `production-${++counter}`;
+  const project = ctx.repos.projects.create({ name: `app-${counter}` });
+  const environment = ctx.repos.environments.create({ projectId: project.id, name });
+  const labels = { 'managed-by': 'hypervibe', 'hv-environment': environment.id };
+  params = { environmentName: name, instanceName: INSTANCE, connectionName: CONNECTION, databaseName: 'app', secret: { id: `hv-${name}-database-url`, labels, version: '1' }, sessionWaitMs: 1500 };
+  google.state.secrets.set(params.secret.id, { labels, versions: [] });
+  google.state.secrets.set(copyId(), { labels, versions: [] });
+  const password = `app-password-published-${counter}-0123456789`;
+  local.passwords.push(password);
+  await server.boot.query(`ALTER ROLE app_a PASSWORD '${password}'`);
+  await server.boot.query(`ALTER ROLE app_b PASSWORD 'discarded-${counter}-${Date.now()}'`);
+  expect(await writeSecretVersion('synthetic-token', GCP, params.secret.id, { ...labels, 'hv-db-instance': INSTANCE, 'hv-db-login': 'app_a', 'hv-db-generation': '1' }, connectionUrl('app_a', password, 'app', CONNECTION))).toBeUndefined();
+  shown.length = 0;
 });
 
 afterEach(async () => {
-  for (const client of [...opened]) if (client !== boot) await close(client);
+  // Whatever a test did, nothing it was told carries a password: neither one handed to Google, nor one stored in a secret, kept or not.
+  const text = JSON.stringify(shown);
+  for (const secret of [...local.passwords, ...google.state.sent.map((url) => parseConnectionUrl(url)?.password ?? url)]) expect(text).not.toContain(secret);
+  await server.closeOthers();
 });
 
 afterAll(async () => {
-  try {
-    for (const client of [...opened]) await close(client);
-  } finally {
-    stop();
-    if (directory) {
-      const stopped = !existsSync(path.join(directory, 'data/postmaster.pid'));
-      rmSync(directory, { recursive: true, force: true });
-      expect(stopped).toBe(true);
-    }
-  }
+  vi.unstubAllGlobals(); vi.unstubAllEnvs();
+  SecretStore.resetInstance(); SqliteAdapter.resetInstance();
+  rmSync(home, { recursive: true, force: true });
+  expect(await server.stop()).toBe(true);
 });
 
 describe('pausing a database on a server of its own', () => {
   it('shuts the app out, ends its sessions, proves nobody is connected, and leaves one other way in for the copy', async () => {
-    const service = await connect('app_a', parseConnectionUrl(appUrl())!.password);
+    const service = await session(appUrl());
     expect(await reach(appUrl())).toBe('app_owner');
     const result = await pause();
-    expect(result).toEqual({ success: true, data: { paused: true, copySecretId: params.copySecret.id, copySecretVersion: '1' },
-      message: 'production\'s database is paused: the app cannot connect and no session is open. Only the copy login (hv-production-database-copy, version 1) can.' });
+    expect(result).toEqual({ success: true, data: { paused: true, copySecretId: copyId(), copySecretVersion: '1' },
+      message: `${params.environmentName}'s database is paused: the app cannot connect and no session is open. Only the copy login (${copyId()}, version 1) can.` });
     expect(DENIED).toContain(await reach(appUrl()));
     expect(await alive(service)).toBe(false);
-    expect((await boot.query(`SELECT count(*)::int AS open FROM pg_stat_activity WHERE datname = 'app'`)).rows[0].open).toBe(0);
+    expect((await server.boot.query(`SELECT count(*)::int AS open FROM pg_stat_activity WHERE datname = 'app'`)).rows[0].open).toBe(0);
     // The copy login is the login the app did not hold, acting as the owner, and its URL is in its own secret only.
     expect(parseConnectionUrl(copyUrl())).toMatchObject({ login: 'app_b', databaseName: 'app', connectionName: CONNECTION });
     expect(await reach(copyUrl())).toBe('app_owner');
-    expect(secrets.get(params.copySecret.id)!.labels).toMatchObject({ 'hv-db-login': 'app_b', 'hv-db-copy': 'true', 'hv-environment': 'env-1' });
-    expect(secrets.get(params.secret.id)!.versions).toHaveLength(1);
+    expect(versions(params.secret.id)).toHaveLength(1);
   });
 
   it('undoes the pause: the exact connection the services hold works again, and the copy login does not', async () => {
-    await pause();
+    expect((await pause()).success).toBe(true);
     const copy = copyUrl();
-    const copying = await connect('app_b', parseConnectionUrl(copy)!.password);
+    const copying = await session(copy);
     const result = await resume();
     expect(result).toEqual({ success: true, data: { paused: false },
-      message: 'production\'s database is no longer paused: the connection its services hold (hv-production-database-url, version 1) works again, and the copy login\'s password is one nobody has.' });
+      message: `${params.environmentName}'s database is no longer paused: the connection its services hold (${params.secret.id}, version 1) works again, and the copy login's password is one nobody has.` });
     expect(await reach(appUrl())).toBe('app_owner');
     expect(DENIED).toContain(await reach(copy));
     expect(await alive(copying)).toBe(false);
     // The app's secret was never rewritten: its services need no new version.
-    expect(secrets.get(params.secret.id)!.versions).toHaveLength(1);
+    expect(versions(params.secret.id)).toHaveLength(1);
   });
 
-  it('is not paused while anyone else is still connected, and says so; the app stays shut out until it is run again', async () => {
-    const person = await connect('reporting', 'reporting-password-0123');
+  it('is not paused while anyone else is connected to the database, counts each session once, and keeps the app out', async () => {
+    const person = await server.connect('reporting', 'reporting-password-0123', 'app');
+    const elsewhere = await server.connect('reporting', 'reporting-password-0123', 'elsewhere');
     const waiting = await pause();
-    expect(waiting).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(/1 session\(s\) are still connected to it \(1 of them not the app's\)\. It is not paused until they are gone/) });
+    expect(waiting).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(SHUT_OUT) });
+    expect(waiting.message).toMatch(/: 1 session\(s\) are still connected to its database \(1 of them not the app's\)\./);
     expect(DENIED).toContain(await reach(appUrl()));
-    expect(secrets.get(params.copySecret.id)!.versions).toHaveLength(0);
-    await close(person);
+    expect(versions(copyId())).toHaveLength(0);
+    await server.close(person);
+    // Someone on another database of the same server does not count.
     expect((await pause()).success).toBe(true);
+    expect(await alive(elsewhere)).toBe(true);
+  });
+
+  it('is not paused while a session of the app will not end, counts it once, and says the app is shut out', async () => {
+    const service = await session(appUrl());
+    local.stubborn = true;
+    const waiting = await pause();
+    expect(waiting).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(SHUT_OUT) });
+    expect(waiting.message).toMatch(/: 1 session\(s\) are still connected to its database\. Run/);
+    expect(await alive(service)).toBe(true);
+    expect(versions(copyId())).toHaveLength(0);
+    local.stubborn = false;
+    expect((await pause()).success).toBe(true);
+    expect(await alive(service)).toBe(false);
+  });
+
+  it('does not give the app back while a copy session will not end', async () => {
+    expect((await pause()).success).toBe(true);
+    const copying = await session(copyUrl());
+    local.stubborn = true;
+    const waiting = await resume();
+    expect(waiting).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(/1 session\(s\) of the copy login are still connected, so the app's password was not given back\. The app may still be shut out/) });
+    expect(DENIED).toContain(await reach(appUrl()));
+    expect(await alive(copying)).toBe(true);
+    local.stubborn = false;
+    expect((await resume()).success).toBe(true);
+    expect(await alive(copying)).toBe(false);
+    expect(await reach(appUrl())).toBe('app_owner');
   });
 
   it('can be repeated and undone in any order, each time ending in a known state', async () => {
@@ -193,60 +226,116 @@ describe('pausing a database on a server of its own', () => {
     expect(DENIED).toContain(await reach(appUrl()));
     expect((await resume()).success).toBe(true);
     // Undoing twice, and undoing a database that is not paused: the app keeps working, and its open session is left alone.
-    const service = await connect('app_a', parseConnectionUrl(appUrl())!.password);
+    const service = await session(appUrl());
     expect((await resume()).success).toBe(true);
     expect(await alive(service)).toBe(true);
     expect(await reach(appUrl())).toBe('app_owner');
   });
 
-  it.each(['set-second-password', 'publish'] as const)('recovers from a pause cut off at "%s", by undoing or by pausing again', async (step) => {
-    failNext = step;
-    const cut = await pause();
-    expect(cut).toMatchObject({ success: false, status: 'pending' });
-    // Cut off anywhere, the app is already shut out; nothing in between counts as running.
-    expect(DENIED).toContain(await reach(appUrl()));
+  it.each([[0, 'the first'], [1, 'the second']])('says the app is shut out when password change number %i is cut off, and recovers by undoing or by pausing again', async (cut) => {
+    local.cutAfter = cut;
+    const stopped = await pause();
+    expect(stopped).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(SHUT_OUT) });
+    expect(stopped.message).toMatch(/the password of app_[ab] could not be changed \(the server is busy with another change\)/);
     expect((await resume()).success).toBe(true);
     expect(await reach(appUrl())).toBe('app_owner');
-    failNext = step;
+    local.cutAfter = cut;
     await pause();
     expect((await pause()).success).toBe(true);
     expect(await reach(copyUrl())).toBe('app_owner');
     expect(DENIED).toContain(await reach(appUrl()));
   });
 
-  it.each([
-    ['a password change is still in flight', () => { secrets.get(params.secret.id)!.labels['hv-db-retire'] = 'app_b'; }, {}, /password is still being changed/],
-    ['the services are pinned to an older version than the newest', () => {}, { secret: { ...params.secret, version: '2' } }, /newer version than the one its services use/],
-    ['the secret was made for another server', () => { secrets.get(params.secret.id)!.labels['hv-db-instance'] = 'hv-other-db'; }, {}, /does not hold a login for database server/],
-    ['the secret belongs to another environment', () => { secrets.get(params.secret.id)!.labels['hv-environment'] = 'env-2'; }, {}, /not owned by this Hypervibe environment/],
-    ['the secret records a login Hypervibe did not make', () => { secrets.get(params.secret.id)!.labels['hv-db-login'] = 'postgres'; }, {}, /does not hold a login for database server/],
-    ['there is no connection secret', () => { secrets.delete(params.secret.id); }, {}, /has no connection secret/],
-    ['the copy would go into the app\'s own secret', () => {}, { copySecret: { id: params.secret.id, labels } }, /needs a secret of its own/],
-  ] as Array<[string, () => void, Partial<DedicatedPauseParams>, RegExp]>)('refuses to pause or undo, changing nothing, when %s', async (_what, arrange, override, reason) => {
-    const url = appUrl();
-    arrange();
-    for (const call of [pause, resume]) {
-      expect(await call(override)).toMatchObject({ success: false, status: 'blocked', message: expect.stringMatching(reason) });
-      expect(await reach(url)).toBe('app_owner');
-    }
-  });
-
-  it('refuses to undo when the pinned version is not the recorded connection, and gives no login back', async () => {
-    await pause();
-    for (const wrong of [connectionUrl('app_b', 'x'.repeat(24), 'app', CONNECTION), connectionUrl('app_a', 'x'.repeat(24), 'other', CONNECTION), connectionUrl('app_a', 'x'.repeat(24), 'app', 'demo-project:us-central1:hv-other'), 'not a url']) {
-      const kept = secrets.get(params.secret.id)!.versions[0]!;
-      secrets.get(params.secret.id)!.versions[0] = wrong;
-      expect(await resume()).toMatchObject({ success: false, status: 'blocked', message: expect.stringMatching(/is not the connection to production's database that was recorded\. Nothing was changed/) });
-      secrets.get(params.secret.id)!.versions[0] = kept;
-      expect(DENIED).toContain(await reach(kept));
-    }
+  it('recovers when Google stored the copy login and Hypervibe died before recording it', async () => {
+    google.state.loseNextAnswer = true;
+    google.state.failNextAccess = true;
+    const stopped = await pause();
+    expect(stopped).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(SHUT_OUT) });
+    expect(stopped.message).toMatch(new RegExp(`the copy login could not be stored in ${copyId()}\\.`));
+    // Google holds a version nobody recorded. Pausing again sets it aside and stores a new one; undoing works too.
+    expect(versions(copyId())).toHaveLength(1);
+    const again = await pause();
+    expect(again).toMatchObject({ success: true, data: { copySecretVersion: '2' } });
+    expect(DENIED).toContain(await reach(versions(copyId())[0]!));
     expect(await reach(copyUrl())).toBe('app_owner');
+    google.state.loseNextAnswer = true;
+    google.state.failNextAccess = true;
+    await pause();
+    expect((await resume()).success).toBe(true);
+    expect(await reach(appUrl())).toBe('app_owner');
   });
 
-  it('never puts a password in a result', () => {
-    const text = JSON.stringify(shown);
-    expect(shown.length).toBeGreaterThan(20);
-    expect(everyPassword.length).toBeGreaterThan(10);
-    for (const password of everyPassword) expect(text).not.toContain(password);
+  it('treats a busy Admin API as "run again", before and after the app is shut out', async () => {
+    local.busy = 1;
+    const first = await pause();
+    expect(first).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(/the password of app_a could not be changed \(the server is busy with another change\)/) });
+    expect((await pause()).success).toBe(true);
+    local.busy = 1;
+    expect(await resume()).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(/the copy login's password could not be changed \(the server is busy with another change\)\. The app may still be shut out/) });
+    expect((await resume()).success).toBe(true);
+  });
+
+  it('changes nothing when the server has no free connection for the app\'s login, and says the app is shut out when that happens later', async () => {
+    local.full.add('app_a');
+    expect(await pause()).toMatchObject({ success: false, status: 'blocked', message: expect.stringMatching(/has no free connection, so its app's sessions cannot be ended from here\. Nothing was changed/) });
+    expect(await reach(appUrl())).toBe('app_owner');
+    local.full.clear();
+    local.full.add('app_b');
+    const later = await pause();
+    expect(later).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(SHUT_OUT) });
+    expect(later.message).toMatch(/the database server has no free connection to work through/);
+    expect(DENIED).toContain(await reach(appUrl()));
+    expect(await resume()).toMatchObject({ success: false, status: 'pending', message: expect.stringMatching(/no free connection to work through\. The app may still be shut out/) });
+    local.full.clear();
+    expect((await resume()).success).toBe(true);
+    expect(await reach(appUrl())).toBe('app_owner');
+  });
+
+  it('refuses, with the app untouched, when one of the two logins is missing', async () => {
+    logins = ['app_a', 'postgres'];
+    for (const call of [pause, resume]) expect(await call()).toMatchObject({ success: false, status: 'blocked', message: `Database login app_b does not exist on ${INSTANCE}. Nothing was changed.` });
+    expect(await reach(appUrl())).toBe('app_owner');
+  });
+
+  describe('refuses to pause or undo, changing nothing', () => {
+    const neighbour = () => {
+      const project = ctx.repos.projects.create({ name: `neighbour-${counter}-${++neighbours}` });
+      return { 'managed-by': 'hypervibe', 'hv-environment': ctx.repos.environments.create({ projectId: project.id, name: 'staging' }).id };
+    };
+    const relabel = (secretId: string, change: Record<string, string | undefined>) => {
+      const environment = ctx.repos.environments.findById(params.secret.labels['hv-environment']!)!;
+      const engine = (environment.platformBindings as { engine: { secretMetadata: Record<string, { labels: Record<string, string | undefined> }> } }).engine;
+      Object.assign(engine.secretMetadata[secretId]!.labels, change);
+      ctx.repos.environments.updatePlatformBindings(environment.id, { engine });
+    };
+    const cases: Array<[string, () => Promise<void> | void, () => Partial<DedicatedPauseParams>, RegExp]> = [
+      ['a password change is still in flight', () => relabel(params.secret.id, { 'hv-db-retire': 'app_b' }), () => ({}), /password is still being changed/],
+      ['the services are pinned to an older version than the newest', async () => { await writeSecretVersion('synthetic-token', GCP, params.secret.id, { ...params.secret.labels, 'hv-db-instance': INSTANCE, 'hv-db-login': 'app_a' }, appUrl()); }, () => ({}),
+        /services use version 1 of its connection secret, which is not its newest \(2\)/],
+      ['the secret was made for another server', () => relabel(params.secret.id, { 'hv-db-instance': 'hv-other-db' }), () => ({}), /does not hold a login for database server/],
+      ['the secret records a login Hypervibe did not make', () => relabel(params.secret.id, { 'hv-db-login': 'postgres' }), () => ({}), /does not hold a login for database server/],
+      ['the caller names another environment as the owner', () => {}, () => ({ secret: { ...params.secret, labels: neighbour() } }), /not owned by this Hypervibe environment/],
+      ['the caller names no owner at all', () => {}, () => ({ secret: { ...params.secret, labels: {} } }), /was not named with the environment it belongs to/],
+      ['there is no connection secret', () => {}, () => ({ secret: { ...params.secret, id: 'hv-nothing-database-url' } }), /has no connection secret/],
+      ['the secret for the copy login does not exist', () => { google.state.secrets.delete(copyId()); }, () => ({}), /does not exist yet\. Nothing was changed/],
+      ['the secret for the copy login is a neighbour\'s', () => { google.state.secrets.get(copyId())!.labels = neighbour(); }, () => ({}), /does not belong to production-\d+\. Nothing was changed/],
+      ['the secret for the copy login has no owner', () => { google.state.secrets.get(copyId())!.labels = {}; }, () => ({}), /does not belong to production-\d+\. Nothing was changed/],
+      ['the secret for the copy login already holds something that is not a copy login', async () => { await writeSecretVersion('synthetic-token', GCP, copyId(), { ...params.secret.labels }, 'some-app-value'); }, () => ({}),
+        /holds something other than a copy login\. Nothing was changed/],
+      ['the pinned version is not the recorded connection', () => { versions(params.secret.id)[0] = connectionUrl('app_b', 'x'.repeat(24), 'app', CONNECTION); }, () => ({}), /is not the connection to production-\d+'s database that was recorded\. Nothing was changed/],
+    ];
+    it.each(cases)('when %s', async (_what, arrange, override, reason) => {
+      const url = appUrl();
+      const service = await session(url);
+      await arrange();
+      const copies = google.state.secrets.get(copyId())?.versions.length;
+      for (const call of [pause, resume]) {
+        expect(await call(override())).toMatchObject({ success: false, status: 'blocked', message: expect.stringMatching(reason) });
+        // The app's own password still works and its session was never touched.
+        expect(await alive(service)).toBe(true);
+        expect((await server.connect('app_a', parseConnectionUrl(url)!.password, 'app').then((client) => server.close(client).then(() => 'in'), () => 'out'))).toBe('in');
+      }
+      expect(google.state.secrets.get(copyId())?.versions.length).toBe(copies);
+    });
   });
 });

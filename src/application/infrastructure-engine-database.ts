@@ -92,6 +92,15 @@ export function connectionUrl(login: string, secret: string, databaseName: strin
   return `postgresql://${login}:${encodeURIComponent(secret)}@/${databaseName}?host=/cloudsql/${connectionName}`;
 }
 
+/**
+ * The one secret that may hold a copy login's URL while a database is paused, named after the environment's own
+ * connection secret. Deriving it, instead of taking a name, means a pause can never be pointed at another secret.
+ * It must never be mounted into a service.
+ */
+export function databaseCopySecretId(connectionSecretId: string): string {
+  return `${connectionSecretId}-copy`;
+}
+
 /** Reads back exactly what `connectionUrl` writes; anything else is not a Hypervibe connection URL. The password is for use in memory only. */
 export function parseConnectionUrl(url: string): { login: string; password: string; databaseName: string; connectionName: string } | undefined {
   const parts = /^postgresql:\/\/([a-z][a-z0-9_]{0,62}):([^@/:?#]+)@\/([a-z][a-z0-9_]{0,62})\?host=\/cloudsql\/([a-z][a-z0-9-]+:[a-z0-9-]+:[a-z][a-z0-9-]+)$/.exec(url);

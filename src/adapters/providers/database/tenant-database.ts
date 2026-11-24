@@ -513,32 +513,75 @@ export async function retireTenantLogin(server: TenantServer, params: TenantIden
 
 /**
  * Pause: neither login of a ready tenant can log in, their sessions are ended,
- * and every other session in the tenant's database is counted. Unlike
- * retirement the passwords are kept, so `resumeTenantLogin` can switch a login
- * back on exactly as it was. Safe to repeat. The logins are off even when
- * sessions had not ended within the wait; the counts say whether the database
- * is quiet yet.
+ * and nobody else is connected to the tenant's database. Then, and only then,
+ * `copyLogin` is given `copyPassword` as the one way in, the database is
+ * checked to be quiet once more, and `whilePaused` runs.
+ *
+ * All of it happens under the lock every other change to the server takes, so
+ * nothing can switch a login back on between the steps. Unlike retirement the
+ * other login's password is kept, so `resumeTenant` can switch it back on
+ * exactly as it was. Safe to repeat.
+ *
+ * When sessions will not end, or someone else is connected, the logins stay
+ * off, nothing further is done, and the counts say why: `remainingSessions`
+ * are the tenant's own logins', `otherSessions` everyone else's.
  */
-export async function pauseTenantLogins(server: TenantServer, params: TenantIdentity): Promise<{ remainingSessions: number; otherSessions: number }> {
+export async function pauseTenant<T>(server: TenantServer, params: TenantIdentity & { copyLogin: string; copyPassword: string; whilePaused: () => Promise<T> }):
+Promise<{ remainingSessions: number; otherSessions: number; outcome?: T }> {
   const { names, tenantId } = checked(params);
+  const copyLogin = checkedLogin(names, params.copyLogin);
+  const { copyPassword, whilePaused } = params;
+  if (typeof copyPassword !== 'string' || copyPassword.length < 16) throw new Error('A tenant login password must be at least 16 characters.');
+  const verifier = scramVerifier(copyPassword);
+  if (!VERIFIER.test(verifier)) throw new Error('Unexpected SCRAM verifier format.');
+  const { admin } = server;
   const sessionWaitMs = waitOption(server.sessionWaitMs, 5000, 'session');
+  /** Everyone connected to this database but this session: the tenant's logins first, then everyone else. */
+  const connected = async (): Promise<{ remainingSessions: number; otherSessions: number }> => {
+    const rows = await admin.query(`SELECT count(*) FILTER (WHERE usename IN ($2::name, $3::name))::int AS own, count(*) FILTER (WHERE usename IS DISTINCT FROM $2::name AND usename IS DISTINCT FROM $3::name)::int AS others
+      FROM pg_catalog.pg_stat_activity WHERE datname = $1::name AND pid <> pg_catalog.pg_backend_pid()`, [names.database, ...names.logins]);
+    return { remainingSessions: Number(rows.rows[0]?.own), otherSessions: Number(rows.rows[0]?.others) };
+  };
   return locked(server, 'exclusive', async () => {
-    requireReady(await observe(server.admin, names, tenantId), names);
-    for (const login of names.logins) await server.admin.query(`ALTER ROLE ${ident(login)} NOLOGIN`);
-    const remainingSessions = await endSessions(server.admin, [...names.logins], sessionWaitMs);
-    // Anyone else connected to this database (a person's own session, another tool) could still write to it.
-    const others = await server.admin.query(`SELECT count(*)::int AS open FROM pg_catalog.pg_stat_activity WHERE datname = $1::name AND pid <> pg_catalog.pg_backend_pid()`, [names.database]);
-    return { remainingSessions, otherSessions: Number(others.rows[0]?.open) };
+    requireReady(await observe(admin, names, tenantId), names);
+    for (const login of names.logins) await admin.query(`ALTER ROLE ${ident(login)} NOLOGIN`);
+    // The logins' sessions anywhere on the server are ended; what is left of them counts even outside this database.
+    const elsewhere = await endSessions(admin, [...names.logins], sessionWaitMs);
+    const before = await connected();
+    if (elsewhere > 0 || before.remainingSessions > 0 || before.otherSessions > 0) return { remainingSessions: Math.max(elsewhere, before.remainingSessions), otherSessions: before.otherSessions };
+    try {
+      await admin.query(`ALTER ROLE ${ident(copyLogin)} LOGIN PASSWORD ${literal(verifier)}`);
+    } catch (error) {
+      // A driver may attach the statement to its error. Keep only the PostgreSQL error code.
+      const code = (error as { code?: unknown } | null)?.code;
+      throw new Error(`The password for ${copyLogin} could not be set${typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? ` (PostgreSQL error ${code})` : ''}.`);
+    }
+    // Looked at once more with everything in place: only this session may be here.
+    const quiet = await connected();
+    if (quiet.remainingSessions > 0 || quiet.otherSessions > 0) return quiet;
+    return { ...quiet, outcome: await whilePaused() };
   });
 }
 
-/** Undoes a pause for one login of a ready tenant: it may log in again with the password it already had. Sets no password. */
-export async function resumeTenantLogin(server: TenantServer, params: TenantIdentity & { login: string }): Promise<void> {
+/**
+ * Undoes a pause: the copy login is switched off for good (no password) and its
+ * sessions ended; only when none of them is left may `login` log in again, with
+ * the password it already had. Sets no password. Under the same lock, so the app
+ * and a copy can never both be let in. Safe to repeat, and on a tenant that was
+ * never paused.
+ */
+export async function resumeTenant(server: TenantServer, params: TenantIdentity & { login: string; copyLogin: string }): Promise<{ remainingSessions: number }> {
   const { names, tenantId } = checked(params);
   const login = checkedLogin(names, params.login);
-  await locked(server, 'exclusive', async () => {
-    requireReady(await observe(server.admin, names, tenantId), names);
-    await server.admin.query(`ALTER ROLE ${ident(login)} LOGIN`);
+  const copyLogin = checkedLogin(names, params.copyLogin);
+  if (login === copyLogin) throw new Error('The login to switch back on cannot be the copy login.');
+  const sessionWaitMs = waitOption(server.sessionWaitMs, 5000, 'session');
+  return locked(server, 'exclusive', async () => {
+    const state = await observe(server.admin, names, tenantId);
+    requireReady(state, names);
+    const remainingSessions = await disableLogins(server.admin, state.v16, [state.roles.find((role) => role.name === copyLogin)!], sessionWaitMs);
+    if (remainingSessions === 0) await server.admin.query(`ALTER ROLE ${ident(login)} LOGIN`);
+    return { remainingSessions };
   });
 }
 

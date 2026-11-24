@@ -729,28 +729,44 @@ real local PostgreSQL servers; not yet run on Google Cloud.
 
 - Paused means the app cannot connect with either of its two logins, their
   sessions are ended, and nobody else is connected to that database. The call
-  succeeds only after it has seen all of that; while a session remains it says
-  so and the app stays shut out until it is run again.
+  succeeds only after it has seen all of that. On the shared server the whole
+  pause runs under the lock every other change to the server takes.
+- Everything that can be refused is checked before the app is touched, and
+  then nothing was changed. From the moment the app is shut out, no outcome
+  says otherwise: whatever goes wrong is reported as unfinished, with the app
+  shut out and the two ways on (run it again, or undo).
 - On the shared server the logins are switched off and keep their passwords.
-  On a server of its own both logins get new passwords through Google's API.
+  On a server of its own both logins get new passwords through Google's API;
+  the app's own login is used for one last session first, so its other
+  sessions can be ended even when the server has no free connection.
 - The login the app does not hold becomes the copy login with a password made
-  for the occasion. Its URL goes to a secret of its own, which must never be
-  mounted into a service. Like every secret of the project it can be read by
-  the app's own cloud identity; that is accepted.
+  for the occasion. Its URL goes to one secret, named after the app's
+  connection secret with `-copy` added, so a pause can never be pointed at
+  another secret. That secret must exist, belong to the same environment and
+  hold nothing but an earlier copy login; it must never be mounted into a
+  service. Like every secret of the project it can be read by the app's own
+  cloud identity; that is accepted.
 - Undoing makes exactly the connection the services are pinned to work again,
-  and proves it by connecting with that secret version. The value is read
-  into memory, and on a server of its own handed back to the same Google API
-  that set it in the first place; it appears in no result, message or log.
-  The app's secret is never rewritten.
+  and proves it by connecting with that secret version. The copy login goes
+  first, and while one of its sessions is still connected the app is not let
+  back in. The value is read into memory, and on a server of its own handed
+  back to the same Google API that set it in the first place; it appears in no
+  result, message or log. The app's secret is never rewritten.
 - Both calls can be repeated and follow each other in any order, whatever was
-  interrupted. Pausing again replaces the copy login's password.
+  interrupted, including Google storing the copy login without Hypervibe
+  hearing back. Pausing again replaces the copy login's password.
 - Refused, with the reason and with nothing changed: a database not fully set
   up, a password change whose previous login is not switched off yet, a
-  connection secret that is not the version the caller named or not this
-  environment's, and a copy secret that is the app's own.
+  connection secret that is not the newest version or not this environment's,
+  a pinned version that is not the recorded connection, a missing login, and
+  a copy secret that is missing, someone else's or holding something else.
 - Not confirmed on Google Cloud: that a login created through the API may end
-  its own other sessions and see other sessions' users, and how long setting
-  two passwords through the API takes, which is part of the pause.
+  its own other sessions and see other sessions' users, that a busy server
+  answers HTTP 409, and how long setting two passwords through the API takes,
+  which is part of the pause.
+- On a server of its own nothing serialises a pause against another change
+  made at the same moment; the last look before it reports success counts
+  every session on the database.
 - Known gap for the move itself: a service can be pointed at a database its
   environment does not create only when the environment creates none
   (`gcp-engine.backend.ts`, where the environment's own instance takes
