@@ -49,7 +49,9 @@ replace them with remembered permission tables or dashboard procedures.
    `hv_plan`. Present the chosen resources, practical changes, costs where known,
    and consequential actions. Share the clickable `reviewUrl` returned with a saved
    plan or test result. The review shows its approval or execution status.
-   After the user approves in the browser, use the returned continuation.
+   Also show the plan in chat in plain words. The user may approve in chat or in
+   the browser; either way, use the returned continuation. Google Cloud setup and
+   access checks are approved in the browser only.
    Reopening the review checks its status without running it.
    `hypervibe reviews` prints a link to the local library. When the server is unavailable,
    `htmlPath` identifies the saved export. To reopen an older plan, use
