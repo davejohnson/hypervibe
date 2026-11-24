@@ -117,6 +117,13 @@ describe('removing a Google project Hypervibe created', () => {
     untouched(cloud);
   });
 
+  it('names the call that removes a leftover shared database server, and only when a database is what is left', async () => {
+    const database = await run(google({ lists: { sqladmin: json(200, { items: [{ name: 'hv-demo-shared-a1b2c3' }] }) } }));
+    expect(database.error).toMatch(/shared database server, it is still running and billed; remove it with hv_plan project="[^"]+" scope="shared-database" intent="remove"\.$/);
+    const service = await run(google({ lists: { 'serving.knative.dev': json(200, { items: [{ metadata: { name: 'web-1' } }] }) } }));
+    expect(service.error).not.toMatch(/shared database server/);
+  });
+
   it.each([
     ['a refused read', json(403, { error: { status: 'PERMISSION_DENIED' } })],
     ['a server error', json(500)],

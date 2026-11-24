@@ -350,6 +350,12 @@ export const planRunDocumentSchema = z.object({
         && !engineOperations.includes(String(action.metadata?.operation)))) {
       ctx.addIssue({ code: 'custom', message: 'Engine plans contain only reviewed engine changes and Hypervibe-owned secret actions.' });
     }
+    // Removing the app's shared database server is a plan of its own: exactly one of its two steps, and never inside an environment's plan.
+    const serverSteps = document.actions.filter((action) => action.metadata?.operation === 'gcpSharedDatabase' && ['unprotect-server', 'remove-server'].includes(String(action.metadata.step)));
+    const serverRemoval = (engine as { serverRemoval?: unknown } | undefined)?.serverRemoval === true;
+    if ((serverSteps.length > 0 || serverRemoval) && !(serverRemoval && serverSteps.length === 1 && document.actions.length === 1)) {
+      ctx.addIssue({ code: 'custom', message: 'A plan to remove the shared database server holds exactly that one step and nothing else.' });
+    }
     return;
   }
   if (document.actions.some((action) => engineSegmentOf(action) || engineOperations.includes(String(action.metadata?.operation)))) {

@@ -662,12 +662,20 @@ Rules it enforces:
 - Connection limits: 15 for an environment whose name contains "prod", 5 for
   every other, so a test environment cannot use up production's.
 
-Removing the server: the module plans it in two confirmed steps (protection
-off, then delete). Each step holds the lock every allocation needs, reads the
+Removing the server has its own plan, apart from any environment:
+`hv_plan project="<name>" scope="shared-database" intent="remove"`, then
+`hv_apply` with the confirmation the plan asks for. It takes two rounds, each
+planned and confirmed on its own: the first turns off deletion protection, the
+second deletes the server and its backups. It is refused at plan while any
+environment's saved record still has a database on the server, and each step
+checks again at apply: it holds the lock every allocation needs, reads the
 server's own list and refuses while any database is on it, marked by Hypervibe
-or not. **No command reaches this yet**, so a shared server stays, and stays
-billed, after its last environment is torn down, and
-`hv_connections action="remove-project"` reports it as a leftover resource.
+or not. When the last environment's database is released, the result says the
+server is still running and billed and names this call;
+`hv_connections action="remove-project"` does the same when a database is what
+is left in the project. Add `env` when the app has environments in more than
+one Google project or region. Verified offline through `hv_plan` and
+`hv_apply`; not yet run against Google Cloud.
 
 Not available on the shared server yet; each is refused with a plain message
 before anything is requested or created: on-demand workers that count pending

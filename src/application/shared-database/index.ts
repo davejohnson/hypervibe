@@ -64,14 +64,25 @@ export interface SharedDatabasePlan {
   reviewed: Record<string, unknown>;
 }
 
+/** What Hypervibe has saved for one of the app's environments. */
+export interface RecordedEnvironment { environment: string; binding: GcpDatabaseBinding | undefined }
+
+/** The exact call that removes the app's shared database server once no environment uses it. */
+export const sharedServerRemovalCall = (projectName: string): string => `hv_plan project=${JSON.stringify(projectName)} scope="shared-database" intent="remove"`;
+
 export interface SharedDatabaseApplyRequest extends SharedDatabaseRequest {
   action: PlanAction;
   reviewed: unknown;
+  /** The app's other environments, so a release can say when it was the last database on the server. */
+  others?: RecordedEnvironment[];
   /** Saves the database part of the environment's binding at once: a record, or null to forget it. */
   record(database: SharedDatabaseRecord | null): void;
 }
 
-export type SharedServerRequest = Pick<SharedDatabaseRequest, 'project' | 'gcpProjectId' | 'region' | 'engine' | 'cloud'>;
+export type SharedServerRequest = Pick<SharedDatabaseRequest, 'project' | 'gcpProjectId' | 'region' | 'engine' | 'cloud'> & {
+  /** Every environment of the app as saved now. The server is never removed while one of them still records a database on it. */
+  recorded: RecordedEnvironment[];
+};
 export interface SharedServerRemovalPlan { instanceName: string; action: PlanAction; reviewed: Record<string, unknown> }
 
 export interface SharedDatabaseEntry {
@@ -94,6 +105,13 @@ const scopeOf = (request: Pick<SharedDatabaseRequest, 'project' | 'gcpProjectId'
   ({ projectId: request.project.id, gcpProjectId: request.gcpProjectId, region: request.region });
 
 const resource = { kind: 'database' as const, name: 'postgres', provider: 'gcp' };
+
+/** The environments whose saved record puts a database on this app's shared server in this Google project and region. */
+function recordedOn(scope: SharedServerScope, environments: RecordedEnvironment[]): string[] {
+  return environments.filter(({ binding }) => gcpDatabaseOnSharedServer(binding)
+    && (binding!.database!.gcpProjectId ?? scope.gcpProjectId) === scope.gcpProjectId && (binding!.database!.region ?? scope.region) === scope.region).map(({ environment }) => environment);
+}
+const stillRecorded = (names: string[]): string => `${names.join(', ')} still ${names.length === 1 ? 'has its' : 'have their'} database on the app's shared database server. Tear ${names.length === 1 ? 'that environment' : 'those environments'} down, or remove the database from ${names.length === 1 ? 'its' : 'their'} spec and apply, before removing the server. Nothing was changed.`;
 const serverMetadata = (scope: SharedServerScope, step: SharedDatabaseStep, instanceName: string): Record<string, unknown> =>
   ({ operation: SHARED_DATABASE_OPERATION, step, gcpProjectId: scope.gcpProjectId, region: scope.region, instanceName, databaseName: '', tenantId: '' } satisfies StepMetadata);
 
@@ -227,6 +245,8 @@ async function plan(request: SharedDatabasePlanRequest): Promise<SharedDatabaseP
 async function planServerRemoval(request: SharedServerRequest): Promise<SharedServerRemovalPlan | { none: true } | { blocked: string }> {
   try {
     const scope = scopeOf(request);
+    const users = recordedOn(scope, request.recorded);
+    if (users.length) return { blocked: stillRecorded(users) };
     const listed = await request.cloud.listServers(scope.gcpProjectId);
     if (listed.state === 'unknown') return { blocked: listed.reason };
     const found = findSharedServer(listed.servers, scope);
@@ -285,7 +305,18 @@ export const sharedDatabase: SharedDatabaseEntry = {
   plan,
   handles: (action) => action.metadata?.operation === SHARED_DATABASE_OPERATION,
   // An environment's plan can never carry a step that removes the server, and the removal can never carry an environment's.
-  apply: (request) => run(request, false),
+  async apply(request) {
+    const result = await run(request, false);
+    const metadata = request.action.metadata as unknown as StepMetadata;
+    // The last database is gone and the server is not: say so, with the one call that removes it.
+    if (result.success && metadata.step === 'release' && request.others && !recordedOn(scopeOf(request), request.others).length) {
+      return { ...result, message: `${result.message} No other environment of ${request.project.name} is recorded on that server; it is still running and still billed. To remove it: ${sharedServerRemovalCall(request.project.name)}.` };
+    }
+    return result;
+  },
   planServerRemoval,
-  applyServerRemoval: (request) => run(request, true),
+  async applyServerRemoval(request) {
+    const users = recordedOn(scopeOf(request), request.recorded);
+    return users.length ? { success: false, status: 'blocked', message: stillRecorded(users) } : run(request, true);
+  },
 };

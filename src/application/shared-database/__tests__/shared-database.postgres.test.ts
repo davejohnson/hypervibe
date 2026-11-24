@@ -198,7 +198,7 @@ const DENIED = ['28P01', '28000'];
 const databases = async () => (await boot.query(`SELECT datname FROM pg_database WHERE datname LIKE 'app\\_%' ORDER BY 1`)).rows.map((row) => String(row.datname));
 const everySecretValue = () => [...google.administratorPasswords, ...[...google.connectionSecrets.values()].flatMap((secret) => secret.versions).map((url) => decodeURIComponent(/:([^:@]+)@/.exec(url)![1]!))];
 const shown: unknown[] = [];
-const serverRequest = { project, gcpProjectId: GCP, region: REGION, engine, cloud };
+const serverRequest = { project, gcpProjectId: GCP, region: REGION, engine, cloud, recorded: [] as Array<{ environment: string; binding: GcpDatabaseBinding | undefined }> };
 const removalStep = async () => {
   const removal = await sharedDatabase.planServerRemoval(serverRequest);
   if (!('action' in removal)) throw new Error(`expected a removal step, got ${JSON.stringify(removal)}`);
@@ -468,6 +468,11 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     expect(refused.message).toMatch(/still holds 2 databases/);
     expect(google.engineApplies).toBe(applies);
     expect(google.servers[0]!.deletionProtection).toBe(true);
+    // What Hypervibe has saved is checked before Google or the server is asked anything, at plan and again at apply.
+    const recorded = [production, staging].map((environment) => ({ environment: environment.name, binding: bindings.get(environment.id) }));
+    expect(await refusal(sharedDatabase.planServerRemoval({ ...serverRequest, recorded }))).toMatch(/^production, staging still have their database on the app's shared database server\. Tear those environments down/);
+    expect(await sharedDatabase.applyServerRemoval({ ...serverRequest, recorded: recorded.slice(1), action: removal.action, reviewed: removal.reviewed }))
+      .toMatchObject({ success: false, status: 'blocked', message: expect.stringMatching(/^staging still has its database/) });
     // The step cannot be smuggled into an environment's plan, nor an environment's step into the removal.
     expect(await applyOne(production, removal.action, removal.reviewed)).toMatchObject({ success: false, status: 'blocked' });
     const allocate = (await planned(planFor(staging, { ...shared, passwordGeneration: 9 }))).actions[0]!;

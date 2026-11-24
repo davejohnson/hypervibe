@@ -69,6 +69,8 @@ export interface CloudEngine {
    */
   connect?(params: { project: Project; spec?: ProjectSpec; input: Record<string, unknown> }): Promise<EngineConnectStep>;
   plan(ctx: CommandContext, params: EnginePlanParams): Promise<EnginePlanOutcome>;
+  /** Removes the app's shared database server, which belongs to no single environment, as a reviewed plan of its own. */
+  planSharedDatabaseRemoval?(ctx: CommandContext, params: { project: Project; specRevision: number; environmentName?: string }): Promise<InfrastructurePlanResult | { blocked: string[] }>;
   /** Removes a whole environment as one reviewed plan. */
   planTeardown?(ctx: CommandContext, params: EnginePlanParams & { deleteFinalSnapshot?: boolean }): Promise<InfrastructurePlanResult | { blocked: string[] }>;
   /**
@@ -106,6 +108,7 @@ const gcp: CloudEngine = {
   id: 'gcp', hostingProvider: 'cloudrun', migration: 'full',
   plan: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpInfrastructureEngine(ctx, params),
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpTeardown(ctx, params),
+  planSharedDatabaseRemoval: async (ctx, params) => (await import('./gcp-shared-database-removal.js')).planGcpSharedDatabaseRemoval(ctx, params),
   removeProject: async ({ project, cloudProjectId, previewId, confirm }) => ({ ...await (await import('./gcp-project-removal.js')).runGcpProjectRemoval({ project, gcpProjectId: cloudProjectId, previewId, confirm }) }),
   projectRemoval: {
     idInput: 'gcpProjectId', adminAuth: 'default', failure: 'The Google project was not removed.',
@@ -174,6 +177,12 @@ export function cloudEngineFor(spec: ProjectSpec, environmentName: string): Clou
  */
 export function cloudEngineForPlan(document: { environmentName: string; engine?: Record<string, unknown> }, spec: ProjectSpec): CloudEngine {
   return [azure, aws].find((engine) => engine.ownsPlan(document)) ?? cloudEngineFor(spec, document.environmentName) ?? gcp;
+}
+
+/** Plans removing the app's shared database server on the cloud that has one. */
+export async function planSharedDatabaseRemoval(ctx: CommandContext, params: { project: Project; specRevision: number; environmentName?: string }): Promise<InfrastructurePlanResult | { blocked: string[] }> {
+  const engine = cloudEngines.find((candidate) => candidate.planSharedDatabaseRemoval);
+  return engine?.planSharedDatabaseRemoval ? engine.planSharedDatabaseRemoval(ctx, params) : { blocked: ['No cloud has a shared database server to remove.'] };
 }
 
 /** The engine that can remove what this connection provider's setup created in the cloud. */
