@@ -623,7 +623,11 @@ describe.skipIf(!supported)('tenants on one server (real PostgreSQL, non-superus
       if (!interrupted.fired()) break;
     }
     expect(interruptions).toBeGreaterThan(10);
-    expect([...stages].sort()).toEqual(['absent/absent', 'partial/absent', 'partial/dropping', 'ready/finished']);
+    // How many times the drop polls for sessions to end depends on timing, so which statement is the very last one
+    // (the only place an interruption leaves nothing at all) is not hit on every run. The other stages always are.
+    const allowed = ['absent/absent', 'partial/absent', 'partial/dropping', 'ready/finished'];
+    expect([...stages].filter((stage) => !allowed.includes(stage))).toEqual([]);
+    expect([...stages]).toEqual(expect.arrayContaining(['partial/absent', 'partial/dropping', 'ready/finished']));
     expect(await inventory()).toEqual(ONLY_TWO);
     const session = await loginA(two);
     expect(await scalar(session, 'SELECT body FROM notes')).toBe('two');
