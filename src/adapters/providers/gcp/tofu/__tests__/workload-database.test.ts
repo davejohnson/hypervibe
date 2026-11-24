@@ -26,7 +26,8 @@ const base: GcpCloudRunEngineInput = { projectId: 'demo-project', region: 'us-ce
 const ownInstance = { instanceName: 'hv-prod-db-a1b2c3', databaseName: 'app', wireServices: true, deletionProtection: true };
 const OWN_SOCKET = '${google_sql_database_instance.db.connection_name}';
 const ELSEWHERE = 'demo-project:us-central1:hv-demo-shared-d4e5f6';
-const elsewhere = { connection: { connectionName: ELSEWHERE, wireServices: true, workerQuery: { projectId: 'demo-project', instanceName: 'hv-demo-shared-d4e5f6', databaseName: 'app_production_0123456789ab' } }, credential: moved };
+const elsewhere = { connection: { connectionName: ELSEWHERE, wireServices: true, workerQuery: { projectId: 'demo-project', instanceName: 'hv-demo-shared-d4e5f6', databaseName: 'app_production_0123456789ab' } }, credential: moved,
+  databaseSecretIds: [own.secretId, moved.secretId] };
 
 type Json = Record<string, any>;
 const SECRET_IDS = [own.secretId, moved.secretId, 'prod-api-key'];
@@ -41,12 +42,23 @@ function containers(input: GcpCloudRunEngineInput): Record<string, Json> {
     release: generated['jobs.tf.json']!.resource.google_cloud_run_v2_job.release_command.template[0].template[0],
   };
 }
-/** What one workload connects with: its socket in all three places it appears, and every secret it reads. */
+/**
+ * What one workload connects with: its socket and every secret it reads. A workload with a socket has it in four places
+ * (two variables, the volume and the volume's mount); all four must be there and agree, or none.
+ */
 function wiring(template: Json) {
-  const env = template.containers[0].env as Array<{ name: string; value?: string; value_source?: Array<{ secret_key_ref: Array<{ secret: string; version: string }> }> }>;
+  const container = template.containers[0];
+  const env = container.env as Array<{ name: string; value?: string; value_source?: Array<{ secret_key_ref: Array<{ secret: string; version: string }> }> }>;
   const value = (name: string) => env.find((entry) => entry.name === name)?.value;
+  const volumes = (template.volumes ?? []).filter((volume: Json) => volume.cloud_sql_instance);
+  const mounts = (container.volume_mounts ?? []).filter((mount: Json) => mount.name === 'cloudsql');
+  const places = { name: value('CLOUD_SQL_CONNECTION_NAME'), host: value('PGHOST')?.replace(/^\/cloudsql\//, ''), volume: volumes[0]?.cloud_sql_instance[0].instances.join(','), mount: mounts[0] && volumes[0]?.cloud_sql_instance[0].instances.join(',') };
+  const found = Object.values(places).filter((place) => place !== undefined);
+  if (found.length !== 0 && (found.length !== 4 || new Set(found).size !== 1 || volumes.length !== 1 || mounts.length !== 1 || volumes[0].name !== 'cloudsql' || mounts[0].mount_path !== '/cloudsql')) {
+    throw new Error(`A workload's socket is not the same in every place: ${JSON.stringify(places)}`);
+  }
   return {
-    sockets: [...new Set([value('CLOUD_SQL_CONNECTION_NAME'), value('PGHOST')?.replace('/cloudsql/', ''), ...(template.volumes ?? []).flatMap((volume: Json) => volume.cloud_sql_instance?.[0]?.instances ?? [])])],
+    sockets: [found[0]],
     secrets: Object.fromEntries(env.filter((entry) => entry.value_source).map((entry) => {
       const { secret, version } = entry.value_source![0]!.secret_key_ref[0]!;
       // A secret this configuration holds is referred to by its address; that is turned back into its id.
@@ -92,13 +104,23 @@ describe('with a database named for the workloads', () => {
     for (const template of Object.values(containers({ ...base, database: { ...ownInstance, wireServices: false }, workloadDatabase: elsewhere }))) expect(wiring(template)).toEqual(ON_ELSEWHERE);
   });
 
-  it('points an on-demand worker\'s pending-work check at it too', () => {
+  it('points an on-demand worker\'s pending-work check at it too, and nothing in that check names the own instance', () => {
     const counting = { ...worker, pendingWorkQuery: 'SELECT count(*) FROM jobs' };
-    const workflow = (input: GcpCloudRunEngineInput) => JSON.stringify(files(input)['workflows.tf.json'] ?? files(input));
-    const moved = workflow({ ...base, services: [web, counting], database: ownInstance, workloadDatabase: elsewhere });
-    expect(moved).toContain('hv-demo-shared-d4e5f6');
-    expect(moved).toContain('app_production_0123456789ab');
-    expect(workflow({ ...base, services: [web, counting], database: ownInstance })).not.toContain('hv-demo-shared-d4e5f6');
+    const check = (input: GcpCloudRunEngineInput): string => files(input)['workerpools.tf.json']!.resource.google_workflows_workflow.jobs_waker.source_contents;
+    const named = check({ ...base, services: [web, counting], database: ownInstance, workloadDatabase: elsewhere });
+    expect(named).toContain('instances/hv-demo-shared-d4e5f6/');
+    expect(named).toContain('app_production_0123456789ab');
+    expect(named).not.toContain('hv-prod-db-a1b2c3');
+    const before = check({ ...base, services: [web, counting], database: ownInstance });
+    expect(before).toContain('instances/hv-prod-db-a1b2c3/');
+    expect(before).not.toContain('hv-demo-shared-d4e5f6');
+  });
+
+  it('makes no pending-work check against a named database that is not ready for workloads: the worker would be started with no way in', () => {
+    const waiting = { ...elsewhere, connection: { ...elsewhere.connection, wireServices: false } };
+    const counting = { ...worker, secretEnv: { API_KEY: worker.secretEnv.API_KEY }, pendingWorkQuery: 'SELECT count(*) FROM jobs' };
+    expect(() => files({ ...base, services: [counting], releaseJob: undefined, database: ownInstance, workloadDatabase: waiting }))
+      .toThrow('Worker jobs counts pending work in a database that is not ready for workloads.');
   });
 
   it('connects nothing while the named database is not ready for workloads, and refuses a workload that already carries a connection secret', () => {
@@ -106,7 +128,12 @@ describe('with a database named for the workloads', () => {
     const bare = (service: GcpCloudRunServiceInput): GcpCloudRunServiceInput => ({ ...service, secretEnv: { API_KEY: service.secretEnv!.API_KEY! } });
     const quiet = containers({ ...base, services: [bare(web), bare(worker), bare(cron)], releaseJob: bare(releaseJob), database: ownInstance, workloadDatabase: waiting });
     for (const template of Object.values(quiet)) expect(wiring(template)).toEqual({ sockets: [undefined], secrets: { API_KEY: 'prod-api-key@2' } });
-    expect(() => files({ ...base, database: ownInstance, workloadDatabase: waiting })).toThrow('Workload web has a database connection secret, but the database it is pointed at is not ready for workloads.');
+    expect(() => files({ ...base, database: ownInstance, workloadDatabase: waiting })).toThrow('Workload web has a database connection secret (DATABASE_URL), but the database it is pointed at is not ready for workloads.');
+    // The same for a workload with no DATABASE_URL but an alias left on either database's secret.
+    for (const left of [own, moved]) {
+      expect(() => files({ ...base, services: [{ ...bare(web), secretEnv: { JOBS_DB: left } }], releaseJob: undefined, database: ownInstance, workloadDatabase: waiting }))
+        .toThrow('Workload web has a database connection secret (JOBS_DB), but the database it is pointed at is not ready for workloads.');
+    }
   });
 
   it.each([
@@ -117,6 +144,12 @@ describe('with a database named for the workloads', () => {
       'Workload web would use two databases at once: OLD_DB points at another connection than DATABASE_URL.'],
     ['an alias on another version of the secret it is going to', (input: GcpCloudRunEngineInput) => ({ ...input, services: [{ ...web, secretEnv: { ...web.secretEnv, NEXT_DB: { secretId: moved.secretId, version: '2' } } }] }),
       'Workload web would use two databases at once: NEXT_DB points at another connection than DATABASE_URL.'],
+    ['a workload already on the named connection secret with an alias still on the other database', (input: GcpCloudRunEngineInput) => ({ ...input, services: [{ ...web, secretEnv: { ...web.secretEnv, DATABASE_URL: moved } }] }),
+      'Workload web would use two databases at once: DIRECT_URL points at another connection than DATABASE_URL.'],
+    ['an alias on a third database secret the caller named', (input: GcpCloudRunEngineInput) => ({ ...input, services: [{ ...web, secretEnv: { ...web.secretEnv, REPORTS_DB: { secretId: 'prod-database-url-copy', version: '1' } } }],
+      workloadDatabase: { ...elsewhere, databaseSecretIds: [...elsewhere.databaseSecretIds, 'prod-database-url-copy'] } }),
+      'Workload web would use two databases at once: REPORTS_DB points at another connection than DATABASE_URL.'],
+    ['a list of database secrets that is not a list of secret ids', (input: GcpCloudRunEngineInput) => ({ ...input, workloadDatabase: { ...elsewhere, databaseSecretIds: ['not a secret id'] } }), 'The named database needs the ids of every secret that holds a database connection.'],
     ['a connection secret that is not pinned', (input: GcpCloudRunEngineInput) => ({ ...input, workloadDatabase: { ...elsewhere, credential: { secretId: moved.secretId, version: 'latest' } } }), 'The named database needs one pinned version of its connection secret.'],
     ['two ways of naming the workloads\' database', (input: GcpCloudRunEngineInput) => ({ ...input, database: undefined, databaseConnection: elsewhere.connection }), 'A configuration names the database its workloads use in one way only.'],
   ])('refuses %s', (_what, change, message) => {

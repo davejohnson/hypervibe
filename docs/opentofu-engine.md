@@ -726,7 +726,10 @@ available yet), the configuration generator can point every workload of an
 environment at a database that is named outright, with its socket and its
 connection secret together, while the instance the environment itself creates
 stays in the configuration exactly as declared (`workloadDatabase`,
-`src/adapters/providers/gcp/tofu/gcp-workload-database.ts`). No plan passes
+`src/adapters/providers/gcp/tofu/gcp-workload-database.ts`). The caller also
+lists the ids of every secret that holds a database connection, because the
+generator cannot tell those from other secrets; a workload left reading any of
+them other than the named one is refused. No plan passes
 that input yet, and without it the generated configuration is unchanged.
 
 Known limits of removing the server:
