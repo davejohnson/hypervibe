@@ -781,6 +781,17 @@ Accepted limits of that job:
   job can mount two database servers, and that Cloud Run fails a run whose
   task exits non-zero, which is why every refusal exits 0.
 
+For moving a database between the shared server and a server of its own (not
+available yet), the configuration generator can point every workload of an
+environment at a database that is named outright, with its socket and its
+connection secret together, while the instance the environment itself creates
+stays in the configuration exactly as declared (`workloadDatabase`,
+`src/adapters/providers/gcp/tofu/gcp-workload-database.ts`). The caller also
+lists the ids of every secret that holds a database connection, because the
+generator cannot tell those from other secrets; a workload left reading any of
+them other than the named one is refused. No plan passes
+that input yet, and without it the generated configuration is unchanged.
+
 Pausing a database, the first step of moving one, exists as two calls that no
 plan or command uses yet: pause and its undo, for a database on the shared
 server (`sharedDatabase.pause` / `resume`) and for one on a server of its own

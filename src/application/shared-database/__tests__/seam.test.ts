@@ -26,6 +26,7 @@ describe('nothing outside the module knows how the shared server works', () => {
     'adapters/providers/gcp/tofu/gcp-engine.backend.ts',
     'adapters/providers/gcp/tofu/gcp-dedicated-database.ts',
     'adapters/providers/gcp/tofu/gcp-database-connection.ts',
+    'adapters/providers/gcp/tofu/gcp-workload-database.ts',
   ])('%s mentions none of its internals', (file) => {
     expect(read(file).split('\n').filter((line) => INTERNALS.test(line))).toEqual([]);
   });
