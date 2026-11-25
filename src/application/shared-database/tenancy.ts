@@ -122,7 +122,8 @@ export function credentialState(seen: Seen<SeenConnectionSecret>, target: { secr
   };
 }
 
-export type RunningSecretVersions = () => Promise<{ versions: string[] } | { blocked: string }>;
+/** `unsettled`: workloads that could not be found, or whose newest revision is not the one serving. Only a step that deletes data asks. */
+export type RunningSecretVersions = () => Promise<{ versions: string[]; unsettled?: string[] } | { blocked: string }>;
 
 export interface StepContext {
   cloud: SharedDatabaseCloud;

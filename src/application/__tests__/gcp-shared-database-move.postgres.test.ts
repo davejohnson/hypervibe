@@ -45,6 +45,8 @@ const google = vi.hoisted(() => ({
   copyAnswers: undefined as Record<string, unknown> | undefined,
   copies: 0,
   failServiceChanges: false,
+  /** Cloud Run has not got the newest revision of a service serving. */
+  notServing: false,
   work: '',
 }));
 const sideOf = (instanceOrConnection: string) => {
@@ -141,7 +143,7 @@ async function answer(input: string | URL, init?: RequestInit): Promise<Response
   }
   if (url.hostname === 'run.googleapis.com' && method === 'GET') {
     const running = google.services.get(url.pathname.split('/').pop()!);
-    return running ? json({ generation: '1', template: { containers: [{ env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { version: running.split('|')[0] } } }] }] } }) : json({}, 404);
+    return running ? json({ generation: '1', terminalCondition: { state: google.notServing ? 'CONDITION_FAILED' : 'CONDITION_SUCCEEDED' }, latestReadyRevision: 'r1', latestCreatedRevision: google.notServing ? 'r2' : 'r1', template: { containers: [{ env: [{ name: 'DATABASE_URL', valueSource: { secretKeyRef: { version: running.split('|')[0] } } }] }] } }) : json({}, 404);
   }
   if (url.hostname === 'artifactregistry.googleapis.com') return json({ name: `projects/${GCP}/locations/${REGION}/repositories/hypervibe`, format: 'DOCKER' });
   if (method !== 'GET') throw new Error(`Unexpected ${method} ${url}`);
@@ -329,6 +331,11 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
 
   it('step 1 creates the own server, its logins and its connection, and leaves the running app exactly where it is', async () => {
     const before = { web: web(), urls: urls().length };
+    // What the copy would refuse is found out now, before a server is paid for.
+    await google.local.shared.boot.query(`ALTER DATABASE ${record()!.databaseName} SET work_mem = '8MB'`);
+    expect(await blockedBy(own())).toContain('has 1 setting(s) made on the database or the app\'s role, which a copy does not carry over, so it cannot be moved');
+    await google.local.shared.boot.query(`ALTER DATABASE ${record()!.databaseName} RESET work_mem`);
+    expect(google.servers).toHaveLength(1);
     const prepared = await plan(own());
     expect(changes(prepared)).toEqual(['create secret-container:hv-production-database-url-copy', 'create database:postgres', 'create database-credential:postgres']);
     expect(prepared.confirmActions).toEqual(['database:postgres']);
@@ -359,7 +366,7 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     expect(switching.confirmActions).toEqual(['shared-database:switch']);
     expect(switching.actions.find((action) => action.id === 'service:web')!.dependsOn).toContain('shared-database:switch');
     const step = switching.saved.actions.find((action) => action.id === 'shared-database:switch')!;
-    expect(step.reason).toMatch(/returns database errors meanwhile \(roughly \d+ minutes plus restarts\)/);
+    expect(step.reason).toContain('How long depends on the size of the database and has not been measured');
     expect(switching.warnings.join(' ')).toContain('cannot reach its database and will return database errors');
     const issues = (action: PlanAction) => { const checked = planRunDocumentSchema.safeParse({ ...switching.saved, actions: [action] }); return checked.success ? [] : checked.error.issues.map((issue) => issue.message); };
     expect(issues(step)).toEqual([]);
@@ -378,9 +385,12 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     // As an earlier switch cut short would leave it: the app's login already switched off. The step can still be planned, and applying it puts that right.
     await google.local.shared.boot.query(`ALTER ROLE ${urlParts(sharedUrl).user} NOLOGIN`);
     expect(await asApp(sharedUrl, 'SELECT 1')).toMatch(/^28/);
-    const resumed = await plan(own());
-    expect(resumed.saved.actions.find((action) => action.id === 'shared-database:switch')!.reason).toContain('size unknown');
-    const result = await apply(resumed);
+    // And the copy login's secret holds a version Google stored without Hypervibe hearing back.
+    const copyId = 'hv-production-database-url-copy';
+    google.secrets.get(copyId)!.versions.push('postgresql://lost:lost@/lost?host=/cloudsql/lost');
+    const saved = (ctx.repos.environments.findById(environment.id)!.platformBindings as { engine: { secretMetadata?: Record<string, unknown> } }).engine;
+    ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...saved, secretMetadata: { ...saved.secretMetadata, [copyId]: { gcpProjectId: GCP, version: 'pending', labels: google.secrets.get(copyId)!.labels } } } });
+    const result = await apply(await plan(own()));
     expect(result.success).toBe(false);
     expect(JSON.stringify(result)).toContain('was not moved: The source database could not be dumped; nothing was changed. The app is connected to its database on the shared server again');
     expect(google.copies).toBe(1);
@@ -396,7 +406,8 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     const interrupted = await apply(await plan(own()));
     google.failServiceChanges = false;
     expect(interrupted.success).toBe(false);
-    expect(google.copies).toBe(2);
+    expect(google.copies, JSON.stringify(interrupted)).toBe(2);
+    expect(JSON.stringify(interrupted)).toContain('was copied to its own server');
     const ownServer = urlParts(ownUrl).connectionName.split(':').pop()!;
     expect(record()).toMatchObject({ instanceName: ownServer, movedFrom: { placement: 'app' } });
     expect(record()!.placement).toBeUndefined();
@@ -411,7 +422,7 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     const finishing = await plan(own());
     // The copy login's secret has done its work and goes with this plan.
     expect(changes(finishing).sort()).toEqual(['destroy secret-container:hv-production-database-url-copy', 'update service:web']);
-    expect(finishing.warnings.join(' ')).toContain('stays there, switched off, because a service of production does not run the connection to its own database server yet');
+    expect(finishing.warnings.join(' ')).toContain('stays there, closed to the app, because a service of production does not run the connection to its own database server yet');
     expect((await apply(finishing)).success).toBe(true);
     expect(web()).toBe(`${urls().length}|${ownServer}`);
     expect(google.secrets.has('hv-production-database-url-copy')).toBe(false);
@@ -420,6 +431,18 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
 
   it('step 3 deletes the old copy only while every service runs the new connection, and then the environment is an ordinary one with its own server', async () => {
     const ownServer = record()!.instanceName as string;
+    // Not offered while the newest revision of a service is not the one serving, or while no workload can be seen at all.
+    google.notServing = true;
+    const unsettled = await plan(own());
+    google.notServing = false;
+    expect(changes(unsettled)).toEqual([]);
+    expect(unsettled.warnings.join(' ')).toContain('web is not serving its newest revision');
+    const services = ctx.repos.environments.findById(environment.id)!.platformBindings.services;
+    ctx.repos.environments.updatePlatformBindings(environment.id, { services: {} });
+    const unseen = await plan(own());
+    ctx.repos.environments.updatePlatformBindings(environment.id, { services });
+    expect(changes(unseen).filter((change) => change.includes('shared-database'))).toEqual([]);
+    expect(unseen.warnings.join(' ')).toContain('no service of production could be seen running');
     const cleanup = await plan(own());
     expect(changes(cleanup)).toEqual(['destroy shared-database:release']);
     expect(cleanup.confirmActions).toContain('shared-database:release');

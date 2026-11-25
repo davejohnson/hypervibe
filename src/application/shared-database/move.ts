@@ -94,6 +94,24 @@ export async function planMove(request: MovePlanRequest): Promise<DatabaseMove> 
     // The connection secret still holds the shared database's login: nothing of the environment's own has been stored yet.
     if (onShared.login !== record.activeLogin) throw blocked(`${name}'s connection secret does not hold the login recorded for its database. Keep "placement": "app" on it, run hv_plan and hv_apply, then move it.`);
     if (onShared.retirePending || onShared.generation < generation) throw blocked(`${name}'s database password is being changed. Finish that first (keep "placement": "app", then hv_plan and hv_apply until nothing is left), then move the database.`);
+    // Whether this database can be moved at all is found out now, read as the app itself, before a server is created and paid for.
+    const pinned = await cloud.readSecretVersion(scope.gcpProjectId, secret.id, onShared.latestVersion!);
+    const held = pinned.state === 'present' ? parseConnectionUrl(pinned.value) : undefined;
+    if (!held || held.login !== record.activeLogin || held.databaseName !== identity.names.database || held.connectionName !== connection.connectionName) {
+      throw blocked(pinned.state === 'unknown' ? pinned.reason : `The newest version of ${secret.id} is not the connection to ${name}'s database on the shared server. Nothing was planned.`);
+    }
+    const facts = await cloud.withSession({ connectionName: held.connectionName, user: held.login, password: held.password, database: held.databaseName }, async (session) => {
+      await session.query('SET search_path = pg_catalog');
+      const size = await session.query('SELECT pg_database_size(current_database())::text AS bytes');
+      const counted = await session.query(DATABASE_MOVE_FACTS);
+      return { bytes: Number(size.rows[0]?.bytes), counts: Object.values(counted.rows[0] ?? {})[0] };
+    }).catch(() => undefined);
+    if (!facts) throw blocked(`${name}'s database could not be read to see whether it can be moved. Nothing was planned; try again.`);
+    const problem = databaseMoveFactsProblem(facts.counts);
+    if (problem) throw blocked(`${name}'s database ${problem}, so it cannot be moved. Nothing was planned.`);
+    if (!Number.isFinite(facts.bytes) || facts.bytes > LARGEST_DATABASE_BYTES) {
+      throw blocked(`${name}'s database is ${Number.isFinite(facts.bytes) ? shown(facts.bytes) : 'of unknown size'}; a move can copy at most ${shown(LARGEST_DATABASE_BYTES)} for now. Nothing was planned.`);
+    }
     return prepare(onShared.latestVersion!, false);
   }
   const own = record.move?.instanceName;
@@ -116,37 +134,15 @@ export async function planMove(request: MovePlanRequest): Promise<DatabaseMove> 
   // Something of step 1 is still missing: plan it again, with the workloads where they are.
   if (copySecret.state === 'absent') return prepare(pinnedVersion, true);
 
-  // What the copy would refuse, and how big the database is, read as the app itself before anything is paused.
-  const pinned = await cloud.readSecretVersion(scope.gcpProjectId, secret.id, pinnedVersion);
-  const held = pinned.state === 'present' ? parseConnectionUrl(pinned.value) : undefined;
-  if (!held || held.login !== record.activeLogin || held.databaseName !== identity.names.database || held.connectionName !== connection.connectionName) {
-    throw blocked(pinned.state === 'unknown' ? pinned.reason : `Version ${pinnedVersion} of ${secret.id}, which ${name}'s services run, is not the connection to its database on the shared server. Nothing was planned.`);
-  }
-  // An earlier switch that was cut short leaves the app shut out, and then this read fails too. The step is planned all
-  // the same, without a size: applying it either completes the move or lets the app back in, and the copy refuses by itself what cannot be moved.
-  const facts = await cloud.withSession({ connectionName: held.connectionName, user: held.login, password: held.password, database: held.databaseName }, async (session) => {
-    await session.query('SET search_path = pg_catalog');
-    const size = await session.query('SELECT pg_database_size(current_database())::text AS bytes');
-    const counted = await session.query(DATABASE_MOVE_FACTS);
-    return { bytes: Number(size.rows[0]?.bytes), counts: Object.values(counted.rows[0] ?? {})[0] };
-  }).catch(() => undefined);
-  if (facts) {
-    const problem = databaseMoveFactsProblem(facts.counts);
-    if (problem) throw blocked(`${name}'s database ${problem}, so it cannot be moved. Nothing was planned.`);
-    if (!Number.isFinite(facts.bytes) || facts.bytes > LARGEST_DATABASE_BYTES) {
-      throw blocked(`${name}'s database is ${Number.isFinite(facts.bytes) ? shown(facts.bytes) : 'of unknown size'}; a move can copy at most ${shown(LARGEST_DATABASE_BYTES)} for now. Nothing was planned.`);
-    }
-  }
-  const size = facts ? shown(facts.bytes) : 'size unknown: it could not be read just now';
-  const wait = facts ? `roughly ${2 + Math.ceil(facts.bytes / (200 * 1024 ** 2))} minutes` : 'an unknown time';
+  const outage = 'How long depends on the size of the database and has not been measured';
   const metadata: StepMetadata = { operation: SHARED_DATABASE_OPERATION, step: 'switch', gcpProjectId: scope.gcpProjectId, region: scope.region, instanceName: record.instanceName,
     databaseName: identity.names.database, tenantId: identity.tenantId, secretId: secret.id, labels: secret.labels, secretVersion: pinnedVersion,
     own: { instanceName: own, secretVersion: seen.value.latestVersion, majorVersion: SHARED_SERVER_MAJOR_VERSION } };
   return {
     stage: 'switch', instanceName: own, secretIds: [copySecretId], reviewed,
-    warnings: [`${steps} This plan is step 2. While it runs, ${name}'s app cannot reach its database and will return database errors: ${wait} for copying it (${size}; the time is a guess from the size, not a measurement), plus the time its services take to restart. Run hv_plan again afterwards for step 3.`],
+    warnings: [`${steps} This plan is step 2. While it runs, ${name}'s app cannot reach its database and will return database errors until the copy is checked and its services have restarted. ${outage}. Run hv_plan again afterwards for step 3.`],
     actions: [{ id: 'shared-database:switch', type: 'update', resource, verified: true, requiresConfirm: true,
-      reason: `Move ${name}'s database (${size}) to its own server ${own}: shut the app out of the database on the shared server, copy it, check the copy against the original, then point every service at the new one. The app returns database errors meanwhile (${wait} plus restarts). If the copy or its check fails, the app is let back into the shared database and nothing has moved.`,
+      reason: `Move ${name}'s database to its own server ${own}: shut the app out of the database on the shared server, copy it, check the copy against the original, then point every service at the new one. The app returns database errors meanwhile. ${outage}. If the copy or its check fails, the app is let back into the shared database and nothing has moved.`,
       metadata: metadata as unknown as Record<string, unknown> }],
   };
 }
@@ -163,6 +159,9 @@ async function stillInUse(request: Pick<MovePlanRequest, 'environment' | 'bindin
   if (!latest) return `${name}'s connection secret does not hold the login of its own database server`;
   const running = await request.runningSecretVersions();
   if ('blocked' in running) throw blocked(running.blocked);
+  // Deleting needs every workload positively seen on the new connection: none seen, or one that cannot be judged, is not that.
+  if (running.unsettled?.length) return running.unsettled.join(', ');
+  if (!running.versions.length) return `no service of ${name} could be seen running`;
   return running.versions.every((version) => version === latest) ? undefined : `a service of ${name} does not run the connection to its own database server yet`;
 }
 
@@ -178,7 +177,7 @@ export async function planCleanup(request: MovePlanRequest & { desired: MovePlan
   const waiting = await stillInUse(request);
   const base = { stage: 'cleanup' as const, instanceName: binding!.database!.instanceName, secretIds: [], reviewed: { instanceName: record.instanceName } };
   if (waiting) {
-    return { ...base, actions: [], warnings: [`${name}'s database now lives on its own server. Its old copy on the app's shared database server stays there, switched off, because ${waiting}. Apply this plan, then run hv_plan again to delete the old copy.`] };
+    return { ...base, actions: [], warnings: [`${name}'s database now lives on its own server. Its old copy on the app's shared database server stays there, closed to the app, because ${waiting}. Apply this plan, then run hv_plan again to delete the old copy.`] };
   }
   const metadata: StepMetadata = { operation: SHARED_DATABASE_OPERATION, step: 'release', gcpProjectId: scope.gcpProjectId, region: scope.region, instanceName: record.instanceName,
     databaseName: identity.names.database, tenantId: identity.tenantId };
@@ -249,9 +248,8 @@ export async function applySwitch(context: MoveStepContext): Promise<ActionResul
     const copy = paused.data as { copySecretId: string; copySecretVersion: string };
     const source = { identity: await identityOf(cloud, scope.gcpProjectId, copy.copySecretId, copy.copySecretVersion, connectionName(record.instanceName)),
       secret: { secretId: copy.copySecretId, version: copy.copySecretVersion }, connectionName: connectionName(record.instanceName) };
-    // The target is a database this move made and no app ever wrote to, so a half-finished earlier copy may be cleared.
     if (!cloud.runCopyJob) return await backOut('this installation cannot run the copy.');
-    result = await cloud.runCopyJob(scope.gcpProjectId, databaseMoveCopyJob({ majorVersion: own.majorVersion, source, target, resetTarget: true })) as DatabaseMoveCopyResult | undefined;
+    result = await cloud.runCopyJob(scope.gcpProjectId, databaseMoveCopyJob({ majorVersion: own.majorVersion, source, target, })) as DatabaseMoveCopyResult | undefined;
   } catch {
     return backOut('the copy could not be run.');
   }
@@ -262,5 +260,5 @@ export async function applySwitch(context: MoveStepContext): Promise<ActionResul
   }
   // From here the environment is one with its own server. The old database stays as it is, switched off, until clean-up.
   context.record({ instanceName: own.instanceName, movedFrom: withoutMove(record) });
-  return { success: true, message: `${name}'s database was copied to its own server ${own.instanceName} and checked against the original (${result!.source!.tables} tables, ${result!.source!.rows} rows). Its services are pointed at it next. The old copy on the app's shared database server stays, switched off, until the last step deletes it.` };
+  return { success: true, message: `${name}'s database was copied to its own server ${own.instanceName} and checked against the original (${result!.source!.tables} tables, ${result!.source!.rows} rows). Its services are pointed at it next. The old copy on the app's shared database server stays, closed to the app, until the last step deletes it.` };
 }

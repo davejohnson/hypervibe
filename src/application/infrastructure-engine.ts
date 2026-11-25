@@ -720,19 +720,23 @@ export async function planDatabaseCredential(params: {
 }
 
 /** The DATABASE_URL secret version each bound service currently runs. */
-async function pinnedDatabaseVersions(token: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'environment'>): Promise<{ versions: string[] } | { blocked: string }> {
+async function pinnedDatabaseVersions(token: string, context: Pick<EngineContext, 'gcpProjectId' | 'region' | 'environment'>): Promise<{ versions: string[]; unsettled: string[] } | { blocked: string }> {
   const versions: string[] = [];
+  // Workloads whose answer says nothing certain about what is running: not found, or a service whose newest revision is not the one serving.
+  const unsettled: string[] = [];
   const releaseJob = (context.environment.platformBindings as { engine?: EngineBinding }).engine?.releaseJob;
   // The release job runs migrations with the same connection secret, so it counts like any service.
   for (const workload of [...boundWorkloads(context.environment), ...(releaseJob ? [{ name: 'release-command', kind: 'jobs' as const, resource: releaseJob }] : [])]) {
     const observed = await cloudRunGet(token, context.gcpProjectId, context.region, workload.resource, workload.kind);
     if (observed.state === 'unknown') return { blocked: observed.reason };
-    if (observed.state === 'absent') continue;
+    if (observed.state === 'absent') { unsettled.push(`${workload.name} could not be found on Cloud Run`); continue; }
+    const serving = observed.value as { terminalCondition?: { state?: string }; latestReadyRevision?: string; latestCreatedRevision?: string };
+    if (workload.kind === 'services' && (serving.terminalCondition?.state !== 'CONDITION_SUCCEEDED' || !serving.latestReadyRevision || serving.latestReadyRevision !== serving.latestCreatedRevision)) unsettled.push(`${workload.name} is not serving its newest revision`);
     const env = (workloadContainers(workload.kind, observed.value)[0]?.env ?? []) as Array<{ name?: string; valueSource?: { secretKeyRef?: { version?: string } } }>;
     const entry = env.find((item) => item.name === ENGINE_DATABASE_URL_KEY);
     if (entry) versions.push(entry.valueSource?.secretKeyRef?.version ?? 'unknown');
   }
-  return { versions };
+  return { versions, unsettled };
 }
 
 // ---------------------------------------------------------------- Interrupted creates
@@ -1206,7 +1210,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   for (const secretId of [...new Set([...desiredIds, ...retainedAliasIds, ...untrackedRetired, ...retiredSecrets])].sort()) {
     // Only the container's ownership is decided here. What the versions of a placed database's secret hold, including one
     // Google stored without Hypervibe hearing back, is for the module that writes them: it sets such a version aside.
-    const observed = placed && secretId === databaseSecretId ? await observeSecretContainer(token, context.gcpProjectId, secretId) : await observeSecret(token, context.gcpProjectId, secretId);
+    // The same holds for a secret a database move writes: the move's own step sets such a version aside when it runs again.
+    const observed = (placed && secretId === databaseSecretId) || move?.secretIds.includes(secretId) ? await observeSecretContainer(token, context.gcpProjectId, secretId) : await observeSecret(token, context.gcpProjectId, secretId);
     if (observed.state === 'unknown') return { blocked: [observed.reason] };
     if (observed.state === 'present') {
       const ownership = observed.value.containerLabels ?? observed.value.labels;
