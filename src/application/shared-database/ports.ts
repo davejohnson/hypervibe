@@ -43,6 +43,8 @@ export interface SharedDatabaseCloud {
   setServerLogin(gcpProjectId: string, instanceName: string, login: string, password: string): Promise<ActionResult | undefined>;
   /** The environment's own connection secret (DATABASE_URL). */
   observeConnectionSecret(gcpProjectId: string, secretId: string): Promise<Seen<SeenConnectionSecret>>;
+  /** The value of one exact version of a secret, for use in memory only: it must never be returned, logged or put in a message. */
+  readSecretVersion(gcpProjectId: string, secretId: string, version: string): Promise<Seen<string>>;
   /** Stores a new version with what Hypervibe records about it. Undefined when stored. */
   publishConnectionSecret(gcpProjectId: string, secretId: string, labels: Record<string, string>, value: string): Promise<ActionResult | undefined>;
   /** Replaces what is recorded about an existing version. False when it could not be recorded. */

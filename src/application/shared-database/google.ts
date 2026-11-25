@@ -1,7 +1,8 @@
 import { sqlAdmin } from '../../adapters/providers/gcp/gcp-data.client.js';
-import { readSecretContainer } from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { readSecretVersionValue } from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { setCloudSqlLoginPassword, withCloudSqlSession } from '../infrastructure-engine-database.js';
-import { observeSecret, recordSecretVersionMetadata, writeSecretVersion } from '../infrastructure-engine.js';
+import { observeRecordedSecret } from '../gcp-secret-recorded.js';
+import { recordSecretVersionMetadata, writeSecretVersion } from '../infrastructure-engine.js';
 import { SERVER_BUSY } from './administrator.js';
 import type { SeenServer, SharedDatabaseCloud } from './ports.js';
 
@@ -49,25 +50,9 @@ export function googleSharedDatabaseCloud(access: { token: string; credentials: 
       return set.error === 'HTTP 409' ? { success: false, status: 'pending', message: SERVER_BUSY } : set;
     },
 
-    async observeConnectionSecret(gcpProjectId, secretId) {
-      const recorded = async () => {
-        const seen = await observeSecret(token, gcpProjectId, secretId);
-        if (seen.state !== 'present') return seen;
-        const { labels, hasEnabledVersion, latestVersion } = seen.value;
-        return { state: 'present' as const, value: { labels, hasEnabledVersion, ...(latestVersion ? { latestVersion } : {}) } };
-      };
-      const seen = await recorded();
-      if (seen.state !== 'unknown') return seen;
-      // "Unknown" also covers a version Google stored and Hypervibe never recorded. Tell that apart from a failed read:
-      // the container itself must be readable, and the recorded view must still be unknown when asked again.
-      const container = await readSecretContainer(token, gcpProjectId, secretId);
-      const version = container.state === 'present' ? container.value.latestVersionName : undefined;
-      if (container.state !== 'present' || !version || !/^[1-9][0-9]*$/.test(version)) return seen;
-      const again = await recorded();
-      if (again.state !== 'unknown') return again;
-      return { state: 'present', value: { labels: container.value.labels, hasEnabledVersion: container.value.hasEnabledVersion, latestVersion: version, unrecorded: true } };
-    },
+    observeConnectionSecret: (gcpProjectId, secretId) => observeRecordedSecret(token, gcpProjectId, secretId),
 
+    readSecretVersion: (gcpProjectId, secretId, version) => readSecretVersionValue(token, gcpProjectId, secretId, version),
     publishConnectionSecret: (gcpProjectId, secretId, labels, value) => writeSecretVersion(token, gcpProjectId, secretId, labels, value),
     relabelConnectionSecret: recordSecretVersionMetadata,
 

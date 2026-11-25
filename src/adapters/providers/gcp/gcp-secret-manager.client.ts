@@ -91,3 +91,15 @@ export function disableSecretVersion(token: string, versionName: string): Promis
 export function accessLatestSecretVersion(token: string, gcpProjectId: string, secretId: string): Promise<Response> {
   return fetch(`${secretUrl(gcpProjectId, secretId)}/versions/latest:access`, { headers: { Authorization: `Bearer ${token}` } });
 }
+
+/** Reads one exact version's value, for use in memory only. The caller must not log, return or put it in a message. */
+export async function readSecretVersionValue(token: string, gcpProjectId: string, secretId: string, version: string): Promise<SecretObservation<string>> {
+  if (!/^[1-9][0-9]*$/.test(version)) return { state: 'unknown', reason: `Secret ${secretId} was asked for without an exact version.` };
+  let response: Response;
+  try { response = await fetch(`${secretUrl(gcpProjectId, secretId)}/versions/${version}:access`, { headers: { Authorization: `Bearer ${token}` } }); }
+  catch { return { state: 'unknown', reason: `Secret ${secretId} could not be read.` }; }
+  if (response.status === 404) return { state: 'absent' };
+  if (!response.ok) return { state: 'unknown', reason: `Reading version ${version} of ${secretId} returned HTTP ${response.status}.` };
+  const data = (await response.json().catch(() => undefined) as { payload?: { data?: string } } | undefined)?.payload?.data;
+  return typeof data === 'string' && data ? { state: 'present', value: Buffer.from(data, 'base64').toString('utf8') } : { state: 'unknown', reason: `Version ${version} of ${secretId} came back empty.` };
+}

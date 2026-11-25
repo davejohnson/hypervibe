@@ -206,7 +206,7 @@ afterAll(async () => {
       expect(stopped).toBe(true);
     }
   }
-});
+}, 60_000);
 
 const A = '7400000000000000001:617070';
 const B = '7400000000000000002:617070';

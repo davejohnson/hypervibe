@@ -85,7 +85,7 @@ export function recordedAllocation(binding: GcpDatabaseBinding | undefined, iden
   throw blocked(INCOMPLETE_RECORD);
 }
 
-const otherLogin = (names: TenantNames, login: string): string => (login === names.logins[0] ? names.logins[1] : names.logins[0]);
+export const otherLogin = (names: TenantNames, login: string): string => (login === names.logins[0] ? names.logins[1] : names.logins[0]);
 
 export interface CredentialState {
   /** The secret's latest version is a working credential made for this database. */
@@ -199,8 +199,9 @@ async function applyServer(context: StepContext): Promise<ActionResult> {
 }
 
 /** Proves the login opens this tenant's database and acts as its owner role, before anything is published. */
-async function proveLogin(cloud: SharedDatabaseCloud, server: ServerAddress, names: TenantNames, login: string, password: string): Promise<void> {
-  const refused = new Stop({ success: false, message: `The new login for ${names.database} did not open that database as its owner. Nothing was published; the app keeps using its current login.` });
+export async function proveLogin(cloud: SharedDatabaseCloud, server: ServerAddress, names: TenantNames, login: string, password: string,
+  failure = `The new login for ${names.database} did not open that database as its owner. Nothing was published; the app keeps using its current login.`): Promise<void> {
+  const refused = new Stop({ success: false, message: failure });
   const seen = await cloud.withSession({ connectionName: server.connectionName, user: login, password, database: names.database },
     (session) => session.query('SELECT current_user::text AS role, session_user::text AS login, current_database()::text AS database')).catch((error: unknown) => {
     if (/^(28|42501|3D000)/.test(String((error as { code?: unknown } | null)?.code))) throw refused;
@@ -312,9 +313,14 @@ const NETWORK = new Set(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND',
  * error is reported by its class and code only: its text may quote a statement
  * or a value, so none of it is copied.
  */
-export async function runStep(context: StepContext): Promise<ActionResult> {
+export function runStep(context: StepContext): Promise<ActionResult> {
+  return settled(() => (['server', 'unprotect-server', 'remove-server'].includes(context.metadata.step) ? applyServer(context) : applyTenantStep(context)));
+}
+
+/** Turns whatever `work` throws into a result, by the rules above. */
+export async function settled(work: () => Promise<ActionResult>): Promise<ActionResult> {
   try {
-    return ['server', 'unprotect-server', 'remove-server'].includes(context.metadata.step) ? await applyServer(context) : await applyTenantStep(context);
+    return await work();
   } catch (error) {
     if (error instanceof Stop) return error.result;
     if (error instanceof TenantRefusedError) return { success: false, status: 'blocked', message: error.message };

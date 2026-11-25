@@ -7,6 +7,7 @@ import { engineSegmentOf } from '../../domain/ports/infrastructure-engine.port.j
 import type { EnvironmentSpec } from '../../domain/spec/spec.schema.js';
 import { gcpDatabaseOnSharedServer, type GcpDatabaseBinding } from '../gcp-database-location.js';
 import { Stop, blocked } from './administrator.js';
+import { pauseDatabase, resumeDatabase } from './pause.js';
 import type { SharedDatabaseCloud, SharedDatabaseEngine } from './ports.js';
 import {
   SERVER_ENGINE_ACTION, findSharedServer, serverPlanReview, newSharedServerName, sharedServerConfiguration, sharedServerCost, sharedServerProtection, sharedServerState, type SharedServerScope,
@@ -79,6 +80,15 @@ export interface SharedDatabaseApplyRequest extends SharedDatabaseRequest {
   record(database: SharedDatabaseRecord | null): void;
 }
 
+export interface SharedDatabasePauseRequest extends Pick<SharedDatabaseRequest, 'project' | 'environment' | 'gcpProjectId' | 'region' | 'binding' | 'cloud'> {
+  /**
+   * The environment's own connection secret, and the exact version its services are pinned to. The copy login's URL goes
+   * to the one secret named after it (`databaseCopySecretId`), which must exist, belong to the same environment, and never
+   * be mounted into a service.
+   */
+  secret: { id: string; labels: Record<string, string>; version: string };
+}
+
 export type SharedServerRequest = Pick<SharedDatabaseRequest, 'project' | 'gcpProjectId' | 'region' | 'engine' | 'cloud'> & {
   /** Every environment of the app as saved now. The server is never removed while one of them still records a database on it. */
   recorded: RecordedEnvironment[];
@@ -96,6 +106,13 @@ export interface SharedDatabaseEntry {
    * Planning reads no database: the step itself refuses, at the last moment, while any database is on the server.
    */
   planServerRemoval(request: SharedServerRequest): Promise<SharedServerRemovalPlan | { none: true } | { blocked: string }>;
+  /**
+   * Stops every way the app has into this environment's database and proves nobody is connected; then opens one other
+   * way in, for copying it, whose URL goes to a secret of its own. `resume` undoes it: the connection the services hold works again.
+   * Both can be repeated, in any order. Not part of any plan yet.
+   */
+  pause(request: SharedDatabasePauseRequest): Promise<ActionResult>;
+  resume(request: SharedDatabasePauseRequest): Promise<ActionResult>;
   applyServerRemoval(request: SharedServerRequest & { action: PlanAction; reviewed: unknown }): Promise<ActionResult>;
 }
 
@@ -310,6 +327,8 @@ async function run(request: Applying, serverSteps: boolean): Promise<ActionResul
     metadata, ...(reviewed.server ? { server: reviewed.server } : {}) });
 }
 
+const pauseContext = (request: SharedDatabasePauseRequest) => ({ cloud: request.cloud, scope: scopeOf(request), environment: request.environment, binding: request.binding, secret: request.secret });
+
 export const sharedDatabase: SharedDatabaseEntry = {
   plan,
   handles: (action) => action.metadata?.operation === SHARED_DATABASE_OPERATION,
@@ -324,6 +343,8 @@ export const sharedDatabase: SharedDatabaseEntry = {
     return result;
   },
   planServerRemoval,
+  pause: (request) => pauseDatabase(pauseContext(request)),
+  resume: (request) => resumeDatabase(pauseContext(request)),
   async applyServerRemoval(request) {
     const users = recordedOn(scopeOf(request), request.recorded);
     return users.length ? { success: false, status: 'blocked', message: stillRecorded(users) } : run(request, true);
