@@ -721,6 +721,66 @@ That is one run. Not exercised by it, and still unconfirmed:
 - Deleting the Google project while the server's deletion protection is on.
 - An app spanning more than one Google project or region.
 
+Moving a database between the shared server and a server of its own is not
+available yet; changing `placement` on an environment that has a database is
+still refused. One piece exists: the copy-and-verify job
+(`src/application/database-move-copy.ts`), tested offline against two local
+PostgreSQL servers and not yet run on Google Cloud. In order, it:
+
+1. checks that each connection names one server and that the two reach
+   exactly the two databases its caller named, the right way round, created
+   with the same text encoding and sort order, before it reads or clears
+   anything;
+2. requires the new database to hold nothing, judged by PostgreSQL's own dump
+   of it, and clears it only when its caller allows that and nothing in it
+   belongs to another owner;
+3. dumps the source and inventories it in one snapshot, and refuses what a
+   copy cannot carry over: any privilege granted or taken away, objects of
+   another owner, settings made on the database or the app's role, access the
+   database itself grants to other roles, subscriptions, extensions that keep
+   data of their own and, onto the shared server, any extension. The one
+   exception is a role named by the caller that holds exactly the access
+   Hypervibe gives it again afterwards (use of the `public` schema, reading
+   every table and view in it, and reading tables made there later) and
+   nothing else;
+4. only then clears the new database if allowed, checks it is empty again, and
+   restores, stopping on any error;
+5. compares every table's rows, every sequence, every large object's bytes,
+   every extension's version and the whole dumped text of every definition
+   with the source as it was at the dump. A comment on the `public` schema
+   comes along with everything else.
+
+Accepted limits of that job:
+
+- The secrets holding both connection strings can be read by the app's own
+  cloud identity, like every secret in the project. One person owns all of
+  them, so the copy has no separate identity; the rule is only that neither is
+  ever mounted into a service.
+- Nothing stops another session writing to the new database while the copy
+  runs. It is a database the move itself made, with no app login until the
+  switch; the job checks it is empty right before the restore and does not
+  lock it.
+- Tables and sequences that belong to an extension are not compared unless the
+  extension registered them as its own data, in which case the move is
+  refused. An extension that keeps data without registering it is not noticed.
+- On the shared server everyone but the environment's own role is shut out of
+  its database; on a server of its own the database is open to that server's
+  roles as PostgreSQL makes it. That difference is Hypervibe's own and is not
+  treated as a privilege lost or gained.
+- A database that hv_migrate once filled has its `public` schema without the
+  usual access for everyone. That counts as a privilege taken away, so such a
+  database is refused until moves handle it.
+- The dump is held in the job's own scratch space, so a database larger than
+  that cannot be moved this way.
+- Security labels are copied but not compared.
+- A sequence's value is outside any snapshot. A rehearsal made while the app
+  runs checks that every sequence arrived, not its value; the final copy,
+  made with the app paused, compares values too.
+- Not confirmed on Google Cloud: that the job's image runs the script (its
+  shell is BusyBox `ash`; the tests use `dash` where there is one), that one
+  job can mount two database servers, and that Cloud Run fails a run whose
+  task exits non-zero, which is why every refusal exits 0.
+
 Pausing a database, the first step of moving one, exists as two calls that no
 plan or command uses yet: pause and its undo, for a database on the shared
 server (`sharedDatabase.pause` / `resume`) and for one on a server of its own
