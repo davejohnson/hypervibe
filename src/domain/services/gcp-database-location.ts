@@ -31,6 +31,10 @@ export interface GcpDatabaseBinding {
     activeLogin?: string;
     /** 'started': written before anything was created, so an interrupted creation can always be found. Absent once finished. */
     allocation?: 'started';
+    /** On a shared server, while the database is being moved to an instance of the environment's own: that instance. The app still uses the shared one. */
+    move?: { instanceName: string };
+    /** On the environment's own instance, after such a move: the record of the database it left, kept until that one is deleted. */
+    movedFrom?: Record<string, unknown>;
   };
 }
 
@@ -98,4 +102,16 @@ export function gcpDatabasePlanBlocker(environmentGcpProjectId: string, binding:
     return 'This environment\'s database is on a server the environment does not own. Hypervibe cannot manage that yet.';
   }
   return undefined;
+}
+
+/**
+ * What to save when the environment's own instance is created or changed. An
+ * environment whose database is still on a shared server keeps that record and
+ * notes the instance beside it; one that left a shared server keeps the record
+ * of what it left until that is cleaned up.
+ */
+export function gcpOwnInstanceRecord(binding: GcpDatabaseBinding | undefined, instanceName: string): NonNullable<GcpDatabaseBinding['database']> {
+  const now = binding?.database;
+  if (now && gcpDatabaseOnSharedServer(binding)) return { ...now, move: { instanceName } };
+  return { instanceName, ...(now?.movedFrom && now.instanceName === instanceName ? { movedFrom: now.movedFrom } : {}) };
 }

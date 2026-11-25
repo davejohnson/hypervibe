@@ -17,7 +17,7 @@ import { MAINTENANCE_DATABASE, findSharedServer, serverPlanReview, sharedServerS
  * file decides when each of its calls is allowed and what gets recorded.
  */
 export const SHARED_DATABASE_OPERATION = 'gcpSharedDatabase';
-export type SharedDatabaseStep = 'server' | 'allocate' | 'rotate' | 'retire' | 'release' | 'unprotect-server' | 'remove-server';
+export type SharedDatabaseStep = 'server' | 'allocate' | 'rotate' | 'retire' | 'release' | 'unprotect-server' | 'remove-server' | 'switch';
 export type SharedDatabaseRecord = NonNullable<GcpDatabaseBinding['database']>;
 
 /** Everything a step needs, saved on its reviewed action. None of it is secret. */
@@ -36,6 +36,8 @@ export interface StepMetadata {
   connectionLimit?: number;
   /** retire: the secret version every service had moved to when this was reviewed. */
   secretVersion?: string;
+  /** switch: the environment's own server the database is copied to, the secret version holding its connection, and both servers' PostgreSQL version. */
+  own?: { instanceName: string; secretVersion: string; majorVersion: number };
 }
 
 export interface ReviewedServerPlan { planId: string; state: EngineStateIdentity; segment: EngineActionSegment }
@@ -120,7 +122,8 @@ export function credentialState(seen: Seen<SeenConnectionSecret>, target: { secr
   };
 }
 
-export type RunningSecretVersions = () => Promise<{ versions: string[] } | { blocked: string }>;
+/** `unsettled`: workloads that could not be found, or whose newest revision is not the one serving. Only a step that deletes data asks. */
+export type RunningSecretVersions = () => Promise<{ versions: string[]; unsettled?: string[] } | { blocked: string }>;
 
 export interface StepContext {
   cloud: SharedDatabaseCloud;

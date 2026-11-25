@@ -28,9 +28,8 @@ import { DATABASE_IDENTITY_FUNCTIONS, READ_SOURCE_IDENTITY, READ_TARGET_IDENTITY
  *    every sequence's value and whether it was used, every large object's
  *    bytes, and the text of every definition PostgreSQL dumps.
  *
- * Sequences are outside any snapshot, so a copy made while the app still runs
- * (`MOVE_REHEARSAL=1`) checks that every sequence arrived and leaves values to
- * the final copy, which is made with the app paused.
+ * Sequences are outside any snapshot, so the copy is only ever made with the
+ * app paused.
  *
  * Every refusal is a result line with the stage reached and whether the target
  * was written to, and the job still exits 0: a failed task would lose the line.
@@ -79,8 +78,6 @@ function inventory(side: 'source' | 'target'): string[] {
     `SELECT json_build_array(n.nspname, c.relname, ${element('last_value')}, ${element('is_called')})::text ${USER_RELATION}
        CROSS JOIN LATERAL (SELECT query_to_xml(format('SELECT last_value, is_called FROM %I.%I', n.nspname, c.relname), false, true, '') AS x) q
        WHERE c.relkind = 'S' AND ${USER_SCHEMA} AND ${NOT_EXTENSION} ORDER BY n.nspname COLLATE "C", c.relname COLLATE "C";`,
-    `\\o ${WORK}/${side}.sequencenames`,
-    `SELECT json_build_array(n.nspname, c.relname)::text ${USER_RELATION} WHERE c.relkind = 'S' AND ${USER_SCHEMA} AND ${NOT_EXTENSION} ORDER BY n.nspname COLLATE "C", c.relname COLLATE "C";`,
     `\\o ${WORK}/${side}.extensions`,
     'SELECT json_build_array(x.extname, x.extversion)::text FROM pg_extension x ORDER BY x.extname COLLATE "C";',
     `\\o ${WORK}/${side}.largeobjects`,
@@ -98,13 +95,31 @@ const THIS_DATABASE = `(SELECT d.oid FROM pg_database d WHERE d.datname = curren
  * not even read them) | subscriptions (a plain role's dump skips them silently) | other roles the database itself grants
  * access to (a dump of one database leaves the database's own privileges out)`.
  */
-const FACTS = `SELECT (SELECT count(*) FROM pg_extension WHERE extconfig IS NOT NULL)::text || '|' ||
+export const DATABASE_MOVE_FACTS = `SELECT (SELECT count(*) FROM pg_extension WHERE extconfig IS NOT NULL)::text || '|' ||
   (SELECT count(*) FROM pg_db_role_setting s WHERE s.setdatabase = ${THIS_DATABASE} OR (s.setdatabase = 0
     AND s.setrole IN (SELECT r.oid FROM pg_roles r WHERE r.rolname IN (current_user, session_user)) AND s.setconfig IS DISTINCT FROM ARRAY['role=' || current_user]))::text || '|' ||
   (SELECT count(*) FROM pg_largeobject_metadata m WHERE m.lomacl IS NOT NULL OR m.lomowner <> ${ME})::text || '|' ||
   (SELECT count(*) ${USER_RELATION} WHERE ${USER_SCHEMA} AND ${NOT_EXTENSION} AND c.relowner <> ${ME})::text || '|' ||
   (SELECT count(*) FROM pg_subscription u WHERE u.subdbid = ${THIS_DATABASE})::text || '|' ||
   (SELECT count(DISTINCT a.grantee) FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a WHERE d.oid = ${THIS_DATABASE} AND a.grantee NOT IN (0, d.datdba, ${ME}))::text;`;
+
+const FACTS = DATABASE_MOVE_FACTS;
+
+/**
+ * The same judgement the job makes of those counts, for a caller that can read them before anything is paused.
+ * Undefined when the job would not refuse on their account.
+ */
+export function databaseMoveFactsProblem(facts: unknown): string | undefined {
+  const counts = typeof facts === 'string' ? facts.split('|') : [];
+  if (counts.length !== 6 || counts.some((count) => !/^[0-9]{1,9}$/.test(count))) return 'could not be inspected';
+  const [ownData, settings, large, others, subscribed, granted] = counts.map(Number) as [number, number, number, number, number, number];
+  if (ownData) return `uses ${ownData} extension(s) that keep data of their own, which the copy cannot check`;
+  if (settings) return `has ${settings} setting(s) made on the database or the app's role, which a copy does not carry over`;
+  if (subscribed) return `has ${subscribed} subscription(s) to another database, which cannot be moved yet`;
+  if (granted) return `itself grants access to ${granted} other role(s), which a copy does not carry over`;
+  if (large + others) return `holds ${large + others} object(s) owned by a role other than the app's own, or large objects with privileges of their own, which cannot be carried over`;
+  return undefined;
+}
 
 /** How the database itself was created: what decides how text is stored and sorted. Read as JSON so a column a version lacks is simply absent. */
 const CREATED_AS = `SELECT json_build_array(pg_encoding_to_char(d.encoding), d.datcollate, d.datctype, to_jsonb(d) -> 'datlocprovider', coalesce(to_jsonb(d) -> 'datlocale', to_jsonb(d) -> 'daticulocale'), to_jsonb(d) -> 'daticurules')::text
@@ -284,22 +299,19 @@ export function databaseMoveCopyScript(): string {
     `  && sift -Ev "$(standard "$TARGET_OWNER")" ${WORK}/target.list > ${WORK}/target.entries \\`,
     `  && pg_restore --no-owner --no-privileges -L ${WORK}/target.entries -f ${WORK}/target.rendered ${WORK}/target.dump 2>/dev/null && unkeyed ${WORK}/target.rendered ${WORK}/target.definitions && [ -s ${WORK}/target.definitions ] \\`,
     '  || blocked "The new database\'s definitions could not be read after the copy."',
-    // A sequence's value is not part of any snapshot, so with the app still running only its presence can be compared.
-    'if [ "${MOVE_REHEARSAL:-0}" = 1 ]; then REHEARSAL=true; SEQUENCES=sequencenames; else REHEARSAL=false; SEQUENCES=sequences; fi',
     'DIFFERENT=',
-    'for PART in tables "$SEQUENCES" largeobjects extensions definitions; do',
-    '  case "$PART" in sequencenames) LABEL=sequences ;; *) LABEL=$PART ;; esac',
+    'for PART in tables sequences largeobjects extensions definitions; do',
     // Both files must exist: a missing one is a failure of the job, never a difference and never a match.
     `  [ -f ${WORK}/source.$PART ] && [ -f ${WORK}/target.$PART ] || blocked "Part of the comparison was never written."`,
-    `  cmp -s ${WORK}/source.$PART ${WORK}/target.$PART || DIFFERENT="$DIFFERENT\${DIFFERENT:+,}\\"$LABEL\\""`,
+    `  cmp -s ${WORK}/source.$PART ${WORK}/target.$PART || DIFFERENT="$DIFFERENT\${DIFFERENT:+,}\\"$PART\\""`,
     'done',
     `SRC=$(cat ${WORK}/source.summary); DST=$(cat ${WORK}/target.summary)`,
     'count "${SRC%|*}" && count "${SRC#*|}" && count "${DST%|*}" && count "${DST#*|}" || blocked "The copy could not be summarised."',
     'if [ -z "$DIFFERENT" ]; then MATCH=true; else MATCH=false; fi',
-    'side() { printf \'{"tables":%s,"rows":"%s","version":"%s","sequences":%s,"largeObjects":%s}\' "${2%|*}" "${2#*|}" "$3" "$(lines "$1.sequencenames")" "$(lines "$1.largeobjects")"; }',
+    'side() { printf \'{"tables":%s,"rows":"%s","version":"%s","sequences":%s,"largeObjects":%s}\' "${2%|*}" "${2#*|}" "$3" "$(lines "$1.sequences")" "$(lines "$1.largeobjects")"; }',
     'DONE=1',
-    `printf '${RESULT_MARKER}{"ok":true,"rehearsal":%s,"match":%s,"different":[%s],"source":%s,"target":%s,"dumpSeconds":%s,"restoreSeconds":%s,"dumpBytes":%s}\\n' \\`,
-    `  "$REHEARSAL" "$MATCH" "$DIFFERENT" "$(side ${WORK}/source "$SRC" "$SRC_VERSION")" "$(side ${WORK}/target "$DST" "$DST_VERSION")" "$((DUMPED - STARTED))" "$((RESTORED - DUMPED))" "$(wc -c < ${WORK}/source.dump | tr -d ' ')"`,
+    `printf '${RESULT_MARKER}{"ok":true,"match":%s,"different":[%s],"source":%s,"target":%s,"dumpSeconds":%s,"restoreSeconds":%s,"dumpBytes":%s}\\n' \\`,
+    `  "$MATCH" "$DIFFERENT" "$(side ${WORK}/source "$SRC" "$SRC_VERSION")" "$(side ${WORK}/target "$DST" "$DST_VERSION")" "$((DUMPED - STARTED))" "$((RESTORED - DUMPED))" "$(wc -c < ${WORK}/source.dump | tr -d ' ')"`,
   ].join('\n');
 }
 
@@ -311,8 +323,6 @@ export interface DatabaseMoveCopyResult {
   stage?: 'check' | 'dump' | 'reset' | 'restore' | 'verify';
   targetChanged?: boolean;
   error?: string;
-  /** A copy made while the app could still write: it proves the copy works and how long it takes, never that the two databases are the same now. */
-  rehearsal?: boolean;
   match?: boolean;
   /** Which parts of the copy differ from the source: tables, sequences, largeobjects, extensions, definitions. */
   different?: string[];
@@ -328,12 +338,12 @@ const complete = (side: Partial<MoveSideCounts> | undefined): side is MoveSideCo
   && typeof side.version === 'string' && /^[0-9]+$/.test(side.version) && whole(side.sequences) && whole(side.largeObjects);
 
 /**
- * True only for a finished copy, not a rehearsal, whose every part matched and
+ * True only for a finished copy whose every part matched and
  * whose every count is present on both sides and equal. Anything missing is
  * never read as "the same".
  */
 export function databaseMoveCopyVerified(result: DatabaseMoveCopyResult | undefined): boolean {
-  if (!result || result.ok !== true || result.rehearsal !== false || result.match !== true || !Array.isArray(result.different) || result.different.length !== 0) return false;
+  if (!result || result.ok !== true || result.match !== true || !Array.isArray(result.different) || result.different.length !== 0) return false;
   const { source, target } = result;
   return complete(source) && complete(target) && source.tables === target.tables && source.rows === target.rows && source.sequences === target.sequences && source.largeObjects === target.largeObjects;
 }
@@ -359,10 +369,6 @@ export function databaseMoveCopyJob(params: {
   majorVersion: number;
   source: MoveSide;
   target: MoveSide;
-  /** The app is still running on the source: prove the copy works and time it, without comparing sequence values. */
-  rehearsal?: boolean;
-  /** Clear a non-empty target first. Only for a target the move created and no app ever wrote to. */
-  resetTarget?: boolean;
   /** Refuse a source with any extension beyond plpgsql (moving onto the shared server). */
   blockExtensions?: boolean;
   /** Roles whose grants Hypervibe re-creates itself after the copy (the on-demand worker's reader). */
@@ -384,7 +390,8 @@ export function databaseMoveCopyJob(params: {
   return {
     purpose: 'database', image: `postgres:${params.majorVersion}-alpine`, script: databaseMoveCopyScript(),
     env: { PGTZ: 'UTC', MOVE_SOURCE_IDENTITY: params.source.identity, MOVE_TARGET_IDENTITY: params.target.identity,
-      ...(params.rehearsal ? { MOVE_REHEARSAL: '1' } : {}), ...(params.resetTarget ? { MOVE_RESET_TARGET: '1' } : {}), ...(params.blockExtensions ? { MOVE_BLOCK_EXTENSIONS: '1' } : {}),
+      // The target is always a database the move itself made and no app ever wrote to, so what an earlier, unfinished copy left in it may be cleared.
+      MOVE_RESET_TARGET: '1', ...(params.blockExtensions ? { MOVE_BLOCK_EXTENSIONS: '1' } : {}),
       ...(ignored.length ? { MOVE_IGNORED_GRANTEES: ignored.join(',') } : {}) },
     sourceSecrets: {},
     secretRefs: { SOURCE_DATABASE_URL: params.source.secret, DATABASE_URL: params.target.secret },

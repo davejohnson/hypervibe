@@ -7,13 +7,14 @@ import { engineSegmentOf } from '../../domain/ports/infrastructure-engine.port.j
 import type { EnvironmentSpec } from '../../domain/spec/spec.schema.js';
 import { gcpDatabaseOnSharedServer, type GcpDatabaseBinding } from '../gcp-database-location.js';
 import { Stop, blocked } from './administrator.js';
+import { applySwitch, cleanupTarget, planCleanup, planMove, type DatabaseMove, type MoveStepContext } from './move.js';
 import { pauseDatabase, resumeDatabase } from './pause.js';
 import type { SharedDatabaseCloud, SharedDatabaseEngine } from './ports.js';
 import {
   SERVER_ENGINE_ACTION, findSharedServer, serverPlanReview, newSharedServerName, sharedServerConfiguration, sharedServerCost, sharedServerProtection, sharedServerState, type SharedServerScope,
 } from './server.js';
 import {
-  CONNECTION_LIMITS, SHARED_DATABASE_OPERATION, credentialState, recordedAllocation, runStep, tenantFor,
+  CONNECTION_LIMITS, SHARED_DATABASE_OPERATION, credentialState, recordedAllocation, runStep, settled, tenantFor,
   type ReviewedServerPlan, type RunningSecretVersions, type SharedDatabaseRecord, type SharedDatabaseStep, type StepMetadata,
 } from './tenancy.js';
 
@@ -30,6 +31,7 @@ import {
  * (`record`, called by a step whenever that changes).
  */
 export { googleSharedDatabaseCloud } from './google.js';
+export type { DatabaseMove } from './move.js';
 export type { SharedDatabaseCloud, SharedDatabaseEngine } from './ports.js';
 
 export interface SharedDatabaseRequest {
@@ -63,6 +65,11 @@ export interface SharedDatabasePlan {
   warnings: string[];
   /** Saved with the reviewed plan and handed back, unread, to `apply`. */
   reviewed: Record<string, unknown>;
+  /**
+   * Set when the database is leaving the shared server for one of the environment's own. Everything above is then empty:
+   * the caller plans that server as it would for any environment, keeps the workloads where `move` says, and places the move's steps.
+   */
+  move?: DatabaseMove;
 }
 
 /** What Hypervibe has saved for one of the app's environments. */
@@ -125,8 +132,10 @@ const resource = { kind: 'database' as const, name: 'postgres', provider: 'gcp' 
 
 /** The environments whose saved record puts a database on this app's shared server in this Google project and region. */
 function recordedOn(scope: SharedServerScope, environments: RecordedEnvironment[]): string[] {
-  return environments.filter(({ binding }) => gcpDatabaseOnSharedServer(binding)
-    && (binding!.database!.gcpProjectId ?? scope.gcpProjectId) === scope.gcpProjectId && (binding!.database!.region ?? scope.region) === scope.region).map(({ environment }) => environment);
+  // An environment that moved to its own server still has its old database here until that is deleted.
+  const here = (binding: GcpDatabaseBinding | undefined) => (gcpDatabaseOnSharedServer(binding) ? binding!.database : binding?.database?.movedFrom) as { gcpProjectId?: string; region?: string } | undefined;
+  return environments.filter(({ binding }) => { const record = here(binding); return record !== undefined && (record.gcpProjectId ?? scope.gcpProjectId) === scope.gcpProjectId && (record.region ?? scope.region) === scope.region; })
+    .map(({ environment }) => environment);
 }
 const stillRecorded = (names: string[]): string => `${names.join(', ')} still ${names.length === 1 ? 'has its' : 'have their'} database on the app's shared database server. Tear ${names.length === 1 ? 'that environment' : 'those environments'} down, or remove the database from ${names.length === 1 ? 'its' : 'their'} spec and apply, before removing the server. Nothing was changed.`;
 const serverMetadata = (scope: SharedServerScope, step: SharedDatabaseStep, instanceName: string): Record<string, unknown> =>
@@ -175,13 +184,24 @@ async function plan(request: SharedDatabasePlanRequest): Promise<SharedDatabaseP
   const { environment, binding, desired, cloud } = request;
   const bound = gcpDatabaseOnSharedServer(binding);
   const wanted = desired?.placement === 'app';
+  const moving = { environment, binding, scope: scopeOf(request), secret: request.secret, runningSecretVersions: request.runningSecretVersions, cloud };
+  const move = async (work: () => Promise<DatabaseMove>): Promise<SharedDatabasePlan | { blocked: string }> => {
+    try {
+      return { actions: [], credential: { ready: false }, warnings: [], reviewed: {}, move: await work() };
+    } catch (error) {
+      if (error instanceof Stop) return { blocked: error.result.message };
+      throw error;
+    }
+  };
+  if (!bound && binding?.database?.movedFrom !== undefined) return move(() => planCleanup({ ...moving, desired: desired ?? undefined, wantsShared: wanted } as Parameters<typeof planCleanup>[0]));
+  if (bound && binding!.database!.move !== undefined && (!desired || wanted)) {
+    return { blocked: `${environment.name}'s database is being moved to a server of its own. Finish the move first: remove "placement" from its database and run hv_plan and hv_apply until nothing is left.` };
+  }
+  if (bound && desired && !wanted) return move(() => planMove({ ...moving, desired }));
   if (!bound && !wanted) return undefined;
   const name = environment.name;
   if (!bound && binding?.database && wanted) {
     return { blocked: `${name} already has a database server of its own. Moving an existing database onto the app's shared server is not available yet; remove "placement" from its database to keep it where it is.` };
-  }
-  if (bound && desired && !wanted) {
-    return { blocked: `${name}'s database is on the app's shared database server. Moving it to a server of its own is not available yet; keep "placement": "app" on its database.` };
   }
   try {
     const scope = scopeOf(request);
@@ -321,6 +341,20 @@ async function run(request: Applying, serverSteps: boolean): Promise<ActionResul
     }
     metadata.secretId = request.secret.id;
     metadata.labels = request.secret.labels;
+  }
+  const record = request.binding?.database;
+  const moveContext = (): MoveStepContext => ({ cloud: request.cloud, scope, environment: request.environment ?? { id: '', name: '' }, binding: request.binding, secret: request.secret ?? { id: '', labels: {} },
+    runningSecretVersions: request.runningSecretVersions ?? (async () => ({ blocked: 'No workloads to check.' })), metadata, record: request.record ?? (() => {}) });
+  if (metadata.step === 'switch') return settled(() => applySwitch(moveContext()));
+  // While a database is being moved, the move's own step is the only one that may touch it.
+  if (record?.move !== undefined) return { success: false, status: 'blocked', message: 'This environment\'s database is being moved to a server of its own. Nothing was changed. Run hv_plan again.' };
+  if (record?.movedFrom !== undefined && !gcpDatabaseOnSharedServer(request.binding)) {
+    // The only step left for a database that was moved away is deleting what it left behind.
+    if (metadata.step !== 'release') return { success: false, status: 'blocked', message: 'The shared database target changed since this plan. Run hv_plan again.' };
+    const target = await settled(async () => ({ success: true, message: '', data: await cleanupTarget(moveContext()) }));
+    if (!target.success) return target;
+    const { binding, record: forget } = target.data as Awaited<ReturnType<typeof cleanupTarget>>;
+    request = { ...request, binding, record: forget };
   }
   return runStep({ cloud: request.cloud, engine: request.engine, scope, environment: request.environment ?? { id: '', name: '' }, binding: request.binding,
     record: request.record ?? (() => {}), runningSecretVersions: request.runningSecretVersions ?? (async () => ({ blocked: 'No workloads to check.' })),

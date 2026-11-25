@@ -683,7 +683,7 @@ work, migration to or from it (by spec or by saved record), declarative
 `dataMigration`, direct queries (`hv_db_query`), `database.size`,
 `database.version`, `deletionProtection: true` (only the server is protected;
 removing an environment's database always asks for confirmation), and moving
-an existing database on or off it. Backups, checkpoints and restore drills
+an existing database onto it (moving one off it is described below). Backups, checkpoints and restore drills
 from the spec are refused for every engine database already. Extensions that
 need Cloud SQL's elevated role cannot be installed by the app's logins there,
 and Hypervibe cannot detect that a migration needs one: such an app must keep
@@ -773,30 +773,110 @@ Accepted limits of that job:
 - The dump is held in the job's own scratch space, so a database larger than
   that cannot be moved this way.
 - Security labels are copied but not compared.
-- A sequence's value is outside any snapshot. A rehearsal made while the app
-  runs checks that every sequence arrived, not its value; the final copy,
-  made with the app paused, compares values too.
+- A sequence's value is outside any snapshot, so the copy is only made with
+  the app paused; there is no rehearsal mode. The job always clears its
+  target first: the target is a database the move made and no app wrote to.
 - Not confirmed on Google Cloud: that the job's image runs the script (its
   shell is BusyBox `ash`; the tests use `dash` where there is one), that one
   job can mount two database servers, and that Cloud Run fails a run whose
   task exits non-zero, which is why every refusal exits 0.
 
-For moving a database between the shared server and a server of its own (not
-available yet), the configuration generator can point every workload of an
+### Moving a database off the shared server (implemented, not run live)
+
+Removing `"placement": "app"` from the database of an environment that is on
+the shared server plans a move to a server of its own. It is three ordinary
+rounds of `hv_plan` and `hv_apply`, and which round comes next is read from
+what exists, not from a saved stage:
+
+1. **Prepare** (billable, confirmed like any new database server): first the
+   database is read as the app itself, and a database the copy would refuse or
+   that is too big is refused here, before any server is created. Then the
+   environment's own server, database, two logins and connection are created
+   by the same path as for an environment that always had its own server. The
+   services are not touched: the generator keeps them on the shared database
+   (`workloadDatabase`, below), pinned to the secret version they already run.
+   The new login is stored as a new version of the environment's one
+   connection secret; nothing uses that version yet.
+2. **Switch** (confirmed; the plan says the app returns database errors until
+   the copy is checked and its services have restarted, and that how long this
+   takes has not been measured): one step shuts the
+   app out of the shared database, runs the copy-and-verify job, and only when
+   the copy is proven equal records the environment as one with its own
+   server. The services' change to the new socket and secret version waits for
+   that step. If the pause, the copy or its check fails, the pause is undone
+   and the app is back on the shared database with nothing moved. Once the
+   record has changed, the old database stays shut whatever happens; if a
+   service change then fails, the next `hv_plan` is an ordinary plan for an
+   environment with its own server and finishes it.
+3. **Clean up** (confirmed, deletes data): offered only when workloads are
+   positively seen on the new connection, and checked again when applied: at
+   least one must be seen, every one found, each service's newest revision
+   must be the one Cloud Run reports ready (`latestReadyRevision` equals
+   `latestCreatedRevision`, the signal the code already used elsewhere; traffic
+   splits are not read), and all must run the new secret version. It
+   deletes the old database and its logins from the shared server with the
+   same step that removes any environment's database there. Until then the old
+   data stays on the shared server, untouched. The app's two logins are
+   switched off; the copy login stays switched on until this step deletes it,
+   and its password exists only in the copy secret, which the first plan after
+   the switch deletes.
+
+What is saved about a move is two notes on the environment's database record:
+`move` (the own server chosen, while the app is still on the shared one) and
+`movedFrom` (the shared record, from the switch until clean-up). There is no
+rehearsal and no way back built in: moving back would be the opposite move,
+which does not exist yet.
+
+- While a move is under way, these are refused with the reason: putting
+  `"placement": "app"` back, tearing the environment down, removing its
+  database, changing its password (`passwordGeneration`), removing the shared
+  server, and any other step on that database from an older saved plan. A move
+  cannot be cancelled once the own server exists; it has to be finished.
+- Refused before anything is created or paused: a database not fully set up, a
+  password change still in progress, a migration or `dataMigration`, a worker
+  that counts pending work in the database, a `version` other than the shared
+  server's, a database over 2 GB (the copy job keeps the dump in 4 GiB of
+  memory-backed working space; the limit is a cautious guess, not measured),
+  services that do not all run one version of the connection secret, an
+  environment with no service using the database, and, in the first round
+  only, whatever the copy job would refuse that can be read beforehand
+  (extensions with data of their own, settings on the database or role,
+  subscriptions, grants to other roles, objects of another owner).
+- An interrupted switch can leave the app shut out, and the copy secret with a
+  version Hypervibe never heard back about. The next `hv_plan` still plans the
+  switch, and applying it sets that version aside and either completes the
+  move or lets the app back in.
+- Known dead end: if Hypervibe is stopped in the first round between Google
+  storing the own server's login and Hypervibe recording it, the move is
+  refused from then on with the reason. A dropped answer alone is settled on
+  the spot by reading back what was stored; only a stopped process leaves this.
+- The copy login's secret (`<connection secret>-copy`) is created in the first
+  round and removed by the first plan after the switch. It is never mounted
+  into a service; like every secret of the project the app's cloud identity
+  could read it.
+- Tested offline only, through the planner, the saved plan, the saved-plan
+  check and apply, with two local PostgreSQL servers and the copy job's real
+  script (`gcp-shared-database-move.postgres.test.ts`). Not run on Google
+  Cloud: the copy job as a Cloud Run job with two Cloud SQL mounts, whether its
+  identity may read both secrets, and how long the pause lasts.
+
+The configuration generator can point every workload of an
 environment at a database that is named outright, with its socket and its
 connection secret together, while the instance the environment itself creates
 stays in the configuration exactly as declared (`workloadDatabase`,
 `src/adapters/providers/gcp/tofu/gcp-workload-database.ts`). The caller also
 lists the ids of every secret that holds a database connection, because the
 generator cannot tell those from other secrets; a workload left reading any of
-them other than the named one is refused. No plan passes
-that input yet, and without it the generated configuration is unchanged.
+them other than the named one is refused. Only the first round of a move passes
+that input; without it the generated configuration is unchanged.
 
-Pausing a database, the first step of moving one, exists as two calls that no
-plan or command uses yet: pause and its undo, for a database on the shared
-server (`sharedDatabase.pause` / `resume`) and for one on a server of its own
-(`src/application/gcp-dedicated-database-pause.ts`). Tested offline against
-real local PostgreSQL servers; not yet run on Google Cloud.
+Pausing a database exists as two calls, pause and its undo. The one for a
+database on the shared server is what the switch above uses; during a move the
+connection secret's newest version already belongs to the new server, so the
+pause then relies on reading the pinned version itself. The one for a database
+on a server of its own (`src/application/gcp-dedicated-database-pause.ts`) is
+used by no plan yet. Tested offline against real local PostgreSQL servers; not
+yet run on Google Cloud.
 
 - Paused means the app cannot connect with either of its two logins, their
   sessions are ended, and nobody else is connected to that database. The call
@@ -838,11 +918,6 @@ real local PostgreSQL servers; not yet run on Google Cloud.
 - On a server of its own nothing serialises a pause against another change
   made at the same moment; the last look before it reports success counts
   every session on the database.
-- Known gap for the move itself: a service can be pointed at a database its
-  environment does not create only when the environment creates none
-  (`gcp-engine.backend.ts`, where the environment's own instance takes
-  precedence). Moving off a server of its own needs that order changed, in a
-  pull request of its own.
 
 Known limits of removing the server:
 

@@ -226,7 +226,7 @@ describe('the generated job', () => {
     expect(container.image).toBe('postgres:16-alpine');
     expect(container.args).toEqual(['-c', databaseMoveCopyScript()]);
     expect(container.env).toEqual([{ name: 'PGTZ', value: 'UTC' }, { name: 'MOVE_SOURCE_IDENTITY', value: A }, { name: 'MOVE_TARGET_IDENTITY', value: B },
-      { name: 'MOVE_BLOCK_EXTENSIONS', value: '1' }, { name: 'MOVE_IGNORED_GRANTEES', value: 'hv-runtime@demo-project.iam' },
+      { name: 'MOVE_RESET_TARGET', value: '1' }, { name: 'MOVE_BLOCK_EXTENSIONS', value: '1' }, { name: 'MOVE_IGNORED_GRANTEES', value: 'hv-runtime@demo-project.iam' },
       { name: 'SOURCE_DATABASE_URL', valueSource: { secretKeyRef: { secret: 'hv-production-database-url', version: '4' } } },
       { name: 'DATABASE_URL', valueSource: { secretKeyRef: { secret: 'hv-production-database-move', version: '1' } } }]);
     expect(container.volumeMounts).toEqual([{ name: 'cloudsql', mountPath: '/cloudsql' }]);
@@ -245,9 +245,9 @@ describe('the generated job', () => {
 
   it('counts a result as verified only when every part matched and every count is there on both sides', () => {
     const side = { tables: 0, rows: '0', version: '160004', sequences: 0, largeObjects: 0 };
-    const good: DatabaseMoveCopyResult = { ok: true, rehearsal: false, match: true, different: [], source: side, target: side };
+    const good: DatabaseMoveCopyResult = { ok: true, match: true, different: [], source: side, target: side };
     expect(databaseMoveCopyVerified(good)).toBe(true);
-    for (const bad of [undefined, { ...good, ok: false }, { ...good, rehearsal: true }, { ...good, rehearsal: undefined }, { ...good, match: false }, { ...good, different: ['sequences'] }, { ...good, different: undefined },
+    for (const bad of [undefined, { ...good, ok: false }, { ...good, match: false }, { ...good, different: ['sequences'] }, { ...good, different: undefined },
       { ...good, source: undefined }, { ...good, source: {}, target: {} }, { ...good, target: { ...side, rows: '1' } }, { ...good, target: { ...side, sequences: 1 } }, { ...good, target: { ...side, largeObjects: 1 } },
       { ...good, source: { ...side, sequences: undefined }, target: { ...side, sequences: undefined } }, { ...good, source: { ...side, rows: undefined }, target: { ...side, rows: undefined } },
       { ...good, source: { ...side, tables: '0' as never }, target: { ...side, tables: '0' as never } }]) {
@@ -312,7 +312,7 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     await fill(source);
     const { result, output } = await copy(source, target, to === 'shared' ? { MOVE_BLOCK_EXTENSIONS: '1' } : {});
     const side = { tables: 8, rows: '305', sequences: 5, largeObjects: 1 };
-    expect(result, output).toMatchObject({ ok: true, rehearsal: false, match: true, different: [], source: side, target: side });
+    expect(result, output).toMatchObject({ ok: true, match: true, different: [], source: side, target: side });
     expect(databaseMoveCopyVerified(result)).toBe(true);
     // Everything belongs to the target's own owner role, and the app's login can carry on exactly where the source stopped.
     expect(await scalar(target, `SELECT string_agg(DISTINCT pg_catalog.pg_get_userbyid(c.relowner), ',') FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname IN ('public', 'audit')`)).toBe(target.owner);
@@ -332,24 +332,6 @@ describe.runIf(major >= 15)('copying between an own server and the shared server
     expect(result, output).toMatchObject({ ok: true, match: true, different: [], source: side, target: side });
     expect(databaseMoveCopyVerified(result)).toBe(true);
   }, 60_000);
-
-  it('verifies a rehearsal against the dump\'s own moment while the app keeps writing, and never counts it as the copy', async () => {
-    const source = await sharedDatabase();
-    const target = await ownDatabase();
-    await fill(source);
-    const writer = await connect(source.side, source.login, PASSWORD, source.name);
-    let writing = true;
-    let written = 0;
-    const writes = (async () => { while (writing) { await writer.query(`INSERT INTO "a|b" (note) VALUES ('during the copy')`); await writer.query(`SELECT nextval('audit.ticket')`); written++; } })();
-    const { result, output } = await copy(source, target, { MOVE_REHEARSAL: '1' });
-    writing = false;
-    await writes;
-    expect(written).toBeGreaterThan(10);
-    expect(result, output).toMatchObject({ ok: true, rehearsal: true, match: true, different: [] });
-    expect(databaseMoveCopyVerified(result)).toBe(false);
-    // The copy is the source as it was at one moment, not as it is now.
-    expect(Number(await scalar(target, 'SELECT count(*) FROM "a|b"'))).toBeLessThan(Number(await scalar(source, 'SELECT count(*) FROM "a|b"')));
-  }, 120_000);
 
   it.each([
     ['a changed row in a table whose name contains the old separator', `UPDATE "a|b" SET note = 'tampered' WHERE id = 1`, ['tables']],
@@ -375,7 +357,6 @@ last' $$`, ['definitions']],
     ['a changed comment', `COMMENT ON TABLE shadowed IS 'different'`, ['definitions']],
     ['an added collation, a kind of object no list here names', `CREATE COLLATION extra (locale = 'C')`, ['definitions']],
     ['an extra table', `CREATE TABLE smuggled (id int)`, ['tables', 'definitions']],
-    ['a missing sequence, even in a rehearsal', `DROP SEQUENCE audit.unused`, ['sequences', 'definitions'], { MOVE_REHEARSAL: '1' }],
   ] as Array<[string, string, string[], Record<string, string>?]>)('does not certify a copy with %s', async (_what, change, different, env) => {
     const source = await ownDatabase();
     const target = await sharedDatabase();
@@ -606,7 +587,7 @@ last' $$`, ['definitions']],
     await fill(source, [`CREATE TABLE jobs (id int)`, `CREATE TABLE more_jobs (id int)`, `CREATE VIEW open_jobs AS SELECT id FROM jobs`, `GRANT USAGE ON SCHEMA public TO "waker@demo-project.iam"`,
       `GRANT SELECT ON ALL TABLES IN SCHEMA public TO "waker@demo-project.iam"`, `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO "waker@demo-project.iam"`]);
     // Exactly what Hypervibe grants, on every table and view: carried on.
-    expect((await copy(source, target, { MOVE_IGNORED_GRANTEES: 'waker@demo-project.iam', MOVE_REHEARSAL: '1' })).result).toMatchObject({ ok: true, match: true });
+    expect((await copy(source, target, { MOVE_IGNORED_GRANTEES: 'waker@demo-project.iam' })).result).toMatchObject({ ok: true, match: true });
     await fill(source, extra);
     const { result, output } = await copy(source, target, { MOVE_IGNORED_GRANTEES: 'waker@demo-project.iam', MOVE_RESET_TARGET: '1' });
     expect(result, output).toMatchObject({ ok: false, stage: 'dump', targetChanged: false, error: expect.stringMatching(/privilege\(s\) granted or taken away/) });

@@ -37,6 +37,12 @@ export interface PauseContext {
   binding: GcpDatabaseBinding | undefined;
   /** The environment's own connection secret (DATABASE_URL), and the version its services are pinned to. */
   secret: { id: string; labels: Record<string, string>; version: string };
+  /**
+   * The secret's newest version already holds another database's connection (the one this database is being moved to),
+   * so what is recorded about the newest version says nothing about this one. The pinned version's own content is still
+   * read and must be this database's recorded login; that check alone then stands.
+   */
+  newestIsAnotherDatabase?: boolean;
 }
 
 interface Known { identity: TenantIdentity; server: ServerAddress; active: string; copy: string; copySecretId: string; held: { password: string } }
@@ -51,8 +57,8 @@ async function known(context: PauseContext): Promise<Known> {
   if (recordedAllocation(context.binding, identity) !== 'finished') throw blocked(`${name}'s database on the app's shared database server is not fully set up, so it cannot be paused. Run hv_plan and hv_apply first.`);
   const record = context.binding!.database!;
   const server = await runningServer(cloud, scope, record.instanceName);
-  const credential = credentialState(await cloud.observeConnectionSecret(scope.gcpProjectId, secret.id),
-    { secretId: secret.id, environmentLabel: owner, instanceName: server.instanceName, names: identity.names });
+  const credential = context.newestIsAnotherDatabase ? { ready: true, login: record.activeLogin, latestVersion: secret.version, retirePending: undefined }
+    : credentialState(await cloud.observeConnectionSecret(scope.gcpProjectId, secret.id), { secretId: secret.id, environmentLabel: owner, instanceName: server.instanceName, names: identity.names });
   if (!credential.ready || credential.login !== record.activeLogin) throw blocked(`${name}'s connection secret does not hold the login recorded for its database. Run hv_plan and hv_apply first.`);
   if (credential.retirePending) throw blocked(`${name}'s database password is still being changed: its previous login has not been switched off yet. Finish that with hv_plan and hv_apply first.`);
   if (credential.latestVersion !== secret.version) throw blocked(`${name}'s services use version ${secret.version} of its connection secret, which is not its newest (${credential.latestVersion}). Run hv_plan and hv_apply first.`);
