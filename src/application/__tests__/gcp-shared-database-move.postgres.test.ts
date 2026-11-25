@@ -4,7 +4,9 @@
  * plan, the saved-plan check hv_apply runs, and the Google apply, for each of
  * the move's three plans. Two local, disposable PostgreSQL servers stand for
  * the shared server and the environment's own; the copy job's real script runs
- * against them with the local PostgreSQL tools. Google's interfaces are
+ * against them with the local PostgreSQL tools. Both servers are given what
+ * Cloud SQL was seen to put on every database of its own accord (a live run on
+ * 2026-11-25, PostgreSQL 16.15): `GRANT ALL ON SCHEMA public TO cloudsqlsuperuser`. Google's interfaces are
  * answered by an in-memory fake and the lifecycle engine by a stand-in; no
  * cloud is contacted.
  */
@@ -204,6 +206,7 @@ function standInPlan({ configuration, state, planId, verifyPlannedChanges }: Par
         // Google creates the database owned by its administrators' group.
         await google.local.own.boot.query('CREATE ROLE cloudsqlsuperuser NOLOGIN CREATEROLE CREATEDB');
         await google.local.own.boot.query('CREATE DATABASE app OWNER cloudsqlsuperuser TEMPLATE template0');
+        await asBoot('own', 'app', 'GRANT ALL ON SCHEMA public TO cloudsqlsuperuser');
       });
     }
     for (const [key, service] of Object.entries((files['cloudrun.tf.json']?.resource?.google_cloud_run_v2_service ?? {}) as Record<string, Json>)) {
@@ -262,10 +265,16 @@ async function asApp(url: string, statement: string): Promise<string> {
     await client.end().catch(() => {});
   }
 }
+/** One statement as the server's own superuser, inside one database: what Google does by itself, or what a person does by hand. */
+async function asBoot(side: 'shared' | 'own', database: string, statement: string): Promise<void> {
+  const client = await google.local[side].connect('boot', undefined, database);
+  try { await client.query(statement); } finally { await google.local[side].close(client); }
+}
 const tenants = async () => (await google.local.shared.boot.query(`SELECT datname FROM pg_database WHERE datname LIKE 'app\\_%' ORDER BY 1`)).rows.map((row) => String(row.datname));
 
 beforeAll(async () => {
   google.local.shared = await startPostgres('hv-move-shared');
+  await google.local.shared.boot.query('CREATE ROLE cloudsqlsuperuser NOLOGIN CREATEROLE CREATEDB; CREATE ROLE reporting NOLOGIN');
   google.local.own = await startPostgres('hv-move-own');
   home = mkdtempSync(path.join(tmpdir(), 'hv-move-path-'));
   google.work = path.join(home, 'work');
@@ -315,6 +324,7 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     const serviceName = [...google.services.keys()][0]!;
     ctx.repos.environments.updatePlatformBindings(environment.id, { services: { web: { serviceId: serviceName } } });
     sharedUrl = urls().at(-1)!;
+    await asBoot('shared', record()!.databaseName, 'GRANT ALL ON SCHEMA public TO cloudsqlsuperuser');
     expect(web()).toBe(`${urls().length}|${record()!.instanceName}`);
     // What an ordinary app leaves in its database: tables with keys and a sequence, an index, a view, a function.
     for (const statement of [
@@ -335,6 +345,9 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     await google.local.shared.boot.query(`ALTER DATABASE ${record()!.databaseName} SET work_mem = '8MB'`);
     expect(await blockedBy(own())).toContain('has 1 setting(s) made on the database or the app\'s role, which a copy does not carry over, so it cannot be moved');
     await google.local.shared.boot.query(`ALTER DATABASE ${record()!.databaseName} RESET work_mem`);
+    await asBoot('shared', record()!.databaseName, 'GRANT USAGE ON SCHEMA public TO reporting');
+    expect(await blockedBy(own())).toContain('grants access the copy cannot carry over (schema public: USAGE to reporting), so it cannot be moved');
+    await asBoot('shared', record()!.databaseName, 'REVOKE USAGE ON SCHEMA public FROM reporting');
     expect(google.servers).toHaveLength(1);
     const prepared = await plan(own());
     expect(changes(prepared)).toEqual(['create secret-container:hv-production-database-url-copy', 'create database:postgres', 'create database-credential:postgres']);
@@ -379,6 +392,17 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     expect(await asApp(sharedUrl, 'SELECT order_count()')).toBe('3000');
   }, 60_000);
 
+  it('a privilege a person granted after step 1 stops the copy itself, which names it, and the app is let back in', async () => {
+    await asBoot('shared', record()!.databaseName, 'GRANT SELECT ON TABLE public.orders TO reporting');
+    const result = await apply(await plan(own()));
+    await asBoot('shared', record()!.databaseName, 'REVOKE SELECT ON TABLE public.orders FROM reporting');
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toContain('GRANT SELECT ON TABLE public.orders TO reporting;');
+    expect(JSON.stringify(result)).toContain('The app\'s login to its database on the shared server works again');
+    expect(await asApp(sharedUrl, 'SELECT order_count()')).toBe('3000');
+    expect(record()!.placement).toBe('app');
+  }, 120_000);
+
   it('a copy that fails lets the app back into the shared database, and nothing has moved', async () => {
     const before = { web: web(), record: record() };
     google.copyAnswers = { ok: false, stage: 'dump', targetChanged: false, error: 'The source database could not be dumped; nothing was changed.' };
@@ -392,8 +416,8 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...saved, secretMetadata: { ...saved.secretMetadata, [copyId]: { gcpProjectId: GCP, version: 'pending', labels: google.secrets.get(copyId)!.labels } } } });
     const result = await apply(await plan(own()));
     expect(result.success).toBe(false);
-    expect(JSON.stringify(result)).toContain('was not moved: The source database could not be dumped; nothing was changed. The app is connected to its database on the shared server again');
-    expect(google.copies).toBe(1);
+    expect(JSON.stringify(result)).toContain('was not moved: The source database could not be dumped; nothing was changed. The app\'s login to its database on the shared server works again');
+    expect(google.copies).toBe(2);
     expect(record()).toEqual(before.record);
     expect(web()).toBe(before.web);
     // The app really is back: the connection its service holds reads and writes.
@@ -406,7 +430,7 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     const interrupted = await apply(await plan(own()));
     google.failServiceChanges = false;
     expect(interrupted.success).toBe(false);
-    expect(google.copies, JSON.stringify(interrupted)).toBe(2);
+    expect(google.copies, JSON.stringify(interrupted)).toBe(3);
     expect(JSON.stringify(interrupted)).toContain('was copied to its own server');
     const ownServer = urlParts(ownUrl).connectionName.split(':').pop()!;
     expect(record()).toMatchObject({ instanceName: ownServer, movedFrom: { placement: 'app' } });

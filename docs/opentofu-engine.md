@@ -735,8 +735,8 @@ PostgreSQL servers and not yet run on Google Cloud. In order, it:
    of it, and clears it only when its caller allows that and nothing in it
    belongs to another owner;
 3. dumps the source and inventories it in one snapshot, and refuses what a
-   copy cannot carry over: any privilege granted or taken away, objects of
-   another owner, settings made on the database or the app's role, access the
+   copy cannot carry over: any privilege granted or taken away (named in the
+   refusal, statement by statement), objects of another owner, settings made on the database or the app's role, access the
    database itself grants to other roles, subscriptions, extensions that keep
    data of their own and, onto the shared server, any extension. The one
    exception is a role named by the caller that holds exactly the access
@@ -854,11 +854,30 @@ which does not exist yet.
   round and removed by the first plan after the switch. It is never mounted
   into a service; like every secret of the project the app's cloud identity
   could read it.
-- Tested offline only, through the planner, the saved plan, the saved-plan
-  check and apply, with two local PostgreSQL servers and the copy job's real
-  script (`gcp-shared-database-move.postgres.test.ts`). Not run on Google
-  Cloud: the copy job as a Cloud Run job with two Cloud SQL mounts, whether its
-  identity may read both secrets, and how long the pause lasts.
+- A privilege statement the new database already has, word for word, before
+  anything is copied does not count: the copy does not lose it. That is how
+  what a provider grants on every database passes. Cloud SQL does this:
+  `GRANT ALL ON SCHEMA public TO cloudsqlsuperuser` was on both databases in
+  the live run below, whoever created them. The first round has no new
+  database to compare with, so its check (the same catalog statement the copy
+  job runs, `DATABASE_MOVE_PRIVILEGES`) leaves out that one grant by name and
+  refuses every other grant to another role, naming it, before a server is
+  created. What only a dump shows (a privilege taken away, kinds of object the
+  statement does not list) is still found only by the copy job, in round 2.
+- After a failed switch the app's login works again at once, but the app can
+  stay down for a few minutes more: its instances lost their sessions and
+  Cloud Run restarts them with a growing delay. The message says so.
+- Run live once, on 2026-11-25, on a scratch project with a two-table app:
+  round 1 passed (real OpenTofu planned the own server, its database, the copy
+  secret and the login step, and no service change). Round 2 was refused by
+  the copy job because of the provider's grant above; the pause was undone and
+  the app came back with its data. The copy job itself ran as a Cloud Run job
+  with both Cloud SQL mounts and read both secrets (about a minute from job
+  creation to its result line). Not yet run live: a switch that succeeds,
+  round 3, and everything after this fix. Offline it is tested through the
+  planner, the saved plan, the saved-plan check and apply, with two local
+  PostgreSQL servers that carry the same grant and the copy job's real script
+  (`gcp-shared-database-move.postgres.test.ts`).
 
 The configuration generator can point every workload of an
 environment at a database that is named outright, with its socket and its

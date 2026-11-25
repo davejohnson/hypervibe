@@ -453,6 +453,29 @@ last' $$`, ['definitions']],
     expect(await publicRelations(target)).toBe('0');
   }, 60_000);
 
+  it('lets through a privilege both databases have word for word, as a provider puts on every database, and names any other', async () => {
+    // Seen on Cloud SQL (2026-11-25, PostgreSQL 16.15), on the shared server's database and on the new server's alike.
+    const provider = 'GRANT ALL ON SCHEMA public TO cloudsqlsuperuser';
+    for (const side of ['own', 'shared'] as const) await servers[side].boot.query(`DO $$ BEGIN CREATE ROLE cloudsqlsuperuser NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
+    await servers.shared.boot.query(`DO $$ BEGIN CREATE ROLE reporting NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$`);
+    const source = await sharedDatabase();
+    const target = await ownDatabase();
+    await fill(source, ['CREATE TABLE jobs (id int)', 'INSERT INTO jobs VALUES (1), (2)', provider]);
+    // Only the source has it: the copy would lose it, so it is refused, by name.
+    expect((await copy(source, target)).result).toEqual({ ok: false, stage: 'dump', targetChanged: false,
+      error: `The database has 1 privilege(s) granted or taken away that the copy cannot carry over (${provider};); nothing was changed.` });
+    await fill(target, [provider]);
+    // As the job is always run for a move: the new database is the move's own, and the provider's grant on it is not content.
+    expect((await copy(source, target, { MOVE_RESET_TARGET: '1' })).result).toMatchObject({ ok: true, match: true });
+    expect(await scalar(target, `SELECT has_schema_privilege('cloudsqlsuperuser', 'public', 'CREATE')::text`)).toBe('true');
+    // What a person granted is still refused and named, with the provider's own beside it left out.
+    await fill(source, ['GRANT SELECT ON TABLE public.jobs TO reporting', 'GRANT USAGE ON SCHEMA public TO reporting']);
+    const refused = await copy(source, target, { MOVE_RESET_TARGET: '1' });
+    expect(refused.result).toEqual({ ok: false, stage: 'dump', targetChanged: false,
+      error: 'The database has 2 privilege(s) granted or taken away that the copy cannot carry over (GRANT USAGE ON SCHEMA public TO reporting; | GRANT SELECT ON TABLE public.jobs TO reporting;); nothing was changed.' });
+    expect(await scalar(target, 'SELECT count(*)::text FROM jobs')).toBe('2');
+  }, 120_000);
+
   it('carries on when the only grants are to a role Hypervibe re-creates access for itself', async () => {
     const source = await ownDatabase();
     const target = await sharedDatabase();

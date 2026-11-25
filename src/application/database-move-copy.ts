@@ -106,6 +106,33 @@ export const DATABASE_MOVE_FACTS = `SELECT (SELECT count(*) FROM pg_extension WH
 const FACTS = DATABASE_MOVE_FACTS;
 
 /**
+ * Cloud SQL gives its own administrators' group the public schema of every database, whoever creates it and from
+ * whatever template: `GRANT ALL ON SCHEMA public TO cloudsqlsuperuser`. Seen on 2026-11-25 (PostgreSQL 16.15) on a
+ * database made with plain SQL from template0 and on one made through Google's API alike. Nobody asked for it and
+ * the new server has it too, so it is not something a copy loses.
+ */
+const PROVIDER_GROUP = 'cloudsqlsuperuser';
+/**
+ * Every access a person gave on the app's own objects, one line each, in words: `schema public: USAGE to reporting`.
+ * A copy carries no privileges over, so each line is something that would silently stop working. Left out: what an
+ * owner has anyway, what every database gives everyone (use of `public`, running functions), and the provider's own
+ * grant above. The same statement serves the copy job and whoever asks before a move is started.
+ */
+export const DATABASE_MOVE_PRIVILEGES = `SELECT x.kind || ' ' || x.name || ': ' || string_agg(DISTINCT x.privilege, ', ' ORDER BY x.privilege) || ' to ' || coalesce(quote_ident(r.rolname), 'PUBLIC')
+  FROM (
+    SELECT 'schema' AS kind, quote_ident(n.nspname) AS name, n.nspowner AS owner, a.grantee, a.privilege_type::text AS privilege FROM pg_namespace n CROSS JOIN LATERAL aclexplode(n.nspacl) a WHERE ${USER_SCHEMA}
+    UNION ALL SELECT 'table, view or sequence', quote_ident(n.nspname) || '.' || quote_ident(c.relname), c.relowner, a.grantee, a.privilege_type::text ${USER_RELATION} CROSS JOIN LATERAL aclexplode(c.relacl) a WHERE ${USER_SCHEMA} AND ${NOT_EXTENSION}
+    UNION ALL SELECT 'function', quote_ident(n.nspname) || '.' || quote_ident(p.proname), p.proowner, a.grantee, a.privilege_type::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace CROSS JOIN LATERAL aclexplode(p.proacl) a
+      WHERE ${USER_SCHEMA} AND NOT EXISTS (SELECT 1 FROM pg_depend e WHERE e.classid = 'pg_catalog.pg_proc'::regclass AND e.objid = p.oid AND e.deptype = 'e')
+    UNION ALL SELECT 'whatever is created later by', quote_ident(o.rolname), d.defaclrole, a.grantee, a.privilege_type::text FROM pg_default_acl d JOIN pg_roles o ON o.oid = d.defaclrole CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+  ) x LEFT JOIN pg_roles r ON r.oid = x.grantee
+  WHERE x.grantee <> x.owner
+    AND NOT (x.grantee = 0 AND ((x.kind = 'schema' AND x.name = 'public' AND x.privilege = 'USAGE') OR (x.kind = 'function' AND x.privilege = 'EXECUTE')))
+    AND NOT (x.kind = 'schema' AND x.name = 'public' AND r.rolname = '${PROVIDER_GROUP}')
+  GROUP BY x.kind, x.name, r.rolname ORDER BY 1;`;
+const PRIVILEGES = DATABASE_MOVE_PRIVILEGES;
+
+/**
  * The same judgement the job makes of those counts, for a caller that can read them before anything is paused.
  * Undefined when the job would not refuse on their account.
  */
@@ -143,6 +170,8 @@ export function databaseMoveCopyScript(): string {
     'count() { case "$1" in ""|*[!0-9]*) return 1 ;; esac; }',
     'plain() { case "$1" in ""|*[!a-z0-9_]*) return 1 ;; esac; }',
     'lines() { wc -l < "$1" | tr -d " "; }',
+    // The first few lines of a file as one piece of a message: plain characters only, nothing that could end the result line's text early.
+    'named() { head -n 5 "$1" | LC_ALL=C tr -cd \'\\n\\40-\\176\' | tr -d \'"\\\\\' | tr \'\\n\' \'|\' | sed \'s/|$//; s/|/ | /g\' | cut -c1-500; }',
     // grep's "no line matched" is an answer; anything worse (a file that cannot be read or written) is a failure and must stop the job.
     'sift() { s=0; grep "$@" || s=$?; [ "$s" -le 1 ]; }',
     // PostgreSQL 17.6 and later wrap a dump's text in one \\restrict line and one \\unrestrict line that carry a key made up for that run, so no
@@ -193,11 +222,16 @@ export function databaseMoveCopyScript(): string {
     'judge "The new database" "$TARGET_FACTS"',
 
     // 2. Empty means: PostgreSQL's own dump of the target lists nothing but the public schema every database starts with.
-    `standard() { printf '${ENTRY} (SCHEMA - public %s|(EXTENSION - plpgsql|COMMENT - EXTENSION plpgsql) ?)$' "$1"; }`,
+    // Where the new database is the move's own to clear, privileges on its public schema are not content either: a provider puts
+    // its own there on every database, and clearing the database for that alone would take the provider's grant away.
+    `standard() { if [ "\${MOVE_RESET_TARGET:-0}" = 1 ]; then printf '${ENTRY} (SCHEMA - public %s|ACL - SCHEMA public %s|(EXTENSION - plpgsql|COMMENT - EXTENSION plpgsql) ?)$' "$1" "$1";`,
+    `  else printf '${ENTRY} (SCHEMA - public %s|(EXTENSION - plpgsql|COMMENT - EXTENSION plpgsql) ?)$' "$1"; fi; }`,
     'target_extra() {',
     `  pg_dump --format=custom "$DATABASE_URL" > ${WORK}/target.before 2>/dev/null || return 1`,
     `  pg_restore -l ${WORK}/target.before > ${WORK}/target.before.list 2>/dev/null || return 1`,
     `  sift -E '${ENTRY} ' ${WORK}/target.before.list > ${WORK}/target.before.all || return 1`,
+    // Every privilege statement the new database has before anything is copied into it.
+    `  pg_restore --schema-only -f ${WORK}/target.before.full ${WORK}/target.before 2>/dev/null && sift -E '^(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES) ' ${WORK}/target.before.full > ${WORK}/target.grants || return 1`,
     `  sift -Ev "$(standard "$TARGET_OWNER")" ${WORK}/target.before.all > ${WORK}/target.before.extra || return 1`,
     `  lines ${WORK}/target.before.extra`,
     '}',
@@ -217,7 +251,7 @@ export function databaseMoveCopyScript(): string {
     'HOLD=$!',
     `exec 3> ${WORK}/hold`,
     'said() { i=0; while [ ! -s "$1" ]; do i=$((i + 1)); if [ "$i" -gt "$2" ] || ! kill -0 "$HOLD" 2>/dev/null; then return 1; fi; sleep 1; done; }',
-    ...heredoc('if ! cat >&3 2>/dev/null', [...PINNED, `\\o ${WORK}/snapshot`, 'SELECT pg_export_snapshot();', `\\o ${WORK}/facts`, FACTS, '\\o']),
+    ...heredoc('if ! cat >&3 2>/dev/null', [...PINNED, `\\o ${WORK}/snapshot`, 'SELECT pg_export_snapshot();', `\\o ${WORK}/privileges`, PRIVILEGES, `\\o ${WORK}/facts`, FACTS, '\\o']),
     `then blocked "The source database could not be read at one point in time; nothing was changed."; fi`,
     `if ! said ${WORK}/snapshot 60 || ! said ${WORK}/facts 60; then blocked "The source database could not be read at one point in time; nothing was changed."; fi`,
     `SNAPSHOT=$(cat ${WORK}/snapshot)`,
@@ -243,6 +277,8 @@ export function databaseMoveCopyScript(): string {
     // the copy: use of the public schema, reading every table and view in it, and reading tables made there later. A role with all three and
     // nothing else is left out; a role with less, more or anything different is not, because giving that access again would change it.
     `sift -E '^(GRANT|REVOKE|ALTER DEFAULT PRIVILEGES) ' ${WORK}/source.full > ${WORK}/source.grants || blocked "${UNREADABLE}"`,
+    // A statement the new database already has, word for word, is not something the copy loses: what a provider grants on every database is there on both.
+    `if [ -s ${WORK}/target.grants ]; then sift -v -x -F -f ${WORK}/target.grants ${WORK}/source.grants > ${WORK}/source.grants.kept && mv ${WORK}/source.grants.kept ${WORK}/source.grants || blocked "${UNREADABLE}"; fi`,
     `READABLE=$(sift -Ec '${ENTRY} (TABLE|VIEW|MATERIALIZED VIEW|FOREIGN TABLE) public ' ${WORK}/source.all) || blocked "${UNREADABLE}"`,
     'OLDIFS=$IFS; IFS=,',
     'for ROLE in ${MOVE_IGNORED_GRANTEES:-}; do',
@@ -254,12 +290,16 @@ export function databaseMoveCopyScript(): string {
     `  USES=$(sift -Ec "$USE" ${WORK}/source.grants) && LATERS=$(sift -Ec "$LATER" ${WORK}/source.grants) && READS=$(sift -Ec "$READ" ${WORK}/source.grants) || blocked "${UNREADABLE}"`,
     '  if [ "$USES" = 1 ] && [ "$LATERS" = 1 ] && [ "$READS" = "$READABLE" ]; then',
     `    sift -Ev "($USE|$LATER|$READ)" ${WORK}/source.grants > ${WORK}/source.grants.kept && mv ${WORK}/source.grants.kept ${WORK}/source.grants || blocked "${UNREADABLE}"`,
+    // The catalogs' account of the same access is left out with it.
+    `    sift -Ev " to $WHO\\$" ${WORK}/privileges > ${WORK}/privileges.kept && mv ${WORK}/privileges.kept ${WORK}/privileges || blocked "${UNREADABLE}"`,
     '  fi',
     '  IFS=,',
     'done',
     'IFS=$OLDIFS',
     `GRANTS=$(lines ${WORK}/source.grants)`,
-    'if [ "$GRANTS" -gt 0 ]; then blocked "The database has $GRANTS privilege(s) granted or taken away that the copy cannot carry over; nothing was changed."; fi',
+    'if [ "$GRANTS" -gt 0 ]; then blocked "The database has $GRANTS privilege(s) granted or taken away that the copy cannot carry over ($(named ' + WORK + '/source.grants)); nothing was changed."; fi',
+    // The same question asked of the catalogs, in the very words used before a move is started: what that check refuses, this job refuses too.
+    `if [ -s ${WORK}/privileges ]; then blocked "The database grants access the copy cannot carry over ($(named ${WORK}/privileges)); nothing was changed."; fi`,
     `sift -Ev "$(standard "$SOURCE_OWNER")" ${WORK}/source.list > ${WORK}/source.entries || blocked "${UNREADABLE}"`,
     // A materialized view's refresh is data: its rows are compared with every table's, and a dump of definitions alone leaves the statement out.
     `sift -Ev '${ENTRY} MATERIALIZED VIEW DATA ' ${WORK}/source.entries > ${WORK}/source.defined || blocked "${UNREADABLE}"`,
