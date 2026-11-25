@@ -7,6 +7,7 @@ import type {
   InfrastructureEngineBackend,
 } from '../../../../domain/ports/infrastructure-engine.port.js';
 import type { GcpDatabaseConnection } from './gcp-database-connection.js';
+import { workloadsOnNamedDatabase, type GcpWorkloadDatabase } from './gcp-workload-database.js';
 import { dedicatedDatabase, dedicatedDatabaseConnection, dedicatedDatabaseImports, type GcpCloudSqlInput } from './gcp-dedicated-database.js';
 
 /**
@@ -124,6 +125,11 @@ export interface GcpCloudRunEngineInput {
   retiredDatabase?: boolean;
   /** A database this configuration does not create: workloads are simply connected to it. Never given together with `database`. */
   databaseConnection?: GcpDatabaseConnection;
+  /**
+   * The database every workload uses, named outright with its connection secret. It wins over the database this
+   * configuration creates, which is still created and kept as declared: workloads can be on another database while it exists.
+   */
+  workloadDatabase?: GcpWorkloadDatabase;
   /** Custom domains mapped to services. Ownership verification and DNS stay with Hypervibe. */
   domains?: Array<{ domain: string; service: string }>;
   /** Domains this environment previously mapped that are no longer desired. */
@@ -515,14 +521,15 @@ function addScheduledJob(
   };
 }
 
-export function buildCloudRunConfiguration(input: GcpCloudRunEngineInput): EngineConfiguration {
+export function buildCloudRunConfiguration(given: GcpCloudRunEngineInput): EngineConfiguration {
+  const input = workloadsOnNamedDatabase(given);
   if (!/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(input.projectId)) throw new Error('GCP project id is invalid.');
   if (!/^[a-z]+-[a-z]+[0-9]$/.test(input.region)) throw new Error('GCP region is invalid.');
   const services: Record<string, unknown> = {};
   const iam: Record<string, unknown> = {};
   const resources: Record<string, EngineResourceMapping> = {};
   const seen = new Set<string>();
-  const connection = dedicatedDatabaseConnection(input.projectId, input.database) ?? input.databaseConnection;
+  const connection = input.workloadDatabase?.connection ?? dedicatedDatabaseConnection(input.projectId, input.database) ?? input.databaseConnection;
   const onDemand = input.services.some((service) => service.workload === 'worker' && service.pendingWorkQuery);
   const jobs: Record<string, unknown> = {};
   const schedules: Record<string, unknown> = {};
