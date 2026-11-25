@@ -210,6 +210,13 @@ same `hv_plan` again and delete), each confirmed by the user, and is refused
 while any environment still has a database on the server. Offer it when a
 result says the server is still running and billed; never delete it another way.
 
+Removing `"placement": "app"` from such a database moves it to a server of its
+own in three rounds of `hv_plan` and `hv_apply`: create the server (billable),
+switch (the app returns database errors while its data is copied and checked;
+tell the user before they confirm), then delete the old copy. Run `hv_plan`
+again after each round until nothing is left; a started move cannot be
+cancelled. This has not been run on Google Cloud yet; say so before starting.
+
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`
 requires explicit intent to adopt and the exact reviewed mapping.

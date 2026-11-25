@@ -62,11 +62,13 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
     // Confirmation follows what an action is shown as, and apply runs its step: the two must agree, so a saved plan
     // can never present a deletion as an update or a new server as free.
     const destroys = sharedStep === 'release' || sharedStep === 'remove-server';
-    const types: Record<string, string[]> = { server: ['create'], allocate: ['create', 'update'], rotate: ['update'], retire: ['update'], release: ['destroy'], 'unprotect-server': ['update'], 'remove-server': ['destroy'] };
+    const types: Record<string, string[]> = { server: ['create'], allocate: ['create', 'update'], rotate: ['update'], retire: ['update'], release: ['destroy'], 'unprotect-server': ['update'], 'remove-server': ['destroy'], switch: ['update'] };
     // Confirmation is given by action id, so the id must name the step it runs.
     const honest = action.id === `shared-database:${sharedStep}` && action.resource.kind === 'database' && action.metadata?.engineSegment === undefined && (types[sharedStep] ?? []).includes(action.type)
       && (!destroys || (action.dataBearing === true && action.requiresConfirm === true))
       && (sharedStep !== 'unprotect-server' || action.requiresConfirm === true)
+      // The switch shuts the app out of its database for a while: it is never applied without the person saying so.
+      && (sharedStep !== 'switch' || action.requiresConfirm === true)
       && (sharedStep !== 'server' || (action.billable === true && action.requiresConfirm === true));
     if (!honest) ctx.addIssue({ code: 'custom', path: ['metadata', 'step'], message: 'A shared database step must be shown as what it does.' });
   }

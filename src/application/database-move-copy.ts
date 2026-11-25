@@ -98,13 +98,31 @@ const THIS_DATABASE = `(SELECT d.oid FROM pg_database d WHERE d.datname = curren
  * not even read them) | subscriptions (a plain role's dump skips them silently) | other roles the database itself grants
  * access to (a dump of one database leaves the database's own privileges out)`.
  */
-const FACTS = `SELECT (SELECT count(*) FROM pg_extension WHERE extconfig IS NOT NULL)::text || '|' ||
+export const DATABASE_MOVE_FACTS = `SELECT (SELECT count(*) FROM pg_extension WHERE extconfig IS NOT NULL)::text || '|' ||
   (SELECT count(*) FROM pg_db_role_setting s WHERE s.setdatabase = ${THIS_DATABASE} OR (s.setdatabase = 0
     AND s.setrole IN (SELECT r.oid FROM pg_roles r WHERE r.rolname IN (current_user, session_user)) AND s.setconfig IS DISTINCT FROM ARRAY['role=' || current_user]))::text || '|' ||
   (SELECT count(*) FROM pg_largeobject_metadata m WHERE m.lomacl IS NOT NULL OR m.lomowner <> ${ME})::text || '|' ||
   (SELECT count(*) ${USER_RELATION} WHERE ${USER_SCHEMA} AND ${NOT_EXTENSION} AND c.relowner <> ${ME})::text || '|' ||
   (SELECT count(*) FROM pg_subscription u WHERE u.subdbid = ${THIS_DATABASE})::text || '|' ||
   (SELECT count(DISTINCT a.grantee) FROM pg_database d CROSS JOIN LATERAL aclexplode(d.datacl) a WHERE d.oid = ${THIS_DATABASE} AND a.grantee NOT IN (0, d.datdba, ${ME}))::text;`;
+
+const FACTS = DATABASE_MOVE_FACTS;
+
+/**
+ * The same judgement the job makes of those counts, for a caller that can read them before anything is paused.
+ * Undefined when the job would not refuse on their account.
+ */
+export function databaseMoveFactsProblem(facts: unknown): string | undefined {
+  const counts = typeof facts === 'string' ? facts.split('|') : [];
+  if (counts.length !== 6 || counts.some((count) => !/^[0-9]{1,9}$/.test(count))) return 'could not be inspected';
+  const [ownData, settings, large, others, subscribed, granted] = counts.map(Number) as [number, number, number, number, number, number];
+  if (ownData) return `uses ${ownData} extension(s) that keep data of their own, which the copy cannot check`;
+  if (settings) return `has ${settings} setting(s) made on the database or the app's role, which a copy does not carry over`;
+  if (subscribed) return `has ${subscribed} subscription(s) to another database, which cannot be moved yet`;
+  if (granted) return `itself grants access to ${granted} other role(s), which a copy does not carry over`;
+  if (large + others) return `holds ${large + others} object(s) owned by a role other than the app's own, or large objects with privileges of their own, which cannot be carried over`;
+  return undefined;
+}
 
 /** How the database itself was created: what decides how text is stored and sorted. Read as JSON so a column a version lacks is simply absent. */
 const CREATED_AS = `SELECT json_build_array(pg_encoding_to_char(d.encoding), d.datcollate, d.datctype, to_jsonb(d) -> 'datlocprovider', coalesce(to_jsonb(d) -> 'datlocale', to_jsonb(d) -> 'daticulocale'), to_jsonb(d) -> 'daticurules')::text

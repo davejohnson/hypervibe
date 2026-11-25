@@ -1,6 +1,7 @@
 import { sqlAdmin } from '../../adapters/providers/gcp/gcp-data.client.js';
 import { readSecretVersionValue } from '../../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { setCloudSqlLoginPassword, withCloudSqlSession } from '../infrastructure-engine-database.js';
+import { runTransferJob } from '../migration-transfer-gcp.js';
 import { observeRecordedSecret } from '../gcp-secret-recorded.js';
 import { recordSecretVersionMetadata, writeSecretVersion } from '../infrastructure-engine.js';
 import { SERVER_BUSY } from './administrator.js';
@@ -13,7 +14,7 @@ interface ListedInstance { name?: string; region?: string; state?: string; setti
  * Manager and the Cloud SQL connector, all as the app's deployment identity.
  * `credentials` is read only when a SQL session is opened.
  */
-export function googleSharedDatabaseCloud(access: { token: string; credentials: () => Record<string, unknown> }): SharedDatabaseCloud {
+export function googleSharedDatabaseCloud(access: { token: string; credentials: () => Record<string, unknown>; jobs?: { region: string; runtimeServiceAccountEmail: string; environmentLabel: string } }): SharedDatabaseCloud {
   const { token } = access;
   return {
     async listServers(gcpProjectId) {
@@ -58,5 +59,10 @@ export function googleSharedDatabaseCloud(access: { token: string; credentials: 
 
     withSession: (target, work) => withCloudSqlSession(access.credentials(), target.connectionName, target.user, target.password, target.database,
       (client) => work({ query: (text, values) => client.query(text, values) })),
+
+    async runCopyJob(gcpProjectId, job) {
+      if (!access.jobs) return undefined;
+      return runTransferJob<{ ok: boolean }>({ token: async () => token, gcpProjectId, ...access.jobs }, job) as Promise<Record<string, unknown>>;
+    },
   };
 }

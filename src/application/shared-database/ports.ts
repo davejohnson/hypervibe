@@ -1,3 +1,4 @@
+import type { TransferJob } from '../migration-transfer-gcp.js';
 import type { ActionResult } from '../../domain/plan/converge.executor.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import type { EngineActionSegment, EngineConfiguration, EngineSegmentResult, EngineStateIdentity } from '../../domain/ports/infrastructure-engine.port.js';
@@ -51,6 +52,8 @@ export interface SharedDatabaseCloud {
   relabelConnectionSecret(gcpProjectId: string, secretId: string, version: string, labels: Record<string, string>): boolean;
   /** Opens one SQL session, runs `work`, and always closes it. */
   withSession<T>(target: SqlTarget, work: (session: SqlSession) => Promise<T>): Promise<T>;
+  /** Runs one copy job to its end and returns the single result line it printed, or nothing when it printed none. Only a move needs it. */
+  runCopyJob?(gcpProjectId: string, job: TransferJob): Promise<Record<string, unknown> | undefined>;
 }
 
 /** The lifecycle engine, already bound to the caller's credentials. The module supplies its own configuration and state. */
