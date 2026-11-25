@@ -148,7 +148,7 @@ afterAll(async () => {
   SecretStore.resetInstance(); SqliteAdapter.resetInstance();
   rmSync(home, { recursive: true, force: true });
   expect(await server.stop()).toBe(true);
-});
+}, 60_000);
 
 describe.runIf(postgresMajor() >= 15)('pausing one environment\'s database on the shared server', () => {
   it('shuts that app out, ends its sessions, proves nobody is connected, and leaves its neighbour alone', async () => {

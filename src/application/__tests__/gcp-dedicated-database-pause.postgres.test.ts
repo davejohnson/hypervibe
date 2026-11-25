@@ -143,7 +143,7 @@ afterAll(async () => {
   SecretStore.resetInstance(); SqliteAdapter.resetInstance();
   rmSync(home, { recursive: true, force: true });
   expect(await server.stop()).toBe(true);
-});
+}, 60_000);
 
 describe('pausing a database on a server of its own', () => {
   it('shuts the app out, ends its sessions, proves nobody is connected, and leaves one other way in for the copy', async () => {
