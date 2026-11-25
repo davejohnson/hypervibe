@@ -53,7 +53,7 @@ export interface StorageTransferResult {
   error?: string;
 }
 
-const RESULT_MARKER = 'HV_TRANSFER_RESULT ';
+export const RESULT_MARKER = 'HV_TRANSFER_RESULT ';
 
 /**
  * One row per table, "schema.table|rows:checksum", from a single psql query.
@@ -108,17 +108,17 @@ export function storageCheckScript(): string {
 }
 
 /** Actual connection identity must be known and distinct before replacing data. */
-const DATABASE_IDENTITY_FUNCTIONS = [
+export const DATABASE_IDENTITY_FUNCTIONS = [
   'identity() { psql "$1" -X -At -v ON_ERROR_STOP=1 -c "' + POSTGRES_DATABASE_IDENTITY_SQL + '" 2>/dev/null; }',
   'valid_identity() { case "$1" in ""|*[!0-9a-f:]*) return 1 ;; esac; printf "%s" "$1" | LC_ALL=C grep -Eq "' + POSTGRES_DATABASE_IDENTITY_PATTERN + '"; }',
   'blocked() { printf \'' + RESULT_MARKER + '{"ok":false,"error":"%s"}\\n\' "$1"; exit 1; }',
 ];
-const READ_SOURCE_IDENTITY = [
+export const READ_SOURCE_IDENTITY = [
   'if ! SOURCE_IDENTITY=$(identity "$SOURCE_DATABASE_URL") || ! valid_identity "$SOURCE_IDENTITY"; then',
   '  blocked "The source database identity could not be verified; no data was replaced."',
   'fi',
 ];
-const READ_TARGET_IDENTITY = [
+export const READ_TARGET_IDENTITY = [
   'if ! TARGET_IDENTITY=$(identity "$DATABASE_URL") || ! valid_identity "$TARGET_IDENTITY"; then',
   '  blocked "The target database identity could not be verified; no data was replaced."',
   'fi',
@@ -127,7 +127,7 @@ const READ_TARGET_IDENTITY = [
   'fi',
 ];
 /** Recheck on the connection that clears the target; errors roll back all writes. */
-function guardedTargetReset(restorePublicOwner = false): string[] {
+export function guardedTargetReset(restorePublicOwner = false): string[] {
   return [
     'if ! psql "$DATABASE_URL" -X -q -v ON_ERROR_STOP=1 -v expected_identity="$TARGET_IDENTITY" -v source_identity="$SOURCE_IDENTITY" >/dev/null 2>/tmp/identity-guard.log <<\'HV_MIGRATION_IDENTITY\'',
     'BEGIN;',
@@ -246,7 +246,7 @@ export function storageTransferScript(): string {
   ].join('\n');
 }
 
-interface TransferJob {
+export interface TransferJob {
   purpose: 'database' | 'storage';
   image: string;
   script: string;
@@ -256,6 +256,8 @@ interface TransferJob {
   /** env name -> existing secret reference (for example the target DATABASE_URL). */
   secretRefs?: Record<string, { secretId: string; version: string }>;
   cloudSqlConnectionName?: string;
+  /** A second database server the job reaches, mounted beside the first. Only a copy between two servers of one project sets it. */
+  sourceCloudSqlConnectionName?: string;
   timeoutSeconds: number;
 }
 
@@ -351,7 +353,8 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
           maxRetries: 0,
           timeout: `${job.timeoutSeconds}s`,
           containers: [container],
-          ...(job.cloudSqlConnectionName ? { volumes: [{ name: 'cloudsql', cloudSqlInstance: { instances: [job.cloudSqlConnectionName] } }] } : {}),
+          ...(job.cloudSqlConnectionName ? { volumes: [{ name: 'cloudsql', cloudSqlInstance: { instances: [job.cloudSqlConnectionName,
+            ...(job.sourceCloudSqlConnectionName && job.sourceCloudSqlConnectionName !== job.cloudSqlConnectionName ? [job.sourceCloudSqlConnectionName] : [])] } }] } : {}),
         } },
       }),
     });

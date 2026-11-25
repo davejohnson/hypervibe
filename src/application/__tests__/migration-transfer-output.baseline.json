@@ -1,0 +1,111 @@
+{
+ "scripts": {
+  "databaseTransferScript": "b332f1e8e94835088582217a44d464ef8b33a1054a15cb0406a35d1008db4ed0",
+  "databaseExportScript": "32cc5f9e315cd44065c6b4e6eed1f532594f7f2e74ad751dec134e8e5df0b090",
+  "databaseRestoreScript": "bd9d1044f533e3071f0400d3e2143c2c3ee4d630e9cfda4047439bf15c33e34c",
+  "databaseManifestScript": "79bbc2ed892c2ee5ad06719e0193a6ab203e85f4851125493d41618a0b3fbdf9",
+  "storageTransferScript": "cd1dbf02eaa1518bd50f86053386ab8760408d973fedd299fbb241ff0b36b5f3",
+  "storageCheckScript": "04b93d0b1d391f6d60e46cba3c05087f0b47e4727766b6c39593a32e740f41dd"
+ },
+ "databaseCopyJob": {
+  "labels": {
+   "managed-by": "hypervibe",
+   "hv-temporary": "true",
+   "hv-transfer": "<random>"
+  },
+  "template": {
+   "template": {
+    "serviceAccount": "runtime@demo-project.iam.gserviceaccount.com",
+    "maxRetries": 0,
+    "timeout": "3600s",
+    "containers": [
+     {
+      "image": "postgres:16-alpine",
+      "command": [
+       "/bin/sh"
+      ],
+      "args": [
+       "-c",
+       "echo synthetic"
+      ],
+      "env": [
+       {
+        "name": "PGTZ",
+        "value": "UTC"
+       },
+       {
+        "name": "DATABASE_URL",
+        "valueSource": {
+         "secretKeyRef": {
+          "secret": "hv-production-database-url",
+          "version": "3"
+         }
+        }
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "2",
+        "memory": "4Gi"
+       }
+      },
+      "volumeMounts": [
+       {
+        "name": "cloudsql",
+        "mountPath": "/cloudsql"
+       }
+      ]
+     }
+    ],
+    "volumes": [
+     {
+      "name": "cloudsql",
+      "cloudSqlInstance": {
+       "instances": [
+        "demo-project:us-central1:hv-production-db-a1b2c3"
+       ]
+      }
+     }
+    ]
+   }
+  }
+ },
+ "storageCopyJob": {
+  "labels": {
+   "managed-by": "hypervibe",
+   "hv-temporary": "true",
+   "hv-transfer": "<random>"
+  },
+  "template": {
+   "template": {
+    "serviceAccount": "runtime@demo-project.iam.gserviceaccount.com",
+    "maxRetries": 0,
+    "timeout": "3600s",
+    "containers": [
+     {
+      "image": "rclone/rclone:1.68.2",
+      "command": [
+       "/bin/sh"
+      ],
+      "args": [
+       "-c",
+       "echo synthetic"
+      ],
+      "env": [
+       {
+        "name": "SOURCE_BUCKET",
+        "value": "a"
+       }
+      ],
+      "resources": {
+       "limits": {
+        "cpu": "2",
+        "memory": "4Gi"
+       }
+      }
+     }
+    ]
+   }
+  }
+ }
+}
