@@ -144,17 +144,23 @@ export function renderPlanReportContent(report: PlanReport, options: { localRevi
   const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', warnings, 'warning')
     + notice('GitHub release access', report.ciReleaseAccess ?? [], 'info')
     + notice('Database cost and protection', costs, 'info') + notice('What happens next', next, 'info', detail);
-  const metadata = [
-    fact('Scope', escape(humanize(report.scope))),
-    ...cloudFacts(report).map(({ label, value, href }) => typeof value === 'string' ? fact(label, href
+  // One small line says where the plan acts, each place a link to its own console. On the local review page the heading
+  // above already names the plan and when it was saved, so neither is repeated here; a saved report file has no such
+  // heading and keeps both, in this same line.
+  const where = [
+    options.localReview ? '' : escape(humanize(report.scope)),
+    ...cloudFacts(report).map(({ label, value, href }) => typeof value === 'string' ? `${escape(label)} ${href
       ? `<a href="${escape(href)}" ${options.localReview ? 'target="_blank" rel="noopener noreferrer"' : 'rel="noreferrer"'} aria-label="${escape(label + ' ' + value)}">${escape(value)}</a>`
-      : escape(value)) : ''),
+      : escape(value)}` : ''),
+    options.localReview ? '' : `Created ${timeTag(report.createdAt)}`,
+  ].filter(Boolean).map(item => `<span>${item}</span>`).join('');
+  // What a file copy moves between, and how a whole plan is approved, are part of what is being agreed to and stay as they were.
+  const metadata = [
     ...(report.bucketCopy ? [
       fact('Railway source bucket', escape(report.bucketCopy.sourceBucket)),
       fact('Google Cloud destination bucket', `<a href="https://console.cloud.google.com/storage/browser/${encodeURIComponent(report.bucketCopy.targetBucket)}" target="_blank" rel="noopener noreferrer">${escape(report.bucketCopy.targetBucket)}</a>`),
       fact('Copy job account', escape(report.bucketCopy.copyAccount)),
     ] : []),
-    fact('Created', timeTag(report.createdAt)),
     fact('Approval', !options.localReview && report.approval === 'whole-plan' ? 'Approve the whole plan in the chat or terminal where you requested it.' : undefined),
   ].join('');
   // Small badges beside the sentence; the explanation is in each badge's tooltip and accessible name.
@@ -166,7 +172,7 @@ export function renderPlanReportContent(report: PlanReport, options: { localRevi
   ] as Array<[number, string, (n: number) => string, (n: number) => string]>).filter(([count]) => count)
     .map(([count, kind, label, tip]) => `<span class="badge" data-badge="${kind}" title="${escape(tip(count))}" aria-label="${escape(tip(count))}">${count} ${label(count)}</span>`).join('');
   const lead = [accessCheck ? '' : `<span>${escape(headline(report.actions))}</span>`, badges ? `<span class="badges">${badges}</span>` : ''].join('');
-  return `${lead ? `<p class="headline">${lead}</p>` : ''}<dl class="meta">${metadata}</dl>
+  return `${lead ? `<p class="headline">${lead}</p>` : ''}${where ? `<p class="where">${where}</p>` : ''}${metadata ? `<dl class="meta">${metadata}</dl>` : ''}
 ${notices ? `<section class="notices" aria-label="Plan notices">${notices}</section>` : ''}
 ${mapSection(map, accessCheck)}
 <section aria-labelledby="review"><div class="section-head"><h2 tabindex="-1" id="review">Plan actions</h2><span class="muted">${quantity(actions.length, 'action')}</span></div>

@@ -35,6 +35,7 @@ button, select { cursor: pointer; }
 .title-row { align-items: baseline; gap: 14px; }
 .environment { border: 1px solid var(--frame); color: var(--muted); font-size: .86rem; padding: 2px 9px; border-radius: 5px; }
 .meta { display: flex; gap: 12px 30px; flex-wrap: wrap; margin-top: 18px; }
+.where { display: flex; flex-wrap: wrap; gap: 2px 18px; margin: 6px 0 0; color: var(--muted); font-size: .88rem; }
 dt, .muted, .node-description { color: var(--muted); }
 dt { font-size: .78rem; }
 dd { margin-top: 3px; }
