@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { request } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReviewArtifact } from '../../adapters/storage/local-review-catalog.js';
+import { localReviewBuild } from '../local-review-build.js';
 import { startLocalReviewServer } from '../local-review-server.js';
 
 const capability = randomBytes(32).toString('base64url');
@@ -127,7 +128,9 @@ describe('loopback review service', () => {
   it('proves server ownership without returning review data on the public health route', async () => {
     const challenge = '01'.repeat(16);
     const proof = createHmac('sha256', capability).update(challenge).digest('hex');
-    expect(await (await fetch(running.origin + '/health?challenge=' + challenge)).json()).toEqual({ proof });
+    // Beyond the proof it names only its own build and process, so another build can replace it.
+    expect(await (await fetch(running.origin + '/health?challenge=' + challenge)).json())
+      .toEqual({ proof, build: localReviewBuild(), pid: process.pid });
     expect((await fetch(running.origin + '/health?challenge=short')).status).toBe(404);
   });
 });
