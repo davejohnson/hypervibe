@@ -887,7 +887,10 @@ rehearsal and no way back built in: moving back is the opposite move, below.
   errors for about 2 minutes 10 seconds (probed every few seconds) and then
   served the same 5 rows from its own server and accepted a write. Round 3
   deleted the old copy and the copy secret, and a further plan showed no
-  changes. Not run live: a failure after the service update has started, a
+  changes. Run live a second time on 2026-11-26, after the code was
+  restructured to share functions with the other direction: all three rounds
+  again on a two-table scratch app, about 2 minutes 25 seconds of errors
+  during the switch. Not run live: a failure after the service update has started, a
   lost answer mid-switch, a person-made grant refused in round 1, more than
   one service or environment, and a database of any real size. Offline it is
   tested through the
@@ -895,7 +898,7 @@ rehearsal and no way back built in: moving back is the opposite move, below.
   PostgreSQL servers that carry the same grant and the copy job's real script
   (`gcp-shared-database-move.postgres.test.ts`).
 
-### Moving a database onto the shared server (implemented, not run live)
+### Moving a database onto the shared server (implemented, run live once 2026-11-26)
 
 Adding `"placement": "app"` to the database of an environment that has a
 server of its own plans the opposite move, by the same module and the same
@@ -951,13 +954,21 @@ copy job. Again the next round is read from what exists:
 - The shared server's database lets only its own roles in, where a server of
   its own lets everyone connect. That difference is Hypervibe's own doing and
   is neither refused nor compared.
-- Tested offline only, in the same test as the other direction (the database
+- Tested offline in the same test as the other direction (the database
   is moved off the shared server and back again), with Cloud SQL's own grant
-  on both servers from the start. Not tested, and not run live: creating the
-  shared server as part of this move (the test's server already exists), the
-  extension and version refusals, pausing a real Cloud SQL server of its own
-  (its limits are listed under pausing below), and that real OpenTofu shows no
-  change to the own server or the services in round 1.
+  on both servers from the start.
+- Run live once, on 2026-11-26, on a scratch project, straight after moving
+  the same two-table database off the shared server: round 1 made the
+  database on the existing shared server and left the service alone (real
+  OpenTofu planned only the copy secret); round 2 paused the real Cloud SQL
+  server of its own, copied and checked (2 tables, 6 rows) and repointed the
+  service, with about 1 minute of errors (probed every few seconds), after
+  which the app served the rows from the shared server and accepted a write;
+  the own server had deletion protection on, so one plan turned it off and a
+  second deleted the server; a further plan showed no changes. Not run live:
+  creating the shared server as part of this move (it already existed), the
+  extension, version and size refusals, any failure path, more than one
+  service or environment, and a database of any real size.
 - Known gap: if the own server disappears without Hypervibe's record of the
   move being cleared (its saved state lost), the note stays and every plan
   keeps saying the move is finishing.
