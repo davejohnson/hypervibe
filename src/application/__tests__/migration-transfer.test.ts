@@ -23,6 +23,18 @@ describe('transfer scripts', () => {
     expect(manifestsMatch({ ...source, tables: {} }, source).match).toBe(false);
     expect(manifestsMatch(source, { ...source, tables: { ...source.tables, 'public.c': '1' } }).differences).toEqual(['public.c: only in the target']);
   });
+
+  // Upgrade safety (workflow DG-137). Both manifests of a comparison always come from one hv_migrate call, and none is
+  // saved, so the two formats never meet. Should they ever: these are the earlier script's own words, captured from
+  // PostgreSQL 14 for a database with tables plain, "Mixed" and "a|b" (3 rows), beside what the script reports now.
+  it('reads a manifest written by the earlier script the same way for plain names, and as different where that script was wrong', () => {
+    const earlier = { tables: { 'public.Mixed': '1:886263699231969848', 'public.a': 'b', 'public.plain': '1:553043566575910219' }, totalRows: '2' } as never;
+    const current = { tables: { 'public."Mixed"': '1:886263699231969848', 'public."a|b"': '3:1234', 'public.plain': '1:553043566575910219' }, totalRows: '5', version: '140020' };
+    expect(manifestsMatch(earlier, current)).toEqual({ match: false, differences: [
+      'public.Mixed: 1:886263699231969848 → missing', 'public.a: b → missing', 'public."Mixed": only in the target', 'public."a|b": only in the target'] });
+    expect(manifestsMatch({ tables: { 'public.plain': '1:553043566575910219' }, totalRows: '1' } as never, { tables: { 'public.plain': '1:553043566575910219' }, totalRows: '1', version: '140020' }))
+      .toEqual({ match: true, differences: [] });
+  });
 });
 
 /**
@@ -66,7 +78,7 @@ afterAll(() => {
     expect(existsSync(fixtureDirectory)).toBe(false);
   }
   if (scriptDirectory) rmSync(scriptDirectory, { recursive: true, force: true });
-});
+}, 60_000);
 
 describe('database copy script (live PostgreSQL)', () => {
   it.each([false, true])('preserves the source when both connections reach it (different roles: %s)', async (differentRoles) => {
@@ -85,7 +97,8 @@ describe('database copy script (live PostgreSQL)', () => {
       const rejected = spawnSync('bash', ['-c', isolatedScript(databaseTransferScript())], {
         encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, SOURCE_DATABASE_URL: sourceUrl, DATABASE_URL: targetUrl },
       });
-      expect(rejected.status).not.toBe(0);
+      // A refusal ends normally: the runner reads the result line only of a task that did not fail (#854).
+      expect(rejected.status, rejected.stderr).toBe(0);
       expect(parseTransferResult(rejected.stdout)).toMatchObject({ ok: false, error: expect.stringContaining('same database') });
       await expect(transferPostgresDatabase(sourceUrl, targetUrl)).rejects.toBeInstanceOf(PostgresDatabaseIdentityError);
       expect(psql(targetUrl, 'SELECT value FROM sentinel').trim()).toBe('must survive');
@@ -117,7 +130,7 @@ describe('database copy script (live PostgreSQL)', () => {
       const line = output.split('\n').find((entry) => entry.startsWith('HV_TRANSFER_RESULT '))!;
       const result = JSON.parse(line.slice('HV_TRANSFER_RESULT '.length));
       expect(result.ok).toBe(true);
-      expect(result.source.tables).toEqual({ 'billing.Customers': expect.stringMatching(/^2:\d+$/), 'public.invoices': expect.stringMatching(/^250:\d+$/) });
+      expect(result.source.tables).toEqual({ 'billing."Customers"': expect.stringMatching(/^2:\d+$/), 'public.invoices': expect.stringMatching(/^250:\d+$/) });
       expect(manifestsMatch(result.source, result.target)).toEqual({ match: true, differences: [] });
       expect(psql(url(targetDb), "SELECT count(*) FROM information_schema.tables WHERE table_name = 'stale'").trim()).toBe('0');
     } finally {
@@ -125,6 +138,64 @@ describe('database copy script (live PostgreSQL)', () => {
       psql(admin!, `DROP DATABASE IF EXISTS ${targetDb}`);
       psql(admin!, `DROP ROLE ${owner}`);
     }
+  });
+});
+
+describe('copy check with table names no separator survives (live PostgreSQL, #853)', () => {
+  it('reports a different table as different, and the same as the same, whatever characters its name has', () => {
+    const psql = (url: string, sql: string) => execFileSync(`${bin}/psql`, [url, '-v', 'ON_ERROR_STOP=1', '-qAt', '-c', sql], { encoding: 'utf8' });
+    const suffix = Date.now();
+    const sourceDb = `hv_names_src_${suffix}`, targetDb = `hv_names_dst_${suffix}`, owner = `hv_names_owner_${suffix}`;
+    psql(admin!, `CREATE ROLE ${owner} LOGIN`);
+    psql(admin!, `CREATE DATABASE ${sourceDb} OWNER ${owner}`);
+    psql(admin!, `CREATE DATABASE ${targetDb} OWNER ${owner}`);
+    const url = (db: string) => { const value = new URL(admin!.replace(/\/[^/?]*(\?|$)/, `/${db}$1`)); value.username = owner; value.password = ''; return value.toString(); };
+    const env = () => ({ PATH: `${bin}:/usr/bin:/bin`, SOURCE_DATABASE_URL: url(sourceDb), DATABASE_URL: url(targetDb) });
+    const run = (script: string) => {
+      const execution = spawnSync('bash', ['-c', isolatedScript(script)], { encoding: 'utf8', env: env() });
+      expect(execution.status, execution.stderr).toBe(0);
+      return parseTransferResult(execution.stdout) as any;
+    };
+    // A separator, a quote and a backslash, a line break, and two schema/table pairs that read the same once joined by a dot.
+    const tables = ['public."a|b"', 'public."we""ird\\name"', 'public."line\nbreak"', '"x.y".z', 'x."y.z"', 'public.plain'];
+    try {
+      psql(url(sourceDb), `CREATE SCHEMA "x.y"; CREATE SCHEMA x; ${tables.map((table) => `CREATE TABLE ${table} (v int); INSERT INTO ${table} VALUES (1), (2), (3);`).join(' ')}`);
+      // The copy itself carries every one of them and is certified.
+      const copied = run(databaseTransferScript());
+      expect(copied.ok).toBe(true);
+      expect(Object.keys(copied.source.tables).sort()).toEqual([...tables].sort());
+      expect(copied.source.totalRows).toBe('18');
+      expect(copied.source.version).toMatch(/^\d+$/);
+      expect(manifestsMatch(copied.source, copied.target)).toEqual({ match: true, differences: [] });
+      // The same number of rows with other values, then another number of rows: each wrong table is named, and no other.
+      for (const table of ['public."a|b"', '"x.y".z']) {
+        psql(url(targetDb), `UPDATE ${table} SET v = v + 10`);
+        const checked = run(databaseManifestScript());
+        expect(checked.ok).toBe(true);
+        expect(checked.source.tables[table]).toMatch(/^3:\d+$/);
+        expect(checked.target.tables[table]).toMatch(/^3:\d+$/);
+        expect(manifestsMatch(checked.source, checked.target)).toEqual({ match: false, differences: [`${table}: ${checked.source.tables[table]} → ${checked.target.tables[table]}`] });
+        psql(url(targetDb), `UPDATE ${table} SET v = v - 10`);
+      }
+      psql(url(targetDb), 'DELETE FROM "a|b" WHERE v = 3');
+      const fewer = run(databaseManifestScript());
+      expect(fewer.target.totalRows).toBe('17');
+      expect(manifestsMatch(fewer.source, fewer.target).differences).toEqual([expect.stringMatching(/^public\."a\|b": 3:\d+ → 2:\d+$/)]);
+      psql(url(targetDb), 'INSERT INTO "a|b" VALUES (3)');
+      const same = run(databaseManifestScript());
+      expect(manifestsMatch(same.source, same.target)).toEqual({ match: true, differences: [] });
+    } finally {
+      psql(admin!, `DROP DATABASE IF EXISTS ${sourceDb}`);
+      psql(admin!, `DROP DATABASE IF EXISTS ${targetDb}`);
+      psql(admin!, `DROP ROLE ${owner}`);
+    }
+  });
+
+  it('fails the task, without a result, when a database cannot be read', () => {
+    const unreachable = new URL(admin!.replace(/\/[^/?]*(\?|$)/, '/hv_no_such_database$1')).toString();
+    const execution = spawnSync('bash', ['-c', isolatedScript(databaseManifestScript())], { encoding: 'utf8', env: { PATH: `${bin}:/usr/bin:/bin`, SOURCE_DATABASE_URL: admin!, DATABASE_URL: unreachable } });
+    expect(execution.status).not.toBe(0);
+    expect(parseTransferResult(execution.stdout)).toBeUndefined();
   });
 });
 
@@ -190,17 +261,17 @@ describe('private-network export and restore scripts (live PostgreSQL)', () => {
       psql(url(`hv_esrc_${suffix}`), 'CREATE TABLE "Invoices" (id serial PRIMARY KEY, total numeric); INSERT INTO "Invoices" (total) SELECT g FROM generate_series(1, 42) g;');
       psql(url(`hv_edst_${suffix}`), 'CREATE TABLE stale (id int);');
       const exported = parseTransferResult(await run(databaseExportScript(), { SOURCE_DATABASE_URL: url(`hv_esrc_${suffix}`), UPLOAD_URL: `${base}/upload` })) as any;
-      expect(exported).toMatchObject({ ok: true, source: { tables: { 'public.Invoices': expect.stringMatching(/^42:\d+$/) }, totalRows: '42' } });
+      expect(exported).toMatchObject({ ok: true, source: { tables: { 'public."Invoices"': expect.stringMatching(/^42:\d+$/) }, totalRows: '42' } });
       expect(stored?.length).toBeGreaterThan(0);
       const rejected = spawnSync('bash', ['-c', isolatedScript(databaseRestoreScript())], { encoding: 'utf8', env: {
         PATH: `${bin}:/usr/bin:/bin`, DATABASE_URL: url(`hv_esrc_${suffix}`),
         DUMP_URL: `${base}/dump`, SOURCE_DATABASE_IDENTITY: exported.sourceIdentity,
       } });
-      expect(rejected.status).not.toBe(0);
+      expect(rejected.status, rejected.stderr).toBe(0);
       expect(parseTransferResult(rejected.stdout)).toMatchObject({ ok: false, error: expect.stringContaining('same database') });
       expect(psql(url(`hv_esrc_${suffix}`), 'SELECT count(*) FROM "Invoices"').trim()).toBe('42');
       const restored = parseTransferResult(await run(databaseRestoreScript(), { DATABASE_URL: url(`hv_edst_${suffix}`), DUMP_URL: `${base}/dump`, SOURCE_DATABASE_IDENTITY: exported.sourceIdentity })) as any;
-      expect(restored).toMatchObject({ ok: true, target: { tables: { 'public.Invoices': expect.stringMatching(/^42:\d+$/) } } });
+      expect(restored).toMatchObject({ ok: true, target: { tables: { 'public."Invoices"': expect.stringMatching(/^42:\d+$/) } } });
       expect(manifestsMatch(exported.source, restored.target)).toEqual({ match: true, differences: [] });
       expect(psql(url(`hv_edst_${suffix}`), "SELECT count(*) FROM information_schema.tables WHERE table_name = 'stale'").trim()).toBe('0');
     } finally {

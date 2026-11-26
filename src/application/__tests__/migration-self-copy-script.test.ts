@@ -48,7 +48,7 @@ function execute(script: string, options: ScriptOptions = {}) {
           exit "$TEST_TARGET_IDENTITY_EXIT" ;;
         *information_schema.tables*)
           printf 'manifest:%s\\n' "$SIDE" >> "$TEST_TRACE"
-          printf 'public.invoices|1:42\\n' ;;
+          printf '{"tables" : { "public.invoices" : "1:42" }, "totalRows" : "1", "version" : "160000"}\\n' ;;
         *server_version_num*) printf '160000\\n' ;;
         *current_user*) printf 'app_owner\\n' ;;
         *) printf 'Unexpected SQL transport call\\n' >&2; exit 91 ;;
@@ -97,8 +97,9 @@ function execute(script: string, options: ScriptOptions = {}) {
 }
 
 function expectBlockedBeforeTargetWrites(execution: ReturnType<typeof execute>) {
-  expect(execution.status).not.toBe(0);
-  expect(execution.result?.ok).not.toBe(true);
+  // A refusal ends normally with its reason, so the job runner reads it (#854).
+  expect(execution.status).toBe(0);
+  expect(execution.result).toEqual({ ok: false, error: expect.stringContaining('no data was replaced') });
   expect(execution.trace.filter((entry) => entry.startsWith('write:') || entry === 'restore')).toEqual([]);
 }
 
@@ -170,8 +171,8 @@ describe('private-network export source identity', () => {
 
   it.each(unknownIdentities)('does not export with $label', ({ identity, exit }) => {
     const execution = execute(databaseExportScript(), { sourceIdentity: identity, sourceIdentityExit: exit });
-    expect(execution.status).not.toBe(0);
-    expect(execution.result?.ok).not.toBe(true);
+    expect(execution.status).toBe(0);
+    expect(execution.result).toEqual({ ok: false, error: expect.stringContaining('no data was replaced') });
     expect(execution.trace).not.toContain('dump');
     expect(execution.trace).not.toContain('upload');
   });

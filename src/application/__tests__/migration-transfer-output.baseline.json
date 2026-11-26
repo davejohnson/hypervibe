@@ -1,9 +1,9 @@
 {
  "scripts": {
-  "databaseTransferScript": "b332f1e8e94835088582217a44d464ef8b33a1054a15cb0406a35d1008db4ed0",
-  "databaseExportScript": "32cc5f9e315cd44065c6b4e6eed1f532594f7f2e74ad751dec134e8e5df0b090",
-  "databaseRestoreScript": "bd9d1044f533e3071f0400d3e2143c2c3ee4d630e9cfda4047439bf15c33e34c",
-  "databaseManifestScript": "79bbc2ed892c2ee5ad06719e0193a6ab203e85f4851125493d41618a0b3fbdf9",
+  "databaseTransferScript": "db0ecb4db17ca57821072ec497799342ae210631b142a687a900272d56b7522b",
+  "databaseExportScript": "e14ce5b3fd5ae4ce804cc7a7815ef86ac68baebc6eeb0c7f899855bc3034cd1c",
+  "databaseRestoreScript": "84e0bcbfa0bdca53c9bc58f3cf4d03839104eceedd1463e9583eb15328c13d0d",
+  "databaseManifestScript": "0793fe1c3438f5677621bf7fb19c37128a0934d4c96c3fe5ffc001f5a2858362",
   "storageTransferScript": "cd1dbf02eaa1518bd50f86053386ab8760408d973fedd299fbb241ff0b36b5f3",
   "storageCheckScript": "04b93d0b1d391f6d60e46cba3c05087f0b47e4727766b6c39593a32e740f41dd"
  },

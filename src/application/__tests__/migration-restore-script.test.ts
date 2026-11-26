@@ -22,7 +22,7 @@ function executeRestore(script: string, restoreExit: number, diagnostic: string)
           if [ "$1" = source ]; then printf '101:736f75726365\\n'; else printf '202:746172676574\\n'; fi ;;
         *information_schema.tables*)
           printf 'manifest:%s\\n' "$1" >> "$TEST_TRACE"
-          printf 'public.invoices|1:42\\n' ;;
+          printf '{"tables" : { "public.invoices" : "1:42" }, "totalRows" : "1", "version" : "160000"}\\n' ;;
         *server_version_num*) printf '160000\\n' ;;
         *current_user*) printf 'app_owner\\n' ;;
         *) : ;;
@@ -72,8 +72,9 @@ describe.each([
     // the same row but the restore process failed to recreate a schema object.
     expect(manifestsMatch(manifest, { ...manifest })).toEqual({ match: true, differences: [] });
     const execution = executeRestore(script(), 1, diagnostic);
-    expect(execution.status).not.toBe(0);
-    expect(execution.result).toMatchObject({ ok: false, error: expect.stringContaining('pg_restore exit 1') });
+    // The failure is a result the runner reads (#854), and it says the target was already cleared.
+    expect(execution.status).toBe(0);
+    expect(execution.result).toEqual({ ok: false, error: 'The copy could not be written to the new database (pg_restore exit 1). The new database had already been cleared and may hold part of the copy.' });
     expect(execution.result).not.toHaveProperty('target');
     expect(execution.trace).toContain('restore\n');
     expect(execution.trace).not.toContain('manifest:target');
