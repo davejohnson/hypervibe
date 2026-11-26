@@ -447,6 +447,17 @@ describe('current source credential handoff', () => {
       expect(f.versionInspection.inspect).not.toHaveBeenCalled();
     });
 
+    it('reports why the private export inside Railway refused, which ends normally with its reason (#854)', async () => {
+      const f = inspection();
+      expect(await f.call(await f.preview())).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
+      vi.spyOn(transfer, 'transferCredentialHandoffProblem').mockReturnValue(undefined);
+      const reason = 'The source database identity could not be verified; no data was replaced.';
+      f.runPrivateTask.mockImplementation(async () => ({ exitCode: 0, output: 'HV_TRANSFER_RESULT ' + JSON.stringify({ ok: false, error: reason }) }));
+      const result = await f.migrate({ copyData: true, refreshData: true });
+      expect(f.runPrivateTask.mock.calls.some(([job]) => job.command.includes('pg_dump'))).toBe(true);
+      expect(result).toMatchObject({ status: 'blocked', message: `The private export inside Railway did not complete: ${reason}` });
+    });
+
     it('accepts explicit action confirmation without browser consent', async () => {
       const f = inspection();
       const reviewed = await f.preview();
