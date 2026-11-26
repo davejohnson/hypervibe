@@ -51,6 +51,32 @@
         "monthlyUsd": 60
       },
       "hiredAt": "2026-11-26T18:11:38.422Z"
+    },
+    {
+      "id": "reviewer-tango",
+      "role": "reviewer",
+      "focus": "The footing the whole project stands on, once a week, whether or not anything changed. First, what it runs on: the language runtime, the database, the framework and the services it depends on, against what is current and still supported, with the date support ends where there is one. Second, whether it is built in a way that fits what it does: for example files kept in object storage and not on a server's disk or in the database, slow work done in the background and not inside a request, and nothing held in memory that has to outlive a restart. Read the whole project, not just recent changes, and check current versions and support dates against their official sources.",
+      "name": "Tango",
+      "roleVersion": 1,
+      "repositoryId": 1142935404,
+      "repositoryName": "davejohnson/hypervibe",
+      "agent": "hyperteam-reviewer-tango",
+      "runtime": "self-hosted",
+      "model": {
+        "provider": "anthropic",
+        "model": "claude-opus-5-5",
+        "price": {
+          "input": 4,
+          "output": 20
+        },
+        "priceKnown": true,
+        "line": "opus",
+        "access": "subscription"
+      },
+      "budget": {
+        "monthlyUsd": 60
+      },
+      "hiredAt": "2026-11-26T18:51:32.662Z"
     }
   ]
 }
