@@ -534,7 +534,8 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       let coverageReport: EnvironmentVariableCoverageReport = { complete: true, issues: [] };
       try {
         const projectName = project?.name ?? newProject!.name;
-        const previousSpec = project ? specStore.preview(project) : null;
+        // Replacing the setup outright is never refused for the checkout holding an older copy of it: this is the way out of that refusal.
+        const previousSpec = project ? specStore.preview(project, replace ? 'use-saved' : 'refuse') : null;
         const baseSpec = previousSpec ?? { version: 1 as const, project: projectName, environments: {} };
         const mergedInput = replace
           ? {

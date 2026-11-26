@@ -288,12 +288,23 @@ export class SpecStore {
       + 'To go back to the older setup on purpose, save it explicitly with hv_spec and replace=true.');
   }
 
-  /** Read the desired input for editing or discovery without recording a revision or creating local files. */
-  preview(project: Project): ProjectSpec | null {
+  /**
+   * Read the desired input for editing or discovery without recording a revision or creating local files. A file that
+   * is an older copy of the saved setup is refused, unless the caller is about to replace the setup outright: that is
+   * the person's own decision, and what it is compared with is then the saved setup, not the stale file.
+   */
+  preview(project: Project, olderCopy: 'refuse' | 'use-saved' = 'refuse'): ProjectSpec | null {
     const repoSpec = readRepoSpecFile();
     const latest = this.repo.findLatest(project.id);
     if (repoSpec && repoSpecMatchesProject(repoSpec.spec, project)) {
-      if (latest && !sameSpec(projectSpecSchema.safeParse(latest.document).data, repoSpec.spec)) this.refuseOlderCopy(project, repoSpec, latest);
+      if (latest && !sameSpec(projectSpecSchema.safeParse(latest.document).data, repoSpec.spec)) {
+        try {
+          this.refuseOlderCopy(project, repoSpec, latest);
+        } catch (error) {
+          if (olderCopy !== 'use-saved') throw error;
+          return parseStoredSpec(latest, project.id);
+        }
+      }
       return repoSpec.spec;
     }
     return latest ? parseStoredSpec(latest, project.id) : desiredStateToSpec(project);

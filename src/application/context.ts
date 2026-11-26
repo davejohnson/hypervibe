@@ -83,12 +83,12 @@ export function createCommandContext(): CommandContext {
     return bindings;
   };
 
-  /** True when the file was last written clearly before `moment` (two seconds' allowance for file systems that keep coarse times). */
-  const writtenBefore = (file: string, moment: Date): boolean => {
+  /** When the file was last written, or nothing when that cannot be read. Compared with two seconds' allowance for file systems that keep coarse times. */
+  const writtenAt = (file: string): number | undefined => {
     try {
-      return statSync(file).mtimeMs + 2000 < moment.getTime();
+      return statSync(file).mtimeMs;
     } catch {
-      return false;
+      return undefined;
     }
   };
 
@@ -99,6 +99,10 @@ export function createCommandContext(): CommandContext {
   ): void => {
     if (!bindings) return;
 
+    // When the file was last written is read once, before anything is saved: saving rewrites the file, and a file made
+    // fresh by this very load must not vouch for itself.
+    const fileTime = writtenAt(bindings.path);
+    const take: Array<() => void> = [];
     for (const [envName, entry] of Object.entries(bindings.document.environments)) {
       const existing = repos.environments.findByProjectAndName(project.id, envName);
       const platformBindings = entry.platformBindings;
@@ -112,22 +116,24 @@ export function createCommandContext(): CommandContext {
         continue;
       }
       if (!existing) {
-        repos.environments.create({ projectId: project.id, name: envName, platformBindings });
+        take.push(() => { repos.environments.create({ projectId: project.id, name: envName, platformBindings }); });
         continue;
       }
       if (JSON.stringify(existing.platformBindings) !== JSON.stringify(platformBindings)) {
         const merged = mergeRepoPlatformBindings(existing.platformBindings, platformBindings);
         // A file that would change what is saved is taken in only if it was written after the saved bindings last
         // changed (a pull, an edit). One written before that is an older copy, as a checkout that was never updated
-        // holds: taking it in would put back provider identities Hypervibe has replaced since.
-        if (!isDeepStrictEqual(existing.platformBindings, merged) && writtenBefore(bindings.path, existing.updatedAt)) {
+        // holds: taking it in would put back provider identities Hypervibe has replaced since. The whole file is then
+        // refused, before any of it is taken in: nothing it lists is saved, and no environment is brought back from it.
+        if (!isDeepStrictEqual(existing.platformBindings, merged) && fileTime !== undefined && fileTime + 2000 < existing.updatedAt.getTime()) {
           throw new HvError('VALIDATION', `${bindings.path} is older than the bindings Hypervibe has saved for ${envName}: the file was last written before they changed. Nothing was read from it and nothing was changed.`, {
             hint: 'If this checkout is behind, run git pull, then run this again. If the checkout is up to date and the saved bindings are the ones to keep, delete that file and run this again; Hypervibe writes it afresh.',
           });
         }
-        repos.environments.update(existing.id, { platformBindings: merged });
+        take.push(() => { repos.environments.update(existing.id, { platformBindings: merged }); });
       }
     }
+    for (const save of take) save();
   };
 
   const resolveRepoBackedProject = (ref?: string, startDir?: string, readOnly = false): Project | null => {

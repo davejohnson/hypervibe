@@ -10,12 +10,14 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 import { ProjectSpecRepository } from '../../adapters/db/repositories/spec.repository.js';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { SecretStore } from '../../adapters/secrets/secret-store.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { checkoutFreshness } from '../../lib/checkout-freshness.js';
-import { CommandRegistry } from '../commands.js';
+import { runWithWorkspaceDirectories } from '../../lib/workspace-context.js';
+import { CommandRegistry, createCommandRegistry } from '../commands.js';
 import { createCommandContext } from '../context.js';
 
 let base: string;
@@ -49,14 +51,15 @@ function repositories(behind: number): { current: string; stale: string } {
   return { current, stale };
 }
 
-/** The shared command core with one command that records being run. */
+/** The shared command core, through its real execution path, with commands that only record being run. */
 function commands() {
   const registry = new CommandRegistry();
   const ran: string[] = [];
-  for (const name of ['hv_plan', 'hv_apply', 'hv_deploy', 'hv_migrate', 'hv_launch', 'hv_destroy', 'hv_rollback', 'hv_import', 'hv_spec', 'hv_status']) {
-    registry.register(name, name, {}, () => { ran.push(name); return { ok: true, data: {} }; });
+  const inputs = { project: z.string().optional(), spec: z.record(z.string(), z.unknown()).optional(), action: z.string().optional(), verifyOnly: z.boolean().optional() };
+  for (const name of ['hv_plan', 'hv_apply', 'hv_deploy', 'hv_migrate', 'hv_launch', 'hv_destroy', 'hv_rollback', 'hv_import', 'hv_spec', 'hv_secrets', 'hv_ci_trigger', 'hv_appstore_submit', 'hv_status']) {
+    registry.register(name, name, inputs, () => { ran.push(name); return { ok: true, data: {} }; });
   }
-  return { ran, run: (name: string, input: Record<string, unknown> = {}) => registry.get(name)!.execute(input) };
+  return { ran, run: (name: string, input: Record<string, unknown> = {}) => registry.execute(name, input) };
 }
 
 beforeEach(() => {
@@ -94,6 +97,14 @@ describe('a command that plans or changes things, in a checkout that is behind',
     expect((await run('hv_spec')).ok).toBe(true);
     expect((await run('hv_status')).ok).toBe(true);
     expect(ran).toEqual(['hv_spec', 'hv_status']);
+    // The other commands that read the setup and then change something are refused; their modes that only read are not.
+    const more = commands();
+    for (const [name, input] of [['hv_secrets', { action: 'rotate' }], ['hv_secrets', { action: 'collect' }], ['hv_ci_trigger', {}], ['hv_appstore_submit', {}], ['hv_migrate', { action: 'inspectSource' }]] as const) {
+      expect((await more.run(name, input)).ok, `${name} ${JSON.stringify(input)}`).toBe(false);
+    }
+    for (const [name, input] of [['hv_secrets', { action: 'ages' }], ['hv_secrets', {}], ['hv_rollback', { action: 'preview' }], ['hv_migrate', { verifyOnly: true }]] as const) {
+      expect((await more.run(name, input)).ok, `${name} ${JSON.stringify(input)}`).toBe(true);
+    }
 
     process.chdir(current);
     // Uncommitted changes are not a reason to refuse.
@@ -140,7 +151,15 @@ describe('a command that plans or changes things, in a checkout that is behind',
     const unreachable = await commands().run('hv_plan');
     expect(unreachable.ok).toBe(true);
     expect(unreachable.warnings).toEqual([expect.stringMatching(/could not confirm this checkout is up to date: origin could not be reached/)]);
-    expect(checkoutFreshness()).toMatchObject({ state: 'unchecked' });
+    expect(await checkoutFreshness()).toMatchObject({ state: 'unchecked' });
+    // What was fetched earlier still counts: known to be behind, and now offline, is refused all the same.
+    const { stale: known } = { stale: path.join(base, 'known') };
+    git(base, 'clone', '--quiet', path.join(base, 'remote.git'), known);
+    git(known, 'reset', '--quiet', '--hard', 'HEAD~2');
+    git(known, 'remote', 'set-url', 'origin', path.join(base, 'gone.git'));
+    process.chdir(known);
+    expect((await commands().run('hv_plan')).error?.message).toBe('This checkout is 2 commits behind origin/main. Run git pull, then run this again.');
+    process.chdir(stale);
     // No upstream, and no branch at all.
     git(stale, 'checkout', '--quiet', '-b', 'local-only');
     expect((await commands().run('hv_plan')).warnings).toEqual([expect.stringContaining('branch local-only has no upstream branch')]);
@@ -148,23 +167,53 @@ describe('a command that plans or changes things, in a checkout that is behind',
     expect((await commands().run('hv_plan')).warnings).toEqual([expect.stringContaining('not on a branch')]);
   }, 60_000);
 
+  it('never hands git a remote or branch name that could be read as an option', async () => {
+    const { stale } = repositories(0);
+    // A branch whose name starts with a dash, as a repository's own configuration can name one.
+    git(stale, 'update-ref', 'refs/heads/-q', 'HEAD');
+    git(stale, 'push', '--quiet', 'origin', 'refs/heads/-q:refs/heads/-q');
+    git(stale, 'symbolic-ref', 'HEAD', 'refs/heads/-q');
+    git(stale, 'config', 'branch.-q.remote', 'origin');
+    git(stale, 'config', 'branch.-q.merge', 'refs/heads/-q');
+    process.chdir(stale);
+    const result = await commands().run('hv_plan');
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toEqual([expect.stringContaining('has a name Hypervibe will not hand to git')]);
+    git(stale, 'config', 'branch.-q.remote', '--upload-pack=touch pwned');
+    expect((await commands().run('hv_plan')).warnings).toHaveLength(1);
+  }, 60_000);
+
+  it('checks the checkout of the app the command is for, in a session with several directories', async () => {
+    const { current, stale } = repositories(2);
+    // Another app's checkout, up to date, listed first; the app the command names is the one that is behind.
+    const other = path.join(base, 'other');
+    mkdirSync(path.join(other, '.hypervibe'), { recursive: true });
+    git(other, 'init', '--quiet');
+    writeFileSync(path.join(other, '.hypervibe/spec.json'), `${JSON.stringify(specOf('other', ['api']))}\n`);
+    const refused = await runWithWorkspaceDirectories([other, stale], () => commands().run('hv_plan', { project: 'app' }));
+    expect(refused.error?.message).toBe(`This checkout (${stale}) is 2 commits behind origin/main. Run git pull, then run this again.`);
+    // And a command for the other app is not held to this app's stale checkout.
+    expect((await runWithWorkspaceDirectories([stale, other], () => commands().run('hv_plan', { project: 'other' }))).ok).toBe(true);
+    expect((await runWithWorkspaceDirectories([other, current], () => commands().run('hv_plan', { project: 'app' }))).ok).toBe(true);
+  }, 60_000);
+
   it('stands aside in CI, which deploys the commit it was given, and for a directory that holds no app setup', async () => {
     const { stale } = repositories(3);
     process.chdir(stale);
-    expect(checkoutFreshness()).toEqual({ state: 'behind', count: 3, upstream: 'origin/main' });
+    expect(await checkoutFreshness()).toEqual({ state: 'behind', count: 3, upstream: 'origin/main' });
     vi.stubEnv('GITHUB_ACTIONS', 'true');
-    expect(checkoutFreshness()).toEqual({ state: 'not-applicable' });
+    expect(await checkoutFreshness()).toEqual({ state: 'not-applicable' });
     const inCi = await commands().run('hv_deploy');
     expect(inCi.ok).toBe(true);
     expect(inCi.warnings).toBeUndefined();
     vi.stubEnv('GITHUB_ACTIONS', '');
     rmSync(path.join(stale, '.hypervibe'), { recursive: true });
-    expect(checkoutFreshness()).toEqual({ state: 'not-applicable' });
+    expect(await checkoutFreshness()).toEqual({ state: 'not-applicable' });
   }, 60_000);
 });
 
 describe('an older copy of a file never replaces what Hypervibe has saved since', () => {
-  it('refuses a setup file that matches an earlier saved revision, changing neither the saved setup nor the file; a file with new content is still taken in', () => {
+  it('refuses a setup file that matches an earlier saved revision, changing neither the saved setup nor the file; a file with new content is still taken in', async () => {
     const { current } = repositories(0);
     process.chdir(current);
     const ctx = createCommandContext();
@@ -183,10 +232,21 @@ describe('an older copy of a file never replaces what Hypervibe has saved since'
     expect(Object.keys((new ProjectSpecRepository().findLatest(project.id)!.document as ReturnType<typeof specOf>).environments.staging.services)).toEqual(['api', 'worker']);
     expect(readFileSync(file, 'utf8')).toBe(older);
 
+    // The way out the refusal names works, through the real hv_spec command: saving a setup outright is the person's decision.
+    const registry = createCommandRegistry(ctx);
+    const merged = await registry.execute('hv_spec', { project: 'app', spec: { environments: { staging: { services: { extra: { startCommand: 'npm start' } } } } } });
+    expect(merged.ok).toBe(false);
+    expect(JSON.stringify(merged)).toContain('older copy of this project');
+    const back = await registry.execute('hv_spec', { project: 'app', replace: true, spec: specOf('app', ['api']) });
+    expect(back.ok, JSON.stringify(back)).toBe(true);
+    expect(new ProjectSpecRepository().findLatest(project.id)!.revision).toBe(second.revision + 1);
+    expect(Object.keys((JSON.parse(readFileSync(file, 'utf8')) as ReturnType<typeof specOf>).environments.staging.services)).toEqual(['api']);
+    expect(store.get(project)!.revision).toBe(second.revision + 1);
+
     // Content Hypervibe has never saved (pulled from elsewhere, or edited by hand) is new, and is taken in as before.
     writeFileSync(file, `${JSON.stringify(specOf('app', ['api', 'worker', 'cron']), null, 2)}\n`);
     const adopted = store.get(project)!;
-    expect(adopted).toMatchObject({ adopted: true, revision: second.revision + 1 });
+    expect(adopted).toMatchObject({ adopted: true, revision: second.revision + 2 });
     expect(Object.keys(adopted.spec.environments.staging!.services)).toEqual(['api', 'worker', 'cron']);
   }, 60_000);
 
@@ -201,13 +261,18 @@ describe('an older copy of a file never replaces what Hypervibe has saved since'
     const older = readFileSync(file, 'utf8');
     ctx.repos.environments.updatePlatformBindings(environment.id, { projectId: 'railway-new' });
     const saved = ctx.repos.environments.findById(environment.id)!;
-    // As a checkout that was never updated has it: the older file, last written before the saved bindings changed.
-    writeFileSync(file, older);
+    // As a checkout that was never updated has it: the older file, last written before the saved bindings changed. It
+    // also still lists an environment the saved state no longer has, ahead of the one that shows the file is stale.
+    const withGone = JSON.parse(older) as { environments: Record<string, unknown> };
+    writeFileSync(file, `${JSON.stringify({ ...withGone, environments: { gone: { platformBindings: { projectId: 'railway-gone' } }, ...withGone.environments } }, null, 2)}\n`);
+    const olderFile = readFileSync(file, 'utf8');
     const before = new Date(saved.updatedAt.getTime() - 60_000);
     utimesSync(file, before, before);
     expect(() => ctx.resolveProject({ project: 'app' })).toThrow(/bindings\.json is older than the bindings Hypervibe has saved for staging/);
     expect(ctx.repos.environments.findById(environment.id)!.platformBindings).toEqual(saved.platformBindings);
-    expect(readFileSync(file, 'utf8')).toBe(older);
+    expect(readFileSync(file, 'utf8')).toBe(olderFile);
+    // Nothing of the stale file was taken in before it was found stale: no environment was brought back from it.
+    expect(ctx.repos.environments.findByProjectAndName(project.id, 'gone')).toBeNull();
 
     // The same content in a file written after the saved bindings changed (a pull, an edit) is taken in as before.
     const after = new Date(saved.updatedAt.getTime() + 60_000);
