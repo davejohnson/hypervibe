@@ -8,7 +8,6 @@ import { cloudRunJobRequest, readCloudRunOperation } from '../adapters/providers
 import { listLogEntries, readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
 import type { TransferResources } from '../adapters/providers/gcp/gcp-data.client.js';
 export { signedObjectUrl, type TransferResources } from '../adapters/providers/gcp/gcp-data.client.js';
-import { observeSecret } from './infrastructure-engine.js';
 
 /**
  * Data transfer that runs inside the target cloud, next to the target data.
@@ -269,6 +268,18 @@ export interface TransferJob {
   timeoutSeconds: number;
 }
 
+/**
+ * How long after a copy job's record was last written a request it made may still take effect at Google: a job being
+ * created, a run being started. Past it, a recorded job that is not there will not appear, and one that has no
+ * execution will not start.
+ */
+const SETTLE_MINUTES = 10;
+/** Minutes until a recorded transfer is past that time; 0 once it is, and for a record that carries no time. */
+export function transferSettleMinutes(resources: Pick<TransferResources, 'recordedAt'>, now = Date.now()): number {
+  if (typeof resources.recordedAt !== 'number' || !Number.isFinite(resources.recordedAt)) return 0;
+  return Math.max(0, Math.ceil((resources.recordedAt + SETTLE_MINUTES * 60_000 - now) / 60_000));
+}
+
 /** Said wherever a copy is put to the user for approval. */
 export const TRANSFER_SECRET_NOTICE = 'While a copy job runs, the access it needs to the source is held in a temporary secret in the Google Cloud project, which the app there could read; Hypervibe deletes that secret when the job ends.';
 
@@ -371,7 +382,8 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
   if (new Set(secretIds).size !== secretIds.length) return { ok: false, error: 'Two source values of this copy would share one temporary secret.' } as T;
   // Journalled before anything is written, so a secret this run leaves behind is always found again.
   if (secretIds.length && !context.recordTransferResources) return { ok: false, error: 'This copy has nowhere to record its temporary secret, so it was not started.' } as T;
-  let resources: TransferResources = { gcpProjectId: context.gcpProjectId, region: context.region, jobId: id, secretIds, ownershipToken };
+  let resources: TransferResources = { gcpProjectId: context.gcpProjectId, region: context.region, jobId: id, secretIds, ownershipToken,
+    ...(job.purpose === 'access' ? {} : { recordedAt: Date.now() }) };
   if (job.purpose === 'access') resources.probe = { stage: 'before-run', serviceAccount: context.runtimeServiceAccountEmail };
   if (!await verifyTransferResourcesAbsent(context, resources)) {
     return { ok: false, error: 'The temporary transfer job name could not be confirmed unused in the target project and region.' } as T;
@@ -416,12 +428,12 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
       throw new Error(`Creating the ${job.purpose} copy job failed (HTTP ${created.status}).`);
     }
     const creation = await waitOperation(context, await created.json());
-    if (creation.error) throw new Error('The transfer job could not be created.');
+    if (creation.error) { creationMayHaveStarted = false; throw new Error('The transfer job could not be created.'); }
     const createdJob = creation.response as { name?: string; uid?: string } | undefined;
     if (typeof createdJob?.uid !== 'string' || !createdJob.uid || !await scopedCloudRunName(context, createdJob.name, new RegExp(`^jobs/${id}$`))) {
       throw new Error('The created transfer job could not be identified.');
     }
-    resources = { ...resources, jobUid: createdJob.uid, ...(job.purpose === 'access' ? {} : { runRequested: false }) };
+    resources = { ...resources, jobUid: createdJob.uid, ...(job.purpose === 'access' ? {} : { recordedAt: Date.now() }) };
     await context.recordTransferResources?.(resources);
     const observedJob = await ownedJob(context, resources);
     if (!observedJob) throw new Error('The created job identity could not be verified.');
@@ -431,10 +443,6 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
     const runToken = await context.token();
     if (resources.probe) {
       resources = { ...resources, probe: { ...resources.probe, stage: 'run-may-be-submitted', etag: observedJob.etag } };
-      await context.recordTransferResources?.(resources);
-    } else {
-      // Recorded before the request, so a job found later with no run asked of it is known never to have started.
-      resources = { ...resources, runRequested: true };
       await context.recordTransferResources?.(resources);
     }
     executionMayBeRunning = true;
@@ -473,6 +481,13 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
   }
   if (executionMayBeRunning) {
     return { ok: false, error: `Completion of transfer job ${id} in ${context.gcpProjectId}/${context.region} is unverified. Its job identity is retained for recovery.` } as T;
+  }
+  if (thrown && creationMayHaveStarted && !resources.jobUid && job.purpose !== 'access') {
+    // Whether the job was created is not known. Deleting its secrets and forgetting it now would strand a job that still appears.
+    const appeared = await ownedJob(context, resources).catch(() => null);
+    if (appeared === undefined) {
+      return { ok: false, error: `Whether temporary job ${id} was created in ${context.gcpProjectId}/${context.region} is not known yet. Run the copy again in ${SETTLE_MINUTES} minutes; what this attempt left is removed first.` } as T;
+    }
   }
   let removed: boolean;
   if (resources.probe?.stage === 'before-run') {
@@ -632,12 +647,16 @@ export async function recoverTerminalTransferResources(context: TransferScope, r
   } else if (probe) return false;
   try {
     const job = await ownedJob(context, resources);
-    // A create can still arrive after its response was lost. Without a UID, a 404 does not settle that request for a test job.
-    // A copy job that never appeared leaves only its temporary secrets, which are removed here.
-    if (!job) return (!!resources.jobUid || !probe) && removeTransferLeftovers(context, resources);
+    const settled = transferSettleMinutes(resources) === 0;
+    // A create can still arrive after its response was lost. Without a UID, a 404 does not settle that request: never for a
+    // test job, and for a copy job not until enough time has passed. Then only its temporary secrets are left to remove.
+    if (!job) return (!!resources.jobUid || (!probe && settled)) && removeTransferLeftovers(context, resources);
     if (probe?.stage === 'before-run') return await recoverUnsubmittedProbe(context, resources, job);
-    // The UID is recorded before the first :run request, and so is the intent to run. A copy job without either was created and never started.
-    if (!resources.jobUid || resources.runRequested === false) return !job.reconciling && !job.executionCount && job.latestCreatedExecution == null && removeTransferLeftovers(context, resources, job);
+    // Google can report a job that never ran with an empty latestCreatedExecution. The UID is recorded before the first
+    // :run request: a copy job without one was never asked to run, and one whose record is old enough will not start now.
+    if (!probe && !job.executionCount && !job.latestCreatedExecution?.name) {
+      return !job.reconciling && (!resources.jobUid || settled) && removeTransferLeftovers(context, resources, job);
+    }
     if (job.reconciling || !Number.isSafeInteger(job.executionCount) || !job.executionCount
         || !job.latestCreatedExecution?.name) return false;
     // Until at least one execution materializes a previously unacknowledged
@@ -718,9 +737,7 @@ async function readResultLine(context: TransferContext, jobName: string, executi
         let parsed: Record<string, unknown>;
         try { parsed = JSON.parse(line.slice(line.indexOf(RESULT_MARKER) + RESULT_MARKER.length)); } catch { return undefined; }
         if (probe) return line.startsWith(RESULT_MARKER) ? parsed : undefined;
-        const errors = await listLogEntries(await context.token(), { resourceNames: [`projects/${context.gcpProjectId}`], filter: filter.replace(`textPayload:"${RESULT_MARKER.trim()}"`, 'textPayload:"HV_RESTORE_ERROR"'), pageSize: 5 }).then((response) => response.ok ? response.json() as Promise<{ entries?: Array<{ textPayload?: string }> }> : { entries: [] }).catch(() => ({ entries: [] }));
-        const sample = (errors.entries ?? []).map((entry) => (entry.textPayload ?? '').replace('HV_RESTORE_ERROR ', '').replace(/postgres(ql)?:\/\/\S+/g, '<url>').slice(0, 200));
-        return sample.length ? { ...parsed, restoreErrors: sample } : parsed;
+        return parsed;
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -753,9 +770,4 @@ export function s3SourceRemote(credentials: { endpoint: string; accessKeyId: str
     },
     secrets: { RCLONE_CONFIG_SRC_ACCESS_KEY_ID: credentials.accessKeyId, RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: credentials.secretAccessKey },
   };
-}
-
-export async function secretExists(context: TransferContext, secretId: string): Promise<boolean> {
-  const observed = await observeSecret(await context.token(), context.gcpProjectId, secretId);
-  return observed.state === 'present' && observed.value.hasEnabledVersion;
 }

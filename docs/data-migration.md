@@ -35,8 +35,18 @@ bucket. Each job needs something private of the source: the signed link to the
 export, or the Railway bucket's access keys. Hypervibe puts each in a temporary
 secret in the Google Cloud project just before the job, gives the job a
 reference to one exact version of it, and deletes it when the job ends. If
-Hypervibe is interrupted, the next `refreshData` copy removes what was left, and
-Secret Manager deletes the secret by itself an hour after the job's time limit.
+Hypervibe is interrupted, whatever `hv_migrate` is asked next removes what was
+left before doing anything else. For ten minutes after an interruption it may
+answer "try again in N minutes" instead: a job being created or started at that
+moment has to be given time to appear or not. Secret Manager also deletes the
+secret by itself an hour after the job's time limit.
+
+The export file is a copy of the whole database. Hypervibe deletes it from the
+bucket as soon as the restore job has ended, whether it succeeded, refused or
+failed, and removes one left by an interrupted copy the next time `hv_migrate`
+runs. A copy whose export file could not be deleted does not count. If the
+bucket keeps deleted files for a recovery period (soft delete), the file stays
+recoverable for that period.
 
 While a job runs, the app in that Google Cloud project could read the temporary
 secret, because the app's identity can read every secret of its project. This
@@ -44,10 +54,9 @@ was accepted on 2026-11-26: one owner holds both sides of a migration. The
 approval for the copy says so. The separate copy account and restricted
 container described below are not used by this copy.
 
-Still missing: the export file stays in the project's bucket after the restore
-and is not deleted by Hypervibe; and a fresh comparison (`verifyOnly`) of a
-private Railway database is refused, so the proof of a Railway database copy is
-the check made by the copy itself. A historical receipt only describes the
+Still missing: a fresh comparison (`verifyOnly`) of a private Railway database
+is refused, so the proof of a Railway database copy is the check made by the
+copy itself. A historical receipt only describes the
 earlier copy. The application pause and forwarding flow below is a separate
 capability. See [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
 

@@ -36,13 +36,12 @@ export function acquireMigrationTargetLease(projectId: string, target: string) {
           db.prepare('DELETE FROM pending WHERE id = 1').run();
           return;
         }
-        // Under the exclusive lock, the only allowed refinements are learning the
-        // immutable UID of the job this attempt created, and that its run is about to be requested.
+        // Under the exclusive lock, the only allowed refinement is learning the
+        // immutable UID of the job this attempt created, with the time that was recorded.
         const previous = pending();
-        const fixed = ({ jobUid: _uid, runRequested: _requested, ...rest }: TransferResources) => rest;
+        const fixed = ({ jobUid: _uid, recordedAt: _at, ...rest }: TransferResources) => rest;
         if (previous && (!isDeepStrictEqual(fixed(previous), fixed(resources))
-          || (previous.jobUid !== undefined && previous.jobUid !== resources.jobUid)
-          || (previous.runRequested === true && resources.runRequested !== true))) {
+          || (previous.jobUid !== undefined && previous.jobUid !== resources.jobUid))) {
           throw new Error('An earlier transfer still has outstanding cleanup.');
         }
         db.prepare('INSERT OR REPLACE INTO pending (id, resources) VALUES (1, ?)').run(JSON.stringify(resources));

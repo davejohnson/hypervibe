@@ -12,7 +12,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SqliteAdapter } from '../../adapters/db/sqlite.adapter.js';
 import { acquireMigrationTargetLease } from '../../adapters/db/migration-target-lease.js';
-import { recoverTerminalTransferResources, runTransferJob, verifyTransferResourcesAbsent, type TransferJob, type TransferResources } from '../migration-transfer-gcp.js';
+import { recoverTerminalTransferResources, runTransferJob, transferSettleMinutes, verifyTransferResourcesAbsent, type TransferJob, type TransferResources } from '../migration-transfer-gcp.js';
 import { fakeSecretManager } from './pause-fixtures.js';
 
 const project = 'fixture-project';
@@ -26,7 +26,7 @@ const job: TransferJob = { purpose: 'database', image: 'postgres:18-alpine', scr
 
 type End = 'succeeds' | 'refuses' | 'fails';
 /** Where the connection to Google is lost for good, as when the machine running Hypervibe dies there. */
-type Death = 'after the secrets are written' | 'as the job is created' | 'after the job is created' | undefined;
+type Death = 'the answer to creating the job is lost' | 'after the secrets are written' | 'as the job is created' | 'after the job is created' | 'as the run is requested' | undefined;
 
 function cloud(end: End, death?: Death) {
   const secrets = fakeSecretManager(project);
@@ -52,7 +52,8 @@ function cloud(end: End, death?: Death) {
     const route = url.pathname.replace(/^\/v2\//, '');
     const method = init.method ?? 'GET';
     const name = `${parent}/jobs/${jobId}`;
-    const native = { name, uid: 'uid-1', etag: 'tag', labels, ...(executions ? { executionCount: executions, latestCreatedExecution: { name: `${name}/executions/e1` } } : {}) };
+    // A job that never ran is reported with an empty latestCreatedExecution.
+    const native = { name, uid: 'uid-1', etag: 'tag', labels, ...(executions ? { executionCount: executions, latestCreatedExecution: { name: `${name}/executions/e1` } } : { latestCreatedExecution: {} }) };
     if (url.hostname === 'logging.googleapis.com') {
       return Response.json({ entries: String(init.body).includes('HV_RESTORE_ERROR') ? [] : [{ textPayload: `HV_TRANSFER_RESULT ${JSON.stringify(end === 'refuses' ? refusal : { ok: true })}` }] });
     }
@@ -62,6 +63,8 @@ function cloud(end: End, death?: Death) {
       labels = body.labels;
       present = true;
       if (death === 'as the job is created') { down = true; throw new TypeError('fetch failed'); }
+      // Google goes on creating the job; it is not there to be seen yet.
+      if (death === 'the answer to creating the job is lost') { present = false; throw new TypeError('fetch failed'); }
       return Response.json({ name: `${parent}/operations/create`, done: true, response: { ...native, name: `${parent}/jobs/${jobId}` } });
     }
     if (method === 'GET' && route === name) return present ? Response.json(native) : Response.json({}, { status: 404 });
@@ -70,6 +73,8 @@ function cloud(end: End, death?: Death) {
       return Response.json({ executions: executions ? [{ name: `${name}/executions/e1`, uid: 'e-uid', job: name, completionTime: '2026-11-26T12:00:00Z' }] : [] });
     }
     if (method === 'POST' && route === `${name}:run`) {
+      // Google answers with an error and starts nothing.
+      if (death === 'as the run is requested') return Response.json({}, { status: 503 });
       executions = 1;
       return end === 'fails'
         ? Response.json({ name: `${parent}/operations/run`, done: true, error: { code: 13, message: 'Execution failed' }, metadata: { name: `${name}/executions/e1` } })
@@ -91,6 +96,7 @@ function cloud(end: End, death?: Death) {
     secrets, journal, elsewhere, context, run, settle, refusal,
     body: () => body,
     jobPresent: () => present,
+    appear: () => { present = true; },
     restore: () => { down = false; },
     pending: () => journal.at(-1),
   };
@@ -152,6 +158,37 @@ describe('private source values on their way to a copy job', () => {
 });
 
 describe('a copy that died with its temporary secrets still there', () => {
+  it.each(['appears', 'never appears'] as const)('keeps its record while the job may still be created, so a job that %s is not stranded', async (later) => {
+    const provider = cloud('succeeds', 'the answer to creating the job is lost');
+    const result = await provider.run();
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/is not known yet\. Run the copy again in 10 minutes/) });
+    const journal = provider.pending()!;
+    expect(journal.jobUid).toBeUndefined();
+    expect(provider.secrets.state.secrets.size).toBe(2);
+    // Too early to tell: nothing is deleted and the record stays.
+    expect(await provider.settle(recoverTerminalTransferResources(provider.context, journal))).toBe(false);
+    expect(provider.secrets.state.secrets.size).toBe(2);
+    if (later === 'appears') provider.appear();
+    else vi.setSystemTime(Date.now() + 10 * 60_000);
+    expect(await provider.settle(recoverTerminalTransferResources(provider.context, journal))).toBe(true);
+    expect(provider.secrets.state.secrets.size).toBe(0);
+    expect(provider.jobPresent()).toBe(false);
+  });
+
+  it('is not blocked for good when the run was requested and nothing ever started', async () => {
+    const provider = cloud('succeeds', 'as the run is requested');
+    const result = await provider.run();
+    expect(result).toEqual({ ok: false, error: expect.stringMatching(/unverified/) });
+    const journal = provider.pending()!;
+    expect(provider.jobPresent()).toBe(true);
+    expect(provider.secrets.state.secrets.size).toBe(2);
+    expect(await provider.settle(recoverTerminalTransferResources(provider.context, journal))).toBe(false);
+    vi.setSystemTime(Date.now() + 10 * 60_000);
+    expect(await provider.settle(recoverTerminalTransferResources(provider.context, journal))).toBe(true);
+    expect(provider.secrets.state.secrets.size).toBe(0);
+    expect(provider.jobPresent()).toBe(false);
+  });
+
   it.each(['after the secrets are written', 'as the job is created', 'after the job is created'] as const)('is cleaned up by the next run: %s', async (death) => {
     const provider = cloud('succeeds', death);
     const died = await provider.run();
@@ -161,14 +198,23 @@ describe('a copy that died with its temporary secrets still there', () => {
     expect(journal.secretIds).toHaveLength(2);
     expect(provider.secrets.state.secrets.size).toBe(2);
     expect(provider.jobPresent()).toBe(death !== 'after the secrets are written');
-    // The job was never asked to run: either no job is recorded, or it is recorded as not yet started.
-    if (death === 'after the job is created') expect(journal).toMatchObject({ jobUid: 'uid-1', runRequested: false });
+    if (death === 'after the job is created') expect(journal.jobUid).toBe('uid-1');
     else expect(journal.jobUid).toBeUndefined();
 
     provider.restore();
     // What hv_migrate does with a recorded transfer before starting another: look, then finish the cleanup.
     expect(await verifyTransferResourcesAbsent(provider.context, journal)).toBe(false);
-    expect(await provider.settle(recoverTerminalTransferResources(provider.context, journal))).toBe(true);
+    // A job being created may still appear, and a run being started may still start: neither is decided for ten minutes.
+    // A job that is there and was never recorded was never asked to run, and goes at once.
+    const atOnce = death === 'as the job is created';
+    expect(transferSettleMinutes(journal)).toBe(10);
+    expect(await provider.settle(recoverTerminalTransferResources(provider.context, journal))).toBe(atOnce);
+    if (!atOnce) {
+      expect(provider.secrets.state.secrets.size).toBe(2);
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      expect(transferSettleMinutes(journal)).toBe(0);
+      expect(await provider.settle(recoverTerminalTransferResources(provider.context, journal))).toBe(true);
+    }
     expect(provider.secrets.state.secrets.size).toBe(0);
     expect(provider.jobPresent()).toBe(false);
     expect(await verifyTransferResourcesAbsent(provider.context, journal)).toBe(true);
@@ -180,6 +226,7 @@ describe('a copy that died with its temporary secrets still there', () => {
     const journal = provider.pending()!;
     provider.restore();
     provider.secrets.state.secrets.get(journal.secretIds[0]!)!.labels['hv-transfer'] = 'someone-else';
+    vi.setSystemTime(Date.now() + 10 * 60_000);
     expect(await provider.settle(recoverTerminalTransferResources(provider.context, journal))).toBe(false);
     expect([...provider.secrets.state.secrets.keys()]).toEqual([journal.secretIds[0]]);
   });
@@ -191,14 +238,12 @@ describe('a copy that died with its temporary secrets still there', () => {
     const lease = acquireMigrationTargetLease('project-1', 'target')!;
     try {
       const written: TransferResources = { gcpProjectId: project, region, jobId: 'hv-migrate-database-0123456789abcdef', secretIds: ['hv-migrate-database-0123456789abcdef-dump-url'], ownershipToken: 'token' };
-      lease.record(written);
-      lease.record({ ...written, jobUid: 'uid-1', runRequested: false });
-      lease.record({ ...written, jobUid: 'uid-1', runRequested: true });
-      expect(lease.pending()).toEqual({ ...written, jobUid: 'uid-1', runRequested: true });
-      // A run once asked for is never recorded as not asked for, and no other job or secret takes this record's place.
-      expect(() => lease.record({ ...written, jobUid: 'uid-1', runRequested: false })).toThrow(/outstanding cleanup/);
-      expect(() => lease.record({ ...written, jobUid: 'uid-2', runRequested: true })).toThrow(/outstanding cleanup/);
-      expect(() => lease.record({ ...written, secretIds: [], jobUid: 'uid-1', runRequested: true })).toThrow(/outstanding cleanup/);
+      lease.record({ ...written, recordedAt: 1 });
+      lease.record({ ...written, jobUid: 'uid-1', recordedAt: 2 });
+      expect(lease.pending()).toEqual({ ...written, jobUid: 'uid-1', recordedAt: 2 });
+      // No other job or secret takes this record's place.
+      expect(() => lease.record({ ...written, jobUid: 'uid-2', recordedAt: 3 })).toThrow(/outstanding cleanup/);
+      expect(() => lease.record({ ...written, secretIds: [], jobUid: 'uid-1', recordedAt: 3 })).toThrow(/outstanding cleanup/);
     } finally {
       lease.close();
       SqliteAdapter.resetInstance();

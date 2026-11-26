@@ -219,7 +219,8 @@ runs. That is accepted because one owner holds both sides of a migration.
 Hypervibe creates the secret directly, marks it as belonging to that one job,
 records it before writing it, mounts it by reference at one pinned version, and
 deletes it with the job or on the next run; Secret Manager also expires it by
-itself. Its value still never reaches a plan, result, log, error, OpenTofu state
+itself. A database export file is deleted from the project's bucket when its
+restore job ends. Its value still never reaches a plan, result, log, error, OpenTofu state
 or job definition. The isolated route, a copy account of its own and a container
 the app is denied
 ([#747](https://github.com/davejohnson/hypervibe/issues/747)), is not used by
