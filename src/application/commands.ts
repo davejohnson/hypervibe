@@ -1,3 +1,4 @@
+import { behindMessage, checkoutFreshness } from '../lib/checkout-freshness.js';
 import { withCommandReview } from './command-review.js';
 import { z } from 'zod';
 import './providers.js';
@@ -117,6 +118,25 @@ const ROOT_COMMANDS = new Set([
   'status',
 ]);
 
+/**
+ * Commands that plan or change real things from what the app's checkout says. Each refuses, before doing anything, a
+ * checkout that is behind its upstream branch. `hv_spec` only when it is given a spec to save: reading stays possible.
+ * Commands that only read providers, and those that act on connections, secrets or a named CI run, do not depend on
+ * the checkout's files and are not held to it.
+ */
+const CHECKOUT_GUARDED = new Set(['hv_plan', 'hv_apply', 'hv_deploy', 'hv_migrate', 'hv_launch', 'hv_destroy', 'hv_rollback', 'hv_import', 'hv_spec']);
+
+function checkoutGuard(name: string, input: unknown): { refusal?: CommandEnvelope; warning?: string } {
+  if (!CHECKOUT_GUARDED.has(name) || (name === 'hv_spec' && (input as { spec?: unknown } | null)?.spec === undefined)) return {};
+  const freshness = checkoutFreshness();
+  if (freshness.state === 'behind') {
+    return { refusal: commandError('VALIDATION', behindMessage(freshness), {
+      hint: 'Hypervibe reads the app\'s setup from files in this checkout; an older checkout describes an older app. Nothing was read, planned or changed.' }) };
+  }
+  // Not knowing is said, never passed off as up to date.
+  return freshness.state === 'unchecked' ? { warning: `Hypervibe could not confirm this checkout is up to date: ${freshness.reason}.` } : {};
+}
+
 export function cliPathForCommand(id: string): string[] {
   const segments = id.replace(/^hv_/, '').split('_');
   return segments.length === 1 || ROOT_COMMANDS.has(segments.join('_'))
@@ -153,11 +173,16 @@ export class CommandRegistry implements CommandRegistrar {
       // Anything not proven read-only is classified as write so future
       // interfaces cannot accidentally grant mutation through a loose policy.
       access: READ_ONLY_COMMANDS.has(name) ? 'read' : 'write',
-      execute: async (input) => addConfirmationMetadata(
-        name,
-        inputShape,
-        redactCommandEnvelope(await handler(input as z.infer<z.ZodObject<Args>>))
-      ),
+      execute: async (input) => {
+        const checkout = checkoutGuard(name, input);
+        if (checkout.refusal) return checkout.refusal;
+        const result = addConfirmationMetadata(
+          name,
+          inputShape,
+          redactCommandEnvelope(await handler(input as z.infer<z.ZodObject<Args>>))
+        );
+        return checkout.warning ? { ...result, warnings: [...(result.warnings ?? []), checkout.warning] } : result;
+      },
     });
   }
 

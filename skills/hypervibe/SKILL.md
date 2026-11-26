@@ -40,6 +40,11 @@ replace them with remembered permission tables or dashboard procedures.
 
 ## Work through the engine
 
+Before running Hypervibe in an app repository, make sure the checkout is
+current (`git pull`). If Hypervibe refuses because the checkout is behind, or
+because a setup or bindings file is an older copy, pull and retry; never work
+around it by editing or copying those files.
+
 1. Establish the requested application and exact repository/environment context.
    Inspect the relevant repository and existing desired state. For a fresh
    repository, `hv_spec` with no arguments may return `initialized: false`; use

@@ -1,4 +1,5 @@
 import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
+import { statSync } from 'node:fs';
 import { isDeepStrictEqual } from 'node:util';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
@@ -82,6 +83,15 @@ export function createCommandContext(): CommandContext {
     return bindings;
   };
 
+  /** True when the file was last written clearly before `moment` (two seconds' allowance for file systems that keep coarse times). */
+  const writtenBefore = (file: string, moment: Date): boolean => {
+    try {
+      return statSync(file).mtimeMs + 2000 < moment.getTime();
+    } catch {
+      return false;
+    }
+  };
+
   const hydrateRepoBindings = (
     project: Project,
     bindings: NonNullable<ReturnType<typeof readRepoBindingsFile>> | null,
@@ -106,9 +116,16 @@ export function createCommandContext(): CommandContext {
         continue;
       }
       if (JSON.stringify(existing.platformBindings) !== JSON.stringify(platformBindings)) {
-        repos.environments.update(existing.id, {
-          platformBindings: mergeRepoPlatformBindings(existing.platformBindings, platformBindings),
-        });
+        const merged = mergeRepoPlatformBindings(existing.platformBindings, platformBindings);
+        // A file that would change what is saved is taken in only if it was written after the saved bindings last
+        // changed (a pull, an edit). One written before that is an older copy, as a checkout that was never updated
+        // holds: taking it in would put back provider identities Hypervibe has replaced since.
+        if (!isDeepStrictEqual(existing.platformBindings, merged) && writtenBefore(bindings.path, existing.updatedAt)) {
+          throw new HvError('VALIDATION', `${bindings.path} is older than the bindings Hypervibe has saved for ${envName}: the file was last written before they changed. Nothing was read from it and nothing was changed.`, {
+            hint: 'If this checkout is behind, run git pull, then run this again. If the checkout is up to date and the saved bindings are the ones to keep, delete that file and run this again; Hypervibe writes it afresh.',
+          });
+        }
+        repos.environments.update(existing.id, { platformBindings: merged });
       }
     }
   };

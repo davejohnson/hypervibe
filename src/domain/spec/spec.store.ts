@@ -6,6 +6,7 @@ import {
   preflightRepoSpecWrite,
   readRepoSpecFile,
   writePreflightedRepoSpecFile,
+  type RepoSpecFile,
 } from './repo-spec-file.js';
 import { compareReleaseVersions, currentSpecWriter } from './spec-writer.js';
 
@@ -268,11 +269,33 @@ function parseStoredSpec(row: Pick<ProjectSpecRow, 'document' | 'revision' | 'wr
 export class SpecStore {
   private repo = new ProjectSpecRepository();
 
+  /**
+   * A setup file in the checkout that differs from the saved setup is taken in as a new revision, unless it is an older
+   * copy: content Hypervibe itself saved as an earlier revision and has moved on from since. That is what a checkout
+   * that was never updated holds, and taking it in would silently undo everything saved after it. Content Hypervibe
+   * has never saved (pulled from elsewhere, edited by hand) is new and passes.
+   */
+  private refuseOlderCopy(project: Project, repoSpec: RepoSpecFile, latest: ProjectSpecRow): void {
+    const earlier = this.repo.findAll(project.id).find((row) => {
+      if (row.revision === latest.revision) return false;
+      const parsed = projectSpecSchema.safeParse(row.document);
+      return parsed.success && sameSpec(parsed.data, repoSpec.spec);
+    });
+    if (!earlier) return;
+    throw new Error(`${repoSpec.path} is an older copy of this project's setup: it is what Hypervibe saved as revision ${earlier.revision}, and the saved setup has changed since (now revision ${latest.revision}). `
+      + 'Nothing was read from it and nothing was changed. If this checkout is behind, run git pull, then run this again. '
+      + 'If the checkout is up to date and the saved setup is the one to keep, delete that file and run this again; Hypervibe writes it afresh the next time the setup is saved. '
+      + 'To go back to the older setup on purpose, save it explicitly with hv_spec and replace=true.');
+  }
+
   /** Read the desired input for editing or discovery without recording a revision or creating local files. */
   preview(project: Project): ProjectSpec | null {
     const repoSpec = readRepoSpecFile();
-    if (repoSpec && repoSpecMatchesProject(repoSpec.spec, project)) return repoSpec.spec;
     const latest = this.repo.findLatest(project.id);
+    if (repoSpec && repoSpecMatchesProject(repoSpec.spec, project)) {
+      if (latest && !sameSpec(projectSpecSchema.safeParse(latest.document).data, repoSpec.spec)) this.refuseOlderCopy(project, repoSpec, latest);
+      return repoSpec.spec;
+    }
     return latest ? parseStoredSpec(latest, project.id) : desiredStateToSpec(project);
   }
 
@@ -309,6 +332,7 @@ export class SpecStore {
         if (parsed.success && sameSpec(parsed.data, repoSpec.spec)) {
           return { spec: repoSpec.spec, revision: latest.revision, source: { kind: 'repo', path: repoSpec.path } };
         }
+        this.refuseOlderCopy(project, repoSpec, latest);
       }
 
       const row = this.repo.insert(project.id, (latest?.revision ?? 0) + 1, repoSpec.spec);
