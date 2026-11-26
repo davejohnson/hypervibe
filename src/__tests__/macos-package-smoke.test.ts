@@ -80,6 +80,9 @@ describe('macOS packaged launcher smoke', () => {
       expect(result.error?.message).toBeUndefined();
       expect(result.status, result.stdout || result.stderr).not.toBe(0);
       expect(result.stderr).toContain('Bundled Hypervibe MCP smoke failed:');
+      // A refusal is a short sentence (after at most 8 KB of the server's own output). A comparison that fails by writing out
+      // everything it compared takes Node many seconds to put together, which is what timed this case out on busy runners.
+      expect(result.stderr.length).toBeLessThan(16_384);
     }, 45_000);
 
   it('checks and installs the canonical bundled skill through the launcher in an isolated home', () => {

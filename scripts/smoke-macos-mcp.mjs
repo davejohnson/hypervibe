@@ -48,13 +48,20 @@ function skillFiles(directory, installed = false) {
   return files;
 }
 
+// Says whether two sets of files are the same, and nothing more. Handing the sets to assert.deepEqual instead makes a
+// failure write out every byte of both and work out their difference, which takes Node many seconds for a skill's
+// worth of files, before any time limit in this script has started to run.
+function sameFiles(left, right) {
+  return left.size === right.size && [...left].every(([name, bytes]) => right.get(name)?.equals(bytes) === true);
+}
+
 try {
   assert.match(expectedVersion, /^\d+\.\d+\.\d+(?:-[\w.-]+)?$/);
   assert.equal(JSON.parse(readFileSync(path.join(server, 'package.json'), 'utf8')).version,
     expectedVersion, 'Bundled package version does not match this build');
   const canonical = skillFiles(path.join(sourceRoot, 'skills/hypervibe'));
   const bundled = skillFiles(path.join(server, 'skills/hypervibe'));
-  assert.deepEqual(bundled, canonical, 'Bundled skill does not match the canonical release skill');
+  assert(sameFiles(bundled, canonical), 'Bundled skill does not match the canonical release skill');
   assert(existsSync(path.join(resources, 'runtime/node')), 'Bundled Node runtime is missing');
   assert(existsSync(path.join(server, 'dist/index.js')), 'Bundled server entrypoint is missing');
 
@@ -156,7 +163,7 @@ try {
   assert.deepEqual(readdirSync(home).sort(), before, 'Read-only skill check created user files');
   installArguments([]);
   const installed = path.join(home, '.agents/skills/hypervibe');
-  assert.deepEqual(skillFiles(installed, true), bundled, 'Installed skill differs from the bundled workflow');
+  assert(sameFiles(skillFiles(installed, true), bundled), 'Installed skill differs from the bundled workflow');
   const receipt = readFileSync(path.join(installed, '.hypervibe-install.json'));
   assert.equal(check('current').installedVersion, expectedVersion);
   assert.deepEqual(readFileSync(path.join(installed, '.hypervibe-install.json')), receipt, 'Read-only check changed the receipt');
