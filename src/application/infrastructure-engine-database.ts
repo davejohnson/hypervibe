@@ -8,6 +8,7 @@ import { Connector, GoogleAuth, IpAddressTypes } from '@google-cloud/cloud-sql-c
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { isNetworkError } from '../utils/fetch-retry.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
+import { observeRecordedSecret } from './gcp-secret-recorded.js';
 import { sqlAdmin, waitForSqlOperation } from '../adapters/providers/gcp/gcp-data.client.js';
 import {
   observeSecret, recordSecretVersionMetadata, writeSecretVersion,
@@ -169,7 +170,17 @@ async function verifyLogin(serviceAccount: Record<string, unknown>, connectionNa
 
 export async function executeDatabaseCredential(token: string, serviceAccount: Record<string, unknown>, action: PlanAction): Promise<ActionResult> {
   const meta = action.metadata as unknown as DatabaseCredentialMetadata;
-  const container = await observeSecret(token, meta.gcpProjectId, meta.secretId);
+  let container = await observeSecret(token, meta.gcpProjectId, meta.secretId);
+  if (container.state === 'unknown' && meta.mode === 'initialize') {
+    // An earlier run was stopped between Google storing a version and Hypervibe recording it. Both logins get new
+    // passwords below, so whatever that version holds stops working: it is set aside, by ownership alone, and a login is stored anew.
+    const leftover = await observeRecordedSecret(token, meta.gcpProjectId, meta.secretId);
+    if (leftover.state === 'present' && leftover.value.unrecorded && leftover.value.latestVersion
+      && leftover.value.labels['managed-by'] === 'hypervibe' && leftover.value.labels['hv-environment'] === meta.labels['hv-environment']
+      && recordSecretVersionMetadata(meta.gcpProjectId, meta.secretId, leftover.value.latestVersion, { 'managed-by': 'hypervibe', 'hv-environment': meta.labels['hv-environment']! })) {
+      container = await observeSecret(token, meta.gcpProjectId, meta.secretId);
+    }
+  }
   if (container.state !== 'present' || container.value.labels['managed-by'] !== 'hypervibe' || container.value.labels['hv-environment'] !== meta.labels['hv-environment']) return { success: false, status: 'blocked', message: 'The owned database secret container must be created by hv_plan/hv_apply before changing database logins.' };
   const instanceResponse = await sqlAdmin(token, meta.gcpProjectId, `instances/${meta.instanceName}`);
   if (instanceResponse.status === 404) return { success: false, status: 'blocked', message: `Database instance ${meta.instanceName} does not exist yet.` };
@@ -194,6 +205,9 @@ export async function executeDatabaseCredential(token: string, serviceAccount: R
       }
       // app_a creates the shared owner role (and so may grant it), then hands it the database.
       await withCloudSqlSession(serviceAccount, instance.connectionName, 'app_a', secrets.app_a, meta.databaseName, async (client) => {
+        // On a second run the login already defaults to acting as the owner role, which may not grant itself. Acting as
+        // the login again makes these statements repeatable; on a first run this changes nothing.
+        await client.query('SET ROLE NONE');
         await client.query(`DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${DATABASE_OWNER_ROLE}') THEN CREATE ROLE ${DATABASE_OWNER_ROLE} NOLOGIN; END IF; END $$`);
         await client.query(`GRANT ${DATABASE_OWNER_ROLE} TO app_a, app_b`);
         await client.query(`ALTER DATABASE ${meta.databaseName} OWNER TO ${DATABASE_OWNER_ROLE}`);
