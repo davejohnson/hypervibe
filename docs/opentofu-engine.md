@@ -909,13 +909,24 @@ copy job. Again the next round is read from what exists:
    the record changes undoes the pause. After it, the own server stays shut,
    and the next plan finishes whatever is left.
 3. **Clean up**: the own server is deleted only when workloads are positively
-   seen on the shared database (the same rule as the other direction), looked
-   at again by a step of its own just before the server is touched. A server
-   with deletion protection on (production's default) takes two plans: one
-   turns the protection off, the next deletes the server, confirmed. So this
+   seen on the shared database (the same rule as the other direction). A
+   server with deletion protection on (production's default) takes two plans:
+   one turns the protection off, the next deletes the server, confirmed. The
+   deletion waits for a step of its own that looks at the workloads once more
+   when the plan is applied. (The engine's own check that no service changed
+   since the plan would catch a redeploy, but not a newest revision that
+   stopped being ready.) Once protection is off it stays off: if a workload
+   is later seen elsewhere, the plan waits and changes nothing. So this
    direction is three plans, or four for a protected server; each plan says
    which it is.
 
+- Nothing is created in either direction unless at least one workload uses
+  the database's connection and all of them run its newest version; one
+  function asks this for both directions, before step 1 and before the switch.
+- A write to the environment's connection secret that is cut short in step 1
+  (Google stored the shared database's login, Hypervibe never heard) does not
+  block the next plan: the step that makes the database sets that version
+  aside and stores a login anew when it runs again.
 - Saved about this move: `moveTo` (the database being made on the shared
   server, while the app is still on its own) and `movedFrom` (the own server,
   from the switch until it is deleted).

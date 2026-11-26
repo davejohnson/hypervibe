@@ -41,6 +41,8 @@ export interface StepMetadata {
    * connection the workloads are switched to (`secretVersion` above is the one they run now).
    */
   own?: { instanceName: string; secretVersion: string; majorVersion: number };
+  /** server, allocate: set when the environment still has a server of its own and this database is being made for a move onto the shared one. */
+  ownInstance?: string;
 }
 
 export interface ReviewedServerPlan { planId: string; state: EngineStateIdentity; segment: EngineActionSegment }

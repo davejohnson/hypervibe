@@ -47,6 +47,8 @@ const google = vi.hoisted(() => ({
   copyAnswers: undefined as Record<string, unknown> | undefined,
   copies: 0,
   failServiceChanges: false,
+  /** Hypervibe is stopped right after Google stores the next version of this secret: the answer never arrives and nothing can be read back. */
+  stoppedAfterStoring: '',
   /** Cloud Run has not got the newest revision of a service serving. */
   notServing: false,
   work: '',
@@ -111,9 +113,11 @@ async function answer(input: string | URL, init?: RequestInit): Promise<Response
     const name = `projects/${GCP}/secrets/${secret[1]}`;
     if (secret[2] === ':addVersion' && method === 'POST' && held) {
       held.versions.push(Buffer.from((JSON.parse(String(init!.body)) as { payload: { data: string } }).payload.data, 'base64').toString('utf8'));
+      if (google.stoppedAfterStoring === secret[1]) throw new TypeError('fetch failed');
       return json({ name: `${name}/versions/${held.versions.length}` });
     }
     if (method !== 'GET') throw new Error(`Unexpected ${method} ${url.pathname}`);
+    if (google.stoppedAfterStoring === secret[1] && secret[2]!.endsWith(':access')) throw new TypeError('fetch failed');
     if (!held) return json({}, 404);
     if (secret[2] === '') return json({ name, labels: held.labels });
     if (secret[2] === '/versions/latest') return held.versions.length ? json({ name: `${name}/versions/${held.versions.length}`, state: 'ENABLED' }) : json({}, 404);
@@ -281,6 +285,12 @@ async function asBoot(side: 'shared' | 'own', database: string, statement: strin
   const client = await google.local[side].connect('boot', undefined, database);
   try { await client.query(statement); } finally { await google.local[side].close(client); }
 }
+/** Runs `work` with no workload bound to the environment, as when none uses the database. */
+async function withNoWorkloads<T>(work: () => Promise<T>): Promise<T> {
+  const services = ctx.repos.environments.findById(environment.id)!.platformBindings.services;
+  ctx.repos.environments.updatePlatformBindings(environment.id, { services: {} });
+  try { return await work(); } finally { ctx.repos.environments.updatePlatformBindings(environment.id, { services }); }
+}
 const tenants = async () => (await google.local.shared.boot.query(`SELECT datname FROM pg_database WHERE datname LIKE 'app\\_%' ORDER BY 1`)).rows.map((row) => String(row.datname));
 
 beforeAll(async () => {
@@ -359,6 +369,8 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     await asBoot('shared', record()!.databaseName, 'GRANT USAGE ON SCHEMA public TO reporting');
     expect(await blockedBy(own())).toContain('grants access the copy cannot carry over (schema public: USAGE to reporting), so it cannot be moved');
     await asBoot('shared', record()!.databaseName, 'REVOKE USAGE ON SCHEMA public FROM reporting');
+    // Nor is a move started when no workload runs the database's connection: there would be nothing to switch and nothing to fall back to.
+    expect(await withNoWorkloads(() => blockedBy(own()))).toContain('No service of production uses its database');
     expect(google.servers).toHaveLength(1);
     const prepared = await plan(own());
     expect(changes(prepared)).toEqual(['create secret-container:hv-production-database-url-copy', 'create database:postgres', 'create database-credential:postgres']);
@@ -512,16 +524,25 @@ describe.runIf(major >= 15)('and back: moving that database from its own server 
     ownUrl = urls().at(-1)!;
     ownServer = record()!.instanceName as string;
     const before = { web: web(), urls: urls().length };
+    expect(await withNoWorkloads(() => blockedBy(shared()))).toContain('No service of production uses its database');
+    expect(record()).toEqual({ instanceName: ownServer });
     const prepared = await plan(shared());
     expect(changes(prepared).sort()).toEqual(['create secret-container:hv-production-database-url-copy', 'create shared-database:allocate']);
     expect(prepared.warnings.join(' ')).toContain('This plan is step 1');
-    const done = await apply(prepared);
+    // Hypervibe is stopped between Google storing the shared database's login and Hypervibe recording it. Running again carries on.
+    google.stoppedAfterStoring = 'hv-production-database-url';
+    expect((await apply(prepared)).success).toBe(false);
+    google.stoppedAfterStoring = '';
+    expect(urls()).toHaveLength(before.urls + 1);
+    expect(web()).toBe(before.web);
+    const done = await apply(await plan(shared()));
     expect(done.success, JSON.stringify(done)).toBe(true);
     expect(record()).toMatchObject({ instanceName: ownServer, moveTo: { placement: 'app', activeLogin: expect.stringMatching(/_a$/) } });
     expect(record()!.placement).toBeUndefined();
     // What Google puts on every database, on this new one too.
     await asBoot('shared', tenant().databaseName, 'GRANT ALL ON SCHEMA public TO cloudsqlsuperuser');
-    expect(urls()).toHaveLength(before.urls + 1);
+    // The version nobody recorded was set aside, so the shared database's login is the second new one.
+    expect(urls()).toHaveLength(before.urls + 2);
     expect(urlParts(urls().at(-1)!).database).toBe(tenant().databaseName);
     expect(web()).toBe(before.web);
     expect(await asApp(ownUrl, 'SELECT count(*) FROM customers')).toBe('202');
@@ -579,12 +600,19 @@ describe.runIf(major >= 15)('and back: moving that database from its own server 
     expect(unsettled.warnings.join(' ')).toContain('web is not serving its newest revision');
 
     const unprotect = await plan(shared());
-    expect(changes(unprotect)).toEqual(['update shared-database:confirm-moved', 'update database:postgres']);
-    expect(unprotect.actions.find((action) => action.id === 'database:postgres')!.dependsOn).toContain('shared-database:confirm-moved');
+    expect(changes(unprotect)).toEqual(['update database:postgres']);
     expect(unprotect.warnings.join(' ')).toContain('this one only turns the protection off');
     expect((await apply(unprotect)).success).toBe(true);
     expect(google.servers.find((server) => server.name === ownServer)!.settings.deletionProtectionEnabled).toBe(false);
     expect(record()).toMatchObject({ placement: 'app', movedFrom: { instanceName: ownServer } });
+
+    // Protection is off now. If a workload is then not seen on the shared database, the plan waits; it neither turns protection back on nor gets stuck.
+    google.notServing = true;
+    const waiting = await plan(shared());
+    google.notServing = false;
+    expect(changes(waiting)).toEqual([]);
+    expect(waiting.warnings.join(' ')).toContain(`Its own server ${ownServer} stays`);
+    expect(google.servers.find((server) => server.name === ownServer)!.settings.deletionProtectionEnabled).toBe(false);
 
     const removal = await plan(shared());
     expect(changes(removal)).toEqual(['update shared-database:confirm-moved', 'destroy database:postgres']);

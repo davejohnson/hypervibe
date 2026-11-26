@@ -452,7 +452,11 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     // Asking for the shared server from a server of its own is no longer refused either: it is planned as the opposite move, which keeps that server as it is meanwhile.
     expect((await sharedDatabase.plan({ ...target(production), binding: { database: { instanceName: 'hv-production-db-a1b2c3' } }, desired: shared }) as { move?: { ownServer?: string; instanceName?: string } }).move)
       .toMatchObject({ ownServer: 'keep', instanceName: 'hv-production-db-a1b2c3' });
-    // Leaving the shared server is no longer refused: it is planned as a move, which starts by preparing the environment's own server.
+    // Leaving the shared server is no longer refused: it is planned as a move, which starts by preparing the environment's own server,
+    // once its services are seen running the newest version of its connection secret. Before that nothing is planned.
+    running = [];
+    expect(await refusal(planFor(production, { provider: 'cloudsql', engine: 'postgres' }))).toMatch(/No service of production uses its database/);
+    running = [String(google.connectionSecrets.get(secretIdOf(production))!.versions.length)];
     expect((await planFor(production, { provider: 'cloudsql', engine: 'postgres' }) as { move?: { stage: string } }).move?.stage).toBe('prepare');
     expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { ...bindings.get(production.id), migration: { copiedAt: 'now' } } as never, desired: shared,
       secret: { id: secretIdOf(production), labels: labelsOf(production) } }))).toMatch(/Migration is not available yet/);

@@ -102,6 +102,34 @@ async function refuseUnmovable(cloud: SharedDatabaseCloud, name: string, held: {
   }
 }
 
+/**
+ * The one version of the connection secret every workload runs, asked before a move writes anything and again before
+ * it switches. No workload using the database, or workloads that disagree, is a refusal: there would be nothing to
+ * switch, or nothing certain to fall back to.
+ */
+async function oneRunningVersion(request: Pick<MovePlanRequest, 'environment' | 'runningSecretVersions'>, mustNotBe?: string): Promise<string> {
+  const name = request.environment.name;
+  const running = await request.runningSecretVersions();
+  if ('blocked' in running) throw blocked(running.blocked);
+  const versions = [...new Set(running.versions)];
+  if (versions.length === 0) throw blocked(`No service of ${name} uses its database, so there is no running connection to move and to fall back to. Hypervibe does not move such a database. Nothing was planned.`);
+  if (versions.length !== 1 || !/^[1-9][0-9]*$/.test(versions[0]!) || versions[0] === mustNotBe) {
+    throw blocked(`${name}'s services do not all run one and the same version of its connection secret, the one from before the move (found: ${versions.join(', ')}). Deploy or apply until they agree; nothing was planned.`);
+  }
+  return versions[0]!;
+}
+
+/** Why what the database left cannot be deleted yet, if it cannot: workloads are not positively seen on `latest`, the connection to where it lives now. */
+async function notAllOn(request: Pick<MovePlanRequest, 'environment' | 'runningSecretVersions'>, latest: string, where: string): Promise<string | undefined> {
+  const name = request.environment.name;
+  const answer = await request.runningSecretVersions();
+  if ('blocked' in answer) throw blocked(answer.blocked);
+  // Deleting needs every workload positively seen on the new connection: none seen, or one that cannot be judged, is not that.
+  if (answer.unsettled?.length) return answer.unsettled.join(', ');
+  if (!answer.versions.length) return `no service of ${name} could be seen running`;
+  return answer.versions.every((version) => version === latest) ? undefined : `a service of ${name} does not run the connection to ${where} yet`;
+}
+
 export async function planMove(request: MovePlanRequest): Promise<DatabaseMove> {
   const { environment, binding, cloud, scope, secret, desired } = request;
   const name = environment.name;
@@ -139,6 +167,8 @@ export async function planMove(request: MovePlanRequest): Promise<DatabaseMove> 
     if (!held || held.login !== record.activeLogin || held.databaseName !== identity.names.database || held.connectionName !== connection.connectionName) {
       throw blocked(pinned.state === 'unknown' ? pinned.reason : `The newest version of ${secret.id} is not the connection to ${name}'s database on the shared server. Nothing was planned.`);
     }
+    // Nothing is created unless every workload runs this very connection: that is what is switched later, and what a failed switch falls back to.
+    if (await oneRunningVersion(request) !== onShared.latestVersion) throw blocked(`${name}'s services do not run the newest version of its connection secret yet. Apply with "placement": "app" still on the database until nothing is left, then move it.`);
     await refuseUnmovable(cloud, name, held, false);
     return prepare(onShared.latestVersion!, false);
   }
@@ -148,15 +178,7 @@ export async function planMove(request: MovePlanRequest): Promise<DatabaseMove> 
     throw blocked(`${name}'s connection secret (${secret.id}) holds neither the login of its database on the shared server nor one for a server of its own. Hypervibe will not guess which database the app should use; nothing was planned.`);
   }
   if (labels['hv-db-retire'] || (Number(labels['hv-db-generation'] ?? '1') || 1) < generation) throw blocked(`Finish moving ${name}'s database before changing its password: put "passwordGeneration" back to what it was until the move is done.`);
-  const running = await request.runningSecretVersions();
-  if ('blocked' in running) throw blocked(running.blocked);
-  const versions = [...new Set(running.versions)];
-  if (versions.length !== 1 || !/^[1-9][0-9]*$/.test(versions[0]!) || versions[0] === seen.value.latestVersion) {
-    throw blocked(versions.length === 0
-      ? `No service of ${name} uses its database, so there is no running connection to move and to fall back to. Hypervibe does not move such a database.`
-      : `${name}'s services do not all run one and the same version of its connection secret that is still the shared database's (found: ${versions.join(', ')}). Deploy or apply until they agree, with "placement": "app" back on the database if needed.`);
-  }
-  const pinnedVersion = versions[0]!;
+  const pinnedVersion = await oneRunningVersion(request, seen.value.latestVersion);
   const copySecret = await cloud.observeConnectionSecret(scope.gcpProjectId, copySecretId);
   if (copySecret.state === 'unknown') throw blocked(copySecret.reason);
   // Something of step 1 is still missing: plan it again, with the workloads where they are.
@@ -186,12 +208,7 @@ async function stillInUse(request: Pick<MovePlanRequest, 'environment' | 'bindin
   if (seen.state === 'unknown') throw blocked(seen.reason);
   const latest = seen.state === 'present' && !seen.value.unrecorded && seen.value.hasEnabledVersion && seen.value.labels['hv-db-instance'] === request.binding!.database!.instanceName ? seen.value.latestVersion : undefined;
   if (!latest) return `${name}'s connection secret does not hold the login of its own database server`;
-  const running = await request.runningSecretVersions();
-  if ('blocked' in running) throw blocked(running.blocked);
-  // Deleting needs every workload positively seen on the new connection: none seen, or one that cannot be judged, is not that.
-  if (running.unsettled?.length) return running.unsettled.join(', ');
-  if (!running.versions.length) return `no service of ${name} could be seen running`;
-  return running.versions.every((version) => version === latest) ? undefined : `a service of ${name} does not run the connection to its own database server yet`;
+  return notAllOn(request, latest, 'its own database server');
 }
 
 export async function planCleanup(request: MovePlanRequest & { desired: MovePlanRequest['desired'] | undefined; wantsShared: boolean }): Promise<DatabaseMove> {
@@ -343,10 +360,11 @@ export async function planMoveToShared(request: MovePlanRequest & { prepared: Pr
   }
   const ownConnection = `${scope.gcpProjectId}:${scope.region}:${own}`;
   const copySecretId = databaseCopySecretId(secret.id);
-  const base = { instanceName: own, ownServer: 'keep' as const, ownSecretWritten: false, secretIds: [copySecretId], after: [], reviewed: prepared.reviewed };
+  // Both secrets' versions are the move's own business meanwhile: a write cut short is put right by the step that made it, when it runs again.
+  const base = { instanceName: own, ownServer: 'keep' as const, secretIds: [copySecretId, secret.id], after: [], reviewed: prepared.reviewed };
   // The workloads stay on their own server, at the secret version they run, while the rest is made.
   const prepare = (secretVersion: string): DatabaseMove => ({ ...base, stage: 'prepare', workloads: { secretVersion },
-    before: prepared.actions.map((action) => ({ ...action, metadata: { ...action.metadata, own: { instanceName: own, secretVersion, majorVersion: SHARED_SERVER_MAJOR_VERSION } } })),
+    before: prepared.actions.map((action) => ({ ...action, metadata: { ...action.metadata, ownInstance: own } })),
     warnings: [...prepared.warnings, `${TO_SHARED(name)} This plan is step 1: ${name}'s app keeps using its own server and is not interrupted. Run hv_plan again afterwards for step 2.`] });
 
   const seen = await cloud.observeConnectionSecret(scope.gcpProjectId, secret.id);
@@ -363,18 +381,11 @@ export async function planMoveToShared(request: MovePlanRequest & { prepared: Pr
     if (!held || held.databaseName !== OWN_DATABASE || held.connectionName !== ownConnection) {
       throw blocked(pinned.state === 'unknown' ? pinned.reason : `The newest version of ${secret.id} is not the connection to ${name}'s own database server. Nothing was planned.`);
     }
+    if (await oneRunningVersion(request) !== seen.value.latestVersion) throw blocked(`${name}'s services do not run the newest version of its connection secret yet. Apply without "placement": "app" until nothing is left, then move the database.`);
     await refuseUnmovable(cloud, name, held, true);
     return prepare(seen.value.latestVersion);
   }
-  const running = await request.runningSecretVersions();
-  if ('blocked' in running) throw blocked(running.blocked);
-  const versions = [...new Set(running.versions)];
-  if (versions.length !== 1 || !/^[1-9][0-9]*$/.test(versions[0]!) || versions[0] === prepared.credential.version) {
-    throw blocked(versions.length === 0
-      ? `No service of ${name} uses its database, so there is no running connection to move and to fall back to. Hypervibe does not move such a database.`
-      : `${name}'s services do not all run one and the same version of its connection secret that is still its own server's (found: ${versions.join(', ')}). Deploy or apply until they agree.`);
-  }
-  const pinnedVersion = versions[0]!;
+  const pinnedVersion = await oneRunningVersion(request, prepared.credential.version);
   const copySecret = await cloud.observeConnectionSecret(scope.gcpProjectId, copySecretId);
   if (copySecret.state === 'unknown') throw blocked(copySecret.reason);
   if (prepared.actions.length || !prepared.credential.ready || !prepared.credential.version || !prepared.connection || copySecret.state === 'absent') return prepare(pinnedVersion);
@@ -391,16 +402,6 @@ export async function planMoveToShared(request: MovePlanRequest & { prepared: Pr
       metadata: metadata as unknown as Record<string, unknown> }] };
 }
 
-/** Why the environment's own server cannot be deleted yet, if it cannot: workloads are not positively seen on the shared database. */
-async function stillOnOwnServer(request: Pick<MovePlanRequest, 'environment' | 'runningSecretVersions'>, latest: string): Promise<string | undefined> {
-  const name = request.environment.name;
-  const running = await request.runningSecretVersions();
-  if ('blocked' in running) throw blocked(running.blocked);
-  if (running.unsettled?.length) return running.unsettled.join(', ');
-  if (!running.versions.length) return `no service of ${name} could be seen running`;
-  return running.versions.every((version) => version === latest) ? undefined : `a service of ${name} does not run the connection to the shared database server yet`;
-}
-
 /** After the switch: the record says "shared server, moved from its own". The own server is kept until every workload is seen on the shared database, then removed. */
 export async function planArrived(request: MovePlanRequest & { prepared: PreparedOnShared }): Promise<DatabaseMove> {
   const { environment, binding, cloud, scope, prepared } = request;
@@ -410,27 +411,30 @@ export async function planArrived(request: MovePlanRequest & { prepared: Prepare
   if (prepared.actions.length || !prepared.credential.ready || !prepared.credential.version || !prepared.connection) {
     throw blocked(`Finish moving ${name}'s database onto the app's shared database server before changing anything else about it: its own server ${own} is still there. Put the database's settings back as they were and run hv_plan again.`);
   }
-  const base = { stage: 'cleanup' as const, instanceName: own, workloads: { connection: prepared.connection, secretVersion: prepared.credential.version }, ownSecretWritten: false, secretIds: [], after: [], reviewed: prepared.reviewed };
-  const waiting = await stillOnOwnServer(request, prepared.credential.version);
-  if (waiting) {
-    return { ...base, ownServer: 'keep', before: [], warnings: [`${name}'s database now lives on the app's shared database server. Its own server ${own} stays, closed to the app, because ${waiting}. Apply this plan, then run hv_plan again to delete it.`] };
-  }
+  const base = { stage: 'cleanup' as const, instanceName: own, workloads: { connection: prepared.connection, secretVersion: prepared.credential.version }, secretIds: [], after: [], reviewed: prepared.reviewed };
   const listed = await cloud.listServers(scope.gcpProjectId);
   if (listed.state === 'unknown') throw blocked(listed.reason);
-  const server = listed.servers.find((entry) => entry.instanceName === own);
+  const isProtected = listed.servers.find((entry) => entry.instanceName === own)?.deletionProtection === true;
+  const waiting = await notAllOn(request, prepared.credential.version, 'the shared database server');
+  if (waiting) {
+    // The server is left exactly as it is, protection included: once the move has turned that off, waiting never turns it back on.
+    return { ...base, ownServer: isProtected ? 'keep' : 'unprotect', before: [], warnings: [`${name}'s database now lives on the app's shared database server. Its own server ${own} stays, closed to the app, because ${waiting}. Apply this plan, then run hv_plan again to delete it.`] };
+  }
+  if (isProtected) {
+    return { ...base, ownServer: 'unprotect', before: [], warnings: [`Every service of ${name} now uses the shared database. Its own server ${own} has deletion protection on, so deleting it takes two plans: this one only turns the protection off. Run hv_plan again afterwards to delete the server.`] };
+  }
   const identity = tenantFor(environment, binding);
   const metadata: StepMetadata = { operation: SHARED_DATABASE_OPERATION, step: 'confirm-moved', gcpProjectId: scope.gcpProjectId, region: scope.region, instanceName: String(prepared.reviewed.instanceName),
     databaseName: identity.names.database, tenantId: identity.tenantId, secretVersion: prepared.credential.version };
+  // Only the deletion waits for this look: what the plan saw may have changed by the time it is applied.
   const confirm: PlanAction = { id: 'shared-database:confirm-moved', type: 'update', resource, verified: true,
-    reason: `Check once more that every service of ${name} runs on the shared database before its own server ${own} is touched. Changes nothing itself.`, metadata: metadata as unknown as Record<string, unknown> };
-  return server?.deletionProtection
-    ? { ...base, ownServer: 'unprotect', before: [confirm], warnings: [`Every service of ${name} now uses the shared database. Its own server ${own} has deletion protection on, so deleting it takes two plans: this one only turns the protection off. Run hv_plan again afterwards to delete the server.`] }
-    : { ...base, ownServer: 'remove', before: [confirm], warnings: [`This plan is the last step of moving ${name}'s database: every service now uses the shared database, so its own server ${own} is deleted with its backups. The data on the shared server is not touched.`] };
+    reason: `Check once more that every service of ${name} runs on the shared database before its own server ${own} is deleted. Changes nothing itself.`, metadata: metadata as unknown as Record<string, unknown> };
+  return { ...base, ownServer: 'remove', before: [confirm], warnings: [`This plan is the last step of moving ${name}'s database: every service now uses the shared database, so its own server ${own} is deleted with its backups. The data on the shared server is not touched.`] };
 }
 
 /** The last look before the own server is touched. */
 export async function confirmMoved(context: MoveStepContext, latest: string | undefined): Promise<ActionResult> {
-  const waiting = latest && latest === context.metadata.secretVersion ? await stillOnOwnServer(context, latest) : 'the connection to the shared database changed since this plan';
+  const waiting = latest && latest === context.metadata.secretVersion ? await notAllOn(context, latest, 'the shared database server') : 'the connection to the shared database changed since this plan';
   return waiting
     ? { success: false, status: 'blocked', message: `${context.environment.name}'s own database server was not touched: ${waiting}. Run hv_plan again.` }
     : { success: true, message: `Every service of ${context.environment.name} runs on the shared database.` };

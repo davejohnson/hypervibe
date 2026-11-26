@@ -363,7 +363,7 @@ async function run(request: Applying, serverSteps: boolean): Promise<ActionResul
   if (metadata.step === 'switch') return settled(() => (onShared ? applySwitch(moveContext()) : applySwitchToShared({ ...moveContext(), ownPause: request.ownDatabasePause })));
   if (record && !onShared && record.movedFrom === undefined) {
     // An environment with a server of its own: the only steps for it here make its database on the shared server, noted beside its own record.
-    if (!['server', 'allocate'].includes(metadata.step) || metadata.own?.instanceName !== record.instanceName) {
+    if (!['server', 'allocate'].includes(metadata.step) || metadata.ownInstance !== record.instanceName) {
       return { success: false, status: 'blocked', message: 'This environment\'s database is on a server of its own. Nothing was changed. Run hv_plan again.' };
     }
     const save = request.record;

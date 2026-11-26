@@ -215,7 +215,8 @@ own in three rounds of `hv_plan` and `hv_apply`: create the server (billable),
 switch (the app returns database errors while its data is copied and checked;
 tell the user before they confirm), then delete the old copy. Run `hv_plan`
 again after each round until nothing is left; a started move cannot be
-cancelled. This has not been run on Google Cloud yet; say so before starting.
+cancelled. It was run on Google Cloud once (2026-11-25, a small two-table app,
+about two minutes of errors during the switch); larger databases are untried.
 
 Adding `"placement": "app"` to a database that has its own server moves it the
 other way, onto the shared server, in the same manner: make the database there
