@@ -1,0 +1,33 @@
+# Moss (Reviewer), hired with Hyperteam, running on your own machine.
+# Written by Hyperteam; Hypervibe will own it once it manages agents (davejohnson/hypervibe#596).
+name: Moss (Reviewer)
+on:
+  workflow_dispatch:
+  # Serves the wake-ups the hire sets for itself: ends in seconds when none is due.
+  schedule:
+    - cron: '27 * * * *'
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: read
+concurrency:
+  group: hyperteam-reviewer-moss
+  cancel-in-progress: false
+jobs:
+  run:
+    if: github.repository_id == '1142935404'
+    runs-on: [self-hosted, hyperteam]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Git identity
+        run: |
+          git config user.name "Moss (Reviewer)"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: hyperteam run reviewer-moss
