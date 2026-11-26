@@ -32,7 +32,7 @@ import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-dedicated-database.js';
-import { gcpDatabaseLocation, gcpDatabaseOnSharedServer, gcpDatabasePlanBlocker, gcpOwnInstanceRecord, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
+import { gcpDatabaseLocation, gcpDatabaseOnSharedServer, gcpDatabasePlanBlocker, gcpOwnInstanceRecord, gcpRecordWithoutOwnInstance, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
 import { googleSharedDatabaseCloud, sharedDatabase, type SharedDatabaseEngine } from './shared-database/index.js';
 import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
 import { execFile } from 'child_process';
@@ -840,6 +840,13 @@ function sharedDatabaseTarget(context: EngineContext, project: Project, token: s
     gcpProjectId: context.gcpProjectId, region: context.region, engine: boundEngine(context.auth),
     secret: { id: engineSecretId(context.environment.name, ENGINE_DATABASE_URL_KEY), labels: { 'managed-by': 'hypervibe', 'hv-environment': labelValue(context.environment.id) } },
     runningSecretVersions: () => pinnedDatabaseVersions(token, context),
+    ownDatabasePause: async (target: { instanceName: string; connectionName: string; databaseName: string; secret: { id: string; labels: Record<string, string>; version: string } }, undo: boolean) => {
+      const { googleDedicatedPausePorts, pauseDedicatedDatabase, resumeDedicatedDatabase } = await import('./gcp-dedicated-database-pause.js');
+      const ports = googleDedicatedPausePorts({ token, credentials: () => JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>, gcpProjectId: context.gcpProjectId,
+        instanceName: target.instanceName, connectionName: target.connectionName, databaseName: target.databaseName });
+      // The connection secret's newest version already belongs to the database being moved to.
+      return (undo ? resumeDedicatedDatabase : pauseDedicatedDatabase)(ports, { environmentName: context.environment.name, ...target, newestIsAnotherDatabase: true });
+    },
     cloud: googleSharedDatabaseCloud({ token, credentials: () => JSON.parse(context.adapter.engineConnection().credentials) as Record<string, unknown>,
       jobs: { region: context.region, runtimeServiceAccountEmail: context.runtimeServiceAccountEmail, environmentLabel: labelValue(context.environment.id) } }),
   };
@@ -1109,9 +1116,10 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const placed = move ? undefined : outcome;
   const leaving = move !== undefined && move.stage !== 'cleanup';
   if (leaving && (copy || Object.values(environmentSpec!.services).some((service) => service.onDemand))) {
-    return { blocked: [`${environmentName}'s database cannot be moved to a server of its own while ${copy ? 'the environment has a dataMigration' : 'a worker counts its pending work in the database (onDemand)'}. Remove that first, or keep "placement": "app" on the database.`] };
+    return { blocked: [`${environmentName}'s database cannot be moved to another server while ${copy ? 'the environment has a dataMigration' : 'a worker counts its pending work in the database (onDemand)'}. Remove that first, or keep "placement": "app" on the database.`] };
   }
-  const boundDatabase = placed ? undefined : leaving
+  // During a move the environment's own instance is the one `move` names, whichever database the saved record puts first.
+  const boundDatabase = placed ? undefined : move
     ? (move.instanceName ? gcpDatabaseLocation(context.gcpProjectId, { database: { instanceName: move.instanceName } }) : undefined)
     : gcpDatabaseLocation(context.gcpProjectId, engineBinding);
   // An instance not recorded yet is one this environment is about to own, so it gets the defaults.
@@ -1332,12 +1340,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     ...input,
     retiredServices: boundServices.filter((name) => !environmentSpec!.services[name]),
     ...(placed?.connection ? { databaseConnection: placed.connection } : {}),
-    ...(move?.workloads ? { workloadDatabase: { connection: move.workloads.connection, credential: { secretId: databaseSecretId, version: move.workloads.secretVersion }, databaseSecretIds: [databaseSecretId] } } : {}),
-    ...(databaseSpec && databaseShape && !placed ? { database: { instanceName, databaseName: database.databaseName, wireServices: databaseCredentialReady,
-      tier: databaseShape.tier, deletionProtection: databaseShape.deletionProtection,
+    ...(move?.workloads?.connection ? { workloadDatabase: { connection: move.workloads.connection, credential: { secretId: databaseSecretId, version: move.workloads.secretVersion }, databaseSecretIds: [databaseSecretId] } } : {}),
+    ...(databaseSpec && databaseShape && !placed && move?.ownServer !== 'remove' ? { database: { instanceName, databaseName: database.databaseName, wireServices: databaseCredentialReady,
+      tier: databaseShape.tier, deletionProtection: move?.ownServer === 'unprotect' ? false : databaseShape.deletionProtection,
       retainedBackups: databaseShape.retainedBackups, transactionLogDays: databaseShape.transactionLogDays,
       ...(databaseSpec.version ? { majorVersion: databaseSpec.version } : {}) } } : {}),
-    ...(!databaseSpec && engineBinding.database && !placed ? { retiredDatabase: true } : {}),
+    ...((!databaseSpec && engineBinding.database && !placed) || move?.ownServer === 'remove' ? { retiredDatabase: true } : {}),
     ...(cacheSpec ? { cache: {
       instanceName: cacheInstanceName, tier: (cacheSpec.tier === 'STANDARD_HA' ? 'STANDARD_HA' : 'BASIC') as 'BASIC' | 'STANDARD_HA',
       memorySizeGb: Math.max(1, parseInt(cacheSpec.size ?? '1', 10) || 1),
@@ -1465,8 +1473,15 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const databaseAction = serviceActions.find((action) => action.id === 'database:postgres');
   const placedActions = placed?.actions ?? [];
   // The step that copies the database comes before anything the engine changes; the one that deletes the old copy comes last.
-  const moveFirst = move?.stage === 'switch' ? move.actions : [];
-  const moveLast = move?.stage === 'cleanup' ? move.actions : [];
+  const moveFirst = move?.before ?? [];
+  const moveLast = move?.after ?? [];
+  if (move?.ownServer) {
+    // The environment's own instance is on its way out: it is touched only as the move says, never reshaped on the side.
+    const allowed = { keep: ['noop'], unprotect: ['noop', 'update'], remove: ['noop', 'destroy'] }[move.ownServer];
+    if (!allowed.includes(databaseAction?.type ?? 'noop')) {
+      return { blocked: [`Moving ${environmentName}'s database would also change its own database server (${databaseAction!.type}), which the move does not do. Its own server has a setting the shared server's database cannot have; set it back to the default and apply that first, without "placement": "app".`] };
+    }
+  }
   for (const action of serviceActions) if (moveFirst.length && action.type !== 'noop') action.dependsOn = [...new Set([...(action.dependsOn ?? []), ...moveFirst.map((first) => first.id)])];
   for (const action of placedActions) {
     const dependencies = typeof action.metadata?.secretId === 'string' ? secretDependencies([action.metadata.secretId]) : [];
@@ -1474,7 +1489,9 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   }
   const credentialActions = databaseSpec && !placed
     ? await planDatabaseCredential({
-      token, context, environmentName, database, databaseSecretId, labels, observation: databaseCredential,
+      token, context, environmentName, database, databaseSecretId, labels,
+      // An instance on its way out gets no login step of its own.
+      observation: move?.ownServer ? { ready: true, generation: databaseSpec.passwordGeneration ?? 1 } : databaseCredential,
       desiredGeneration: databaseSpec.passwordGeneration ?? 1,
       dependsOn: [...(databaseAction && databaseAction.type !== 'noop' ? [databaseAction.id] : []), ...secretDependencies([databaseSecretId])],
       servicesUpdating: serviceActions.some((action) => action.id.startsWith('service:') && action.type !== 'noop'),
@@ -2028,7 +2045,7 @@ async function recordServiceBindings(
       continue;
     }
     if (member.id === 'database:postgres') {
-      engine = member.type === 'destroy' ? { ...engine, database: undefined } : { ...engine, database: gcpOwnInstanceRecord(engine, databaseInstanceName!) };
+      engine = member.type === 'destroy' ? { ...engine, database: gcpRecordWithoutOwnInstance(engine) } : { ...engine, database: gcpOwnInstanceRecord(engine, databaseInstanceName!) };
       continue;
     }
     const name = member.resource.name;

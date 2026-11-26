@@ -448,9 +448,10 @@ describe.runIf(major >= 15)('two environments of one app on one shared database 
     expect(record(staging).activeLogin).toBe(google.connectionSecrets.get(secretIdOf(staging))!.labels['hv-db-login']);
   });
 
-  it('refuses to move a database onto the shared server or to migrate one, and plans a move off it', async () => {
-    expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { database: { instanceName: 'hv-production-db-a1b2c3' } }, desired: shared })))
-      .toMatch(/already has a database server of its own\. Moving an existing database onto the app's shared server is not available yet/);
+  it('refuses to migrate a database on the shared server, and plans a move off it or onto it', async () => {
+    // Asking for the shared server from a server of its own is no longer refused either: it is planned as the opposite move, which keeps that server as it is meanwhile.
+    expect((await sharedDatabase.plan({ ...target(production), binding: { database: { instanceName: 'hv-production-db-a1b2c3' } }, desired: shared }) as { move?: { ownServer?: string; instanceName?: string } }).move)
+      .toMatchObject({ ownServer: 'keep', instanceName: 'hv-production-db-a1b2c3' });
     // Leaving the shared server is no longer refused: it is planned as a move, which starts by preparing the environment's own server.
     expect((await planFor(production, { provider: 'cloudsql', engine: 'postgres' }) as { move?: { stage: string } }).move?.stage).toBe('prepare');
     expect(await refusal(sharedDatabase.plan({ ...target(production), binding: { ...bindings.get(production.id), migration: { copiedAt: 'now' } } as never, desired: shared,

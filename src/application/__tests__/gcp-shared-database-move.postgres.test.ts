@@ -200,14 +200,25 @@ function standInPlan({ configuration, state, planId, verifyPlannedChanges }: Par
       }
     }
     for (const [key, instance] of Object.entries((files['cloudsql.tf.json']?.resource?.google_sql_database_instance ?? {}) as Record<string, Json>)) {
-      if (google.servers.some((server) => server.name === instance.name)) continue;
+      const protect = instance.settings[0].deletion_protection_enabled === true;
+      const existing = google.servers.find((server) => server.name === instance.name);
+      if (existing) {
+        if (existing.settings.deletionProtectionEnabled !== protect) add(`google_sql_database_instance.${key}`, 'update', () => { existing.settings.deletionProtectionEnabled = protect; });
+        continue;
+      }
       add(`google_sql_database_instance.${key}`, 'create', async () => {
-        google.servers.push({ name: instance.name, region: REGION, state: 'RUNNABLE', connectionName: `${GCP}:${REGION}:${instance.name}`, settings: { userLabels: { 'managed-by': 'hypervibe' }, deletionProtectionEnabled: true } });
+        google.servers.push({ name: instance.name, region: REGION, state: 'RUNNABLE', connectionName: `${GCP}:${REGION}:${instance.name}`, settings: { userLabels: { 'managed-by': 'hypervibe' }, deletionProtectionEnabled: protect } });
         // Google creates the database owned by its administrators' group.
         await google.local.own.boot.query('CREATE ROLE cloudsqlsuperuser NOLOGIN CREATEROLE CREATEDB');
         await google.local.own.boot.query('CREATE DATABASE app OWNER cloudsqlsuperuser TEMPLATE template0');
         await asBoot('own', 'app', 'GRANT ALL ON SCHEMA public TO cloudsqlsuperuser');
       });
+    }
+    // An own server no longer declared is deleted, unless Google itself still protects it.
+    for (const [address, mapping] of Object.entries(configuration.resources)) {
+      const gone = address.startsWith('google_sql_database_instance.') && !files['cloudsql.tf.json']?.resource?.google_sql_database_instance?.[address.split('.')[1]!];
+      const own = google.servers.find((server) => !server.settings.userLabels['hv-shared-database']);
+      if (gone && own && mapping.actionId === 'database:postgres') add(address, 'destroy', () => { if (own.settings.deletionProtectionEnabled) throw new Error('protected'); google.servers.splice(google.servers.indexOf(own), 1); });
     }
     for (const [key, service] of Object.entries((files['cloudrun.tf.json']?.resource?.google_cloud_run_v2_service ?? {}) as Record<string, Json>)) {
       const wanted = wiring(service, files);
@@ -488,6 +499,111 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     const removal = await planGcpSharedDatabaseRemoval(ctx, { project, specRevision: ++revision });
     expect('blocked' in removal ? removal.blocked.join(' ') : '').not.toContain('production');
     // No password or administrator detail was saved anywhere along the way.
+    expect(JSON.stringify(ctx.repos.environments.findById(environment.id)!.platformBindings)).not.toMatch(/hv_admin|password|postgresql:\/\//i);
+  }, 180_000);
+});
+
+describe.runIf(major >= 15)('and back: moving that database from its own server onto the shared server, plan by plan', () => {
+  let ownUrl = '';
+  let ownServer = '';
+  const tenant = () => (record()!.moveTo ?? record()!) as Record<string, Json>;
+
+  it('step 1 makes the database on the shared server and its login, and leaves the running app on its own server', async () => {
+    ownUrl = urls().at(-1)!;
+    ownServer = record()!.instanceName as string;
+    const before = { web: web(), urls: urls().length };
+    const prepared = await plan(shared());
+    expect(changes(prepared).sort()).toEqual(['create secret-container:hv-production-database-url-copy', 'create shared-database:allocate']);
+    expect(prepared.warnings.join(' ')).toContain('This plan is step 1');
+    const done = await apply(prepared);
+    expect(done.success, JSON.stringify(done)).toBe(true);
+    expect(record()).toMatchObject({ instanceName: ownServer, moveTo: { placement: 'app', activeLogin: expect.stringMatching(/_a$/) } });
+    expect(record()!.placement).toBeUndefined();
+    // What Google puts on every database, on this new one too.
+    await asBoot('shared', tenant().databaseName, 'GRANT ALL ON SCHEMA public TO cloudsqlsuperuser');
+    expect(urls()).toHaveLength(before.urls + 1);
+    expect(urlParts(urls().at(-1)!).database).toBe(tenant().databaseName);
+    expect(web()).toBe(before.web);
+    expect(await asApp(ownUrl, 'SELECT count(*) FROM customers')).toBe('202');
+  }, 120_000);
+
+  it('while that move is under way, nothing else may be planned for the database', async () => {
+    expect(await blockedBy(own())).toContain('is being moved onto the app\'s shared database server');
+    expect(await blockedBy(shared(), true)).toContain('is being moved onto the app\'s shared database server');
+    const removal = await planGcpSharedDatabaseRemoval(ctx, { project, specRevision: ++revision });
+    expect('blocked' in removal ? removal.blocked.join(' ') : 'planned').toContain('production still has its database on the app\'s shared database server');
+  }, 60_000);
+
+  it('a copy that fails lets the app back into its own server, and nothing has moved', async () => {
+    const before = { web: web(), record: record() };
+    const switching = await plan(shared());
+    expect(changes(switching)).toEqual(['update shared-database:switch', 'update service:web']);
+    expect(switching.confirmActions).toEqual(['shared-database:switch']);
+    expect(switching.actions.find((action) => action.id === 'service:web')!.dependsOn).toContain('shared-database:switch');
+    google.copyAnswers = { ok: false, stage: 'dump', targetChanged: false, error: 'The source database could not be dumped; nothing was changed.' };
+    const result = await apply(switching);
+    expect(result.success).toBe(false);
+    expect(JSON.stringify(result)).toContain('was not moved: The source database could not be dumped; nothing was changed. The app\'s login to its database on its own server works again');
+    expect(record()).toEqual(before.record);
+    expect(web()).toBe(before.web);
+    expect(await asApp(ownUrl, 'INSERT INTO customers (name) VALUES (\'after the failed move back\') RETURNING id')).toBe('203');
+  }, 120_000);
+
+  it('once the copy is checked the environment is on the shared server; a service change that then fails leaves its own server shut, and running again finishes', async () => {
+    google.failServiceChanges = true;
+    const interrupted = await apply(await plan(shared()));
+    google.failServiceChanges = false;
+    expect(interrupted.success).toBe(false);
+    expect(JSON.stringify(interrupted)).toContain('was copied onto the app\'s shared database server');
+    expect(record()).toMatchObject({ placement: 'app', movedFrom: { instanceName: ownServer } });
+    expect(record()!.moveTo).toBeUndefined();
+    const sharedUrl = urls().at(-1)!;
+    expect(await asApp(ownUrl, 'SELECT 1')).toMatch(/^28/);
+    expect(await asApp(sharedUrl, 'SELECT count(*) || \'/\' || max(id) FROM customers')).toBe('203/203');
+    expect(await asApp(sharedUrl, 'SELECT order_count()')).toBe('3000');
+    expect(await asApp(sharedUrl, 'INSERT INTO customers (name) VALUES (\'back on the shared server\') RETURNING id')).toBe('204');
+
+    const finishing = await plan(shared());
+    expect(changes(finishing).sort()).toEqual(['destroy secret-container:hv-production-database-url-copy', 'update service:web']);
+    expect(finishing.warnings.join(' ')).toContain(`Its own server ${ownServer} stays, closed to the app, because a service of production does not run the connection to the shared database server yet`);
+    expect((await apply(finishing)).success).toBe(true);
+    expect(web()).toBe(`${urls().length}|${record()!.instanceName}`);
+    expect(google.servers.some((server) => server.name === ownServer)).toBe(true);
+  }, 180_000);
+
+  it('the own server is deleted only on positive evidence, in two confirmed-where-destructive plans because it is protected, and then nothing is left to do', async () => {
+    google.notServing = true;
+    const unsettled = await plan(shared());
+    google.notServing = false;
+    expect(changes(unsettled)).toEqual([]);
+    expect(unsettled.warnings.join(' ')).toContain('web is not serving its newest revision');
+
+    const unprotect = await plan(shared());
+    expect(changes(unprotect)).toEqual(['update shared-database:confirm-moved', 'update database:postgres']);
+    expect(unprotect.actions.find((action) => action.id === 'database:postgres')!.dependsOn).toContain('shared-database:confirm-moved');
+    expect(unprotect.warnings.join(' ')).toContain('this one only turns the protection off');
+    expect((await apply(unprotect)).success).toBe(true);
+    expect(google.servers.find((server) => server.name === ownServer)!.settings.deletionProtectionEnabled).toBe(false);
+    expect(record()).toMatchObject({ placement: 'app', movedFrom: { instanceName: ownServer } });
+
+    const removal = await plan(shared());
+    expect(changes(removal)).toEqual(['update shared-database:confirm-moved', 'destroy database:postgres']);
+    expect(removal.confirmActions).toEqual(['database:postgres']);
+    // A service back on the old connection after the plan was saved: the server is not touched.
+    const now = web()!;
+    google.services.set([...google.services.keys()][0]!, `1|${ownServer}`);
+    const refused = await apply(removal);
+    expect(refused.success).toBe(false);
+    expect(JSON.stringify(refused)).toContain('own database server was not touched: a service of production does not run the connection to the shared database server yet');
+    expect(google.servers.some((server) => server.name === ownServer)).toBe(true);
+    google.services.set([...google.services.keys()][0]!, now);
+
+    expect((await apply(await plan(shared()))).success).toBe(true);
+    expect(google.servers.some((server) => server.name === ownServer)).toBe(false);
+    expect(record()!.movedFrom).toBeUndefined();
+    expect(record()).toMatchObject({ placement: 'app', tenantId: environment.id });
+    expect(await asApp(urls().at(-1)!, 'SELECT count(*) FROM customers')).toBe('204');
+    expect(changes(await plan(shared()))).toEqual([]);
     expect(JSON.stringify(ctx.repos.environments.findById(environment.id)!.platformBindings)).not.toMatch(/hv_admin|password|postgresql:\/\//i);
   }, 180_000);
 });

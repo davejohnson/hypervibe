@@ -35,6 +35,8 @@ export interface GcpDatabaseBinding {
     move?: { instanceName: string };
     /** On the environment's own instance, after such a move: the record of the database it left, kept until that one is deleted. */
     movedFrom?: Record<string, unknown>;
+    /** On the environment's own instance, while the database is being moved onto a shared server: the record of the database made for it there. The app still uses its own instance. */
+    moveTo?: Record<string, unknown>;
   };
 }
 
@@ -112,6 +114,15 @@ export function gcpDatabasePlanBlocker(environmentGcpProjectId: string, binding:
  */
 export function gcpOwnInstanceRecord(binding: GcpDatabaseBinding | undefined, instanceName: string): NonNullable<GcpDatabaseBinding['database']> {
   const now = binding?.database;
-  if (now && gcpDatabaseOnSharedServer(binding)) return { ...now, move: { instanceName } };
-  return { instanceName, ...(now?.movedFrom && now.instanceName === instanceName ? { movedFrom: now.movedFrom } : {}) };
+  // A database that has just arrived on a shared server keeps its record as it is: the instance is the one it left.
+  if (now && gcpDatabaseOnSharedServer(binding)) return now.movedFrom !== undefined ? now : { ...now, move: { instanceName } };
+  const same = now?.instanceName === instanceName;
+  return { instanceName, ...(same && now?.movedFrom ? { movedFrom: now.movedFrom } : {}), ...(same && now?.moveTo ? { moveTo: now.moveTo } : {}) };
+}
+
+/** What to save once the environment's own instance is gone: nothing, or the shared record without the note of the instance it left. */
+export function gcpRecordWithoutOwnInstance(binding: GcpDatabaseBinding | undefined): GcpDatabaseBinding['database'] {
+  if (!binding?.database || !gcpDatabaseOnSharedServer(binding)) return undefined;
+  const { movedFrom: _left, ...rest } = binding.database;
+  return rest;
 }
