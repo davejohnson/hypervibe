@@ -104,7 +104,7 @@ describe('shared engine plan recording', () => {
     const result = recordEnginePlan({ projectId: project.id, environmentId: env.id, environmentName: env.name,
       specRevision: 1, actions: [], warnings: [], engine });
     const html = readFileSync(runPlanReportPath(result.planRunId), 'utf8');
-    expect(html).toContain('<dt>Target</dt><dd>');
+    expect(html).toContain('<span>Target ');
     expect(html).not.toContain('href="https:');
   });
 

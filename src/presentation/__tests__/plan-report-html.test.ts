@@ -1,6 +1,9 @@
 import { createHash } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { makePlanReport, planIdInSavedReport, type PlanReport, type PlanReportAction } from '../../domain/plan/plan-report.js';
+import { reviewDetail } from '../local-review.js';
 import { renderPlanReportHtml } from '../plan-report-html.js';
 import { gcpInfrastructureNotes } from '../../domain/plan/gcp-infrastructure-notes.js';
 import { buildReportMap } from '../plan-report-map.js';
@@ -258,5 +261,53 @@ describe('standalone infrastructure plan report', () => {
       expect(html).toContain(tag + "-src 'sha256-" + createHash('sha256').update(source).digest('base64') + "'");
     }
     expect(html).not.toMatch(/(?:href|src)="(?:\/\/|https?:)/);
+  });
+});
+
+describe('the review page states each fact once', () => {
+  const createdAt = '2026-11-26T09:59:00.000Z';
+  const engine = report([action('database:postgres', 'postgres', { kind: 'database', billable: true, requiresConfirm: true, reason: 'Create the database server.' }),
+    action('service:web', 'web', { kind: 'service', type: 'update', reason: 'Update the web service.' })],
+  { scope: 'infrastructure-engine', project: 'billforge', environment: 'production', createdAt, cloudTarget: { provider: 'gcp', projectId: 'hv-billforge-prod-012d0f4e' },
+    warnings: ['The database is created with deletion protection on.'] });
+  const setup = report([action('create-project', 'Google Cloud project', { requiresConfirm: true }), action('enable-apis', 'Cloud services')],
+    { scope: 'Google Cloud project setup', project: 'billforge', createdAt, cloudTarget: { provider: 'gcp', projectId: 'hv-billforge-prod-012d0f4e' }, billingAccount: 'ABCDEF-123456-ABCDEF' });
+  const local = (input: PlanReport) => reviewDetail({ id: input.planId, planId: input.planId, kind: 'plan', title: input.scope, project: input.project, createdAt, report: input, details: [], aliases: [],
+    status: 'Awaiting approval', approval: { digest: 'a'.repeat(64) } }, '/v/token/', '/v/token/r/saved-id', [], 'csrf-token');
+  const count = (html: string, text: string) => html.split(text).length - 1;
+
+  it('names the plan and when it was saved in the heading only, and keeps the cloud project as one small link', () => {
+    for (const input of [engine, setup]) {
+      const html = local(input);
+      // The heading has the plan's name and when it was saved; the old block said both again, each on a row of its own.
+      expect(html).not.toContain('<dt>Scope</dt>');
+      expect(html).not.toContain('<dt>Created</dt>');
+      expect(html).not.toContain('<dt>Google Cloud project</dt>');
+      expect(html).not.toContain('<dl class="meta">');
+      expect(count(html, '<time ')).toBe(1);
+      expect(html).toContain('<dt>Saved</dt>');
+      expect(html).toContain('<p class="where"><span>Google Cloud project <a href="https://console.cloud.google.com/welcome?project=hv-billforge-prod-012d0f4e" target="_blank" rel="noopener noreferrer"');
+      // What is being approved is all still there.
+      expect(html).toContain('Approve plan');
+      expect(count(html, 'class="action-row"')).toBe(2);
+    }
+    expect(local(engine)).toContain('The database is created with deletion protection on.');
+    expect(local(setup)).toContain('Billing account reports <a href="https://console.cloud.google.com/billing/ABCDEF-123456-ABCDEF/reports"');
+  });
+
+  it('keeps the plan\'s kind and creation time in that same small line on a saved report file, which has no such heading', () => {
+    const html = renderPlanReportHtml(engine);
+    expect(html).toMatch(/<p class="where"><span>Infrastructure engine<\/span><span>Google Cloud project <a [^>]*>hv-billforge-prod-012d0f4e<\/a><\/span><span>Created <time /);
+    expect(html).not.toContain('<dt>Scope</dt>');
+    expect(count(html, '<time ')).toBe(1);
+  });
+
+  // HYPERVIBE_WRITE_REVIEW_SAMPLES=<directory> writes the pages above to files, to look at in a browser.
+  it.runIf(Boolean(process.env.HYPERVIBE_WRITE_REVIEW_SAMPLES))('writes sample pages', () => {
+    const directory = process.env.HYPERVIBE_WRITE_REVIEW_SAMPLES!;
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path.join(directory, 'review-google-cloud-infrastructure-plan.html'), local(engine));
+    writeFileSync(path.join(directory, 'review-google-cloud-setup-plan.html'), local(setup));
+    writeFileSync(path.join(directory, 'report-file-google-cloud-infrastructure-plan.html'), renderPlanReportHtml(engine));
   });
 });
