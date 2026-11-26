@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "hires": [
+    {
+      "role": "reviewer",
+      "focus": "Every pull request merged since the last review, once a day: bugs, behaviour the change didn't mean to alter, missing tests for what changed, and complexity that isn't earning its keep.",
+      "name": "Gus",
+      "roleVersion": 1,
+      "repositoryId": 1142935404,
+      "repositoryName": "davejohnson/hypervibe",
+      "agent": "hyperteam-reviewer",
+      "runtime": "self-hosted",
+      "model": {
+        "provider": "anthropic",
+        "model": "claude-haiku-5-5",
+        "price": {
+          "input": 0.1,
+          "output": 0.5
+        },
+        "priceKnown": true,
+        "line": "haiku",
+        "access": "subscription"
+      },
+      "budget": {
+        "monthlyUsd": 60
+      },
+      "hiredAt": "2026-11-26T18:11:31.629Z"
+    }
+  ]
+}
