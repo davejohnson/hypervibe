@@ -24,9 +24,17 @@ Prepare a separate Cloud Run environment and check the app on its temporary
 hostname. A working target does not establish that the production data can move.
 `hv_migrate` copies a Railway PostgreSQL database and Railway buckets into the
 Google Cloud environment and checks the copy: every table's rows and content
-checksum, every file's bytes. This is built and tested offline. It has not been
-run on a live migration yet
-([#870](https://github.com/davejohnson/hypervibe/issues/870)).
+checksum, every file's bytes. It was run live once, on 2026-11-26: a Railway
+production environment (PostgreSQL 16, 12 tables, about 2,600 rows, and a
+bucket of 221 files, 7.9 MB) was copied into an existing Google Cloud
+environment and every table and file matched; the copy took about nine
+minutes and the source kept serving. A first attempt that day failed at the
+restore because the copy used PostgreSQL 18 tools against version 16 servers;
+the tools now follow the two servers' versions. After that failure the
+temporary secret, the job and the export file were all found removed. Not run
+live: the final cutover, a repeat copy over a verified one, an interrupted
+copy, a source and target on different PostgreSQL versions, and a database or
+bucket of any real size.
 
 The database is exported inside Railway by a temporary task and uploaded to the
 Google Cloud project's bucket; a temporary Cloud Run job downloads it and

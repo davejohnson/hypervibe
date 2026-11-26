@@ -3,10 +3,25 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { databaseManifestScript, databaseRestoreScript, databaseTransferScript, manifestsMatch, parseTransferResult, storageCheckScript, storageTransferScript } from '../migration-transfer-gcp.js';
+import { databaseCopyTools, databaseManifestScript, databaseRestoreScript, databaseTransferScript, manifestsMatch, parseTransferResult, storageCheckScript, storageTransferScript } from '../migration-transfer-gcp.js';
 import { railwayExportPrefix } from '../../domain/services/railway-export-prefix.js';
 import { transferPostgresDatabase } from '../../domain/services/postgres-transfer.service.js';
 import { POSTGRES_DATABASE_IDENTITY_SQL, PostgresDatabaseIdentityError } from '../../domain/services/postgres-database-identity.js';
+
+describe('the PostgreSQL tools a copy runs with', () => {
+  it('export with the source server\'s version and restore with the target server\'s, never a fixed newer one', () => {
+    // The first live copy (2026-11-26) used version 18 tools on two version 16 servers; the restore's first statement was a setting 16 does not know.
+    expect(databaseCopyTools(16, 16)).toEqual({ exportImage: 'postgres:16-alpine', restoreImage: 'postgres:16-alpine' });
+    // Restore tools read a dump made by the same or an older version, so a newer target is fine.
+    expect(databaseCopyTools(15, 17)).toEqual({ exportImage: 'postgres:15-alpine', restoreImage: 'postgres:17-alpine' });
+  });
+  it('refuse in plain words when the source version is not known or the target is older than the source', () => {
+    expect(databaseCopyTools(undefined, 16)).toEqual({ problem: expect.stringMatching(/version of the source database is not known.*inspectSource=true/) });
+    expect(databaseCopyTools(16, undefined)).toEqual({ problem: expect.stringMatching(/version of the new database is not known/) });
+    expect(databaseCopyTools(17, 16)).toEqual({ problem: 'The source database runs PostgreSQL 17 and the new database PostgreSQL 16. A copy can only go to the same or a newer version; nothing was exported or changed.' });
+    for (const odd of [16.5, 0, -1, NaN, 99]) expect(databaseCopyTools(odd, 16)).toHaveProperty('problem');
+  });
+});
 
 describe('transfer scripts', () => {
   it('are valid POSIX shell', () => {

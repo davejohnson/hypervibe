@@ -74,10 +74,26 @@ describe.each([
     const execution = executeRestore(script(), 1, diagnostic);
     // The failure is a result the runner reads (#854), and it says the target was already cleared.
     expect(execution.status).toBe(0);
-    expect(execution.result).toEqual({ ok: false, error: 'The copy could not be written to the new database (pg_restore exit 1). The new database had already been cleared and may hold part of the copy.' });
+    expect(execution.result).toEqual({ ok: false, error: 'The copy could not be written to the new database: the restore stopped at its first error (pg_restore exit 1). The new database had already been cleared and may hold part of the copy.' });
     expect(execution.result).not.toHaveProperty('target');
     expect(execution.trace).toContain('restore\n');
     expect(execution.trace).not.toContain('manifest:target');
+    expect(execution.stdout + execution.stderr).not.toContain(privateDiagnostic);
+  });
+
+  it('names a setting the database does not know, as on the first live copy, and nothing else from the restore log', () => {
+    // What PostgreSQL 18 tools printed against a PostgreSQL 16 server on 2026-11-26, with a line of data added that must never be repeated.
+    const log = ['pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "transaction_timeout"',
+      'Command was: SET transaction_timeout = 0;', `DETAIL:  Key (email)=(${privateDiagnostic}) already exists.`].join('\n');
+    const execution = executeRestore(script(), 1, log);
+    expect(execution.status).toBe(0);
+    expect(execution.result).toEqual({ ok: false, error: 'The copy could not be written to the new database: the database does not know the setting transaction_timeout, which the PostgreSQL tools of this copy use (pg_restore exit 1). The new database had already been cleared and may hold part of the copy.' });
+    expect(execution.stdout + execution.stderr).not.toContain(privateDiagnostic);
+  });
+
+  it('does not take a setting name from anything but a plain name', () => {
+    const execution = executeRestore(script(), 1, `pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "${privateDiagnostic} x"`);
+    expect(execution.result).toEqual({ ok: false, error: expect.stringContaining('the restore stopped at its first error (pg_restore exit 1)') });
     expect(execution.stdout + execution.stderr).not.toContain(privateDiagnostic);
   });
 

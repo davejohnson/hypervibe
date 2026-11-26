@@ -515,8 +515,24 @@ describe('private source values of a Railway copy', () => {
       expect(f.runPrivateTask.mock.calls.some(([job]) => job.command.includes('pg_dump'))).toBe(true);
       const [, job] = vi.mocked(transfer.runTransferJob).mock.calls[0]!;
       expect(job.sourceSecrets).toEqual({ DUMP_URL: 'https://fixture.invalid/private-dump' });
+      // The reviewed inspection found PostgreSQL 17 on the source, and the new database was made 17 for it: both steps use those tools.
+      expect(f.store.get(f.project)?.spec.environments.target.database?.version).toBe(17);
+      expect((f.runPrivateTask.mock.calls.find(([task]) => task.command.includes('pg_dump'))![0] as any).image).toBe('postgres:17-alpine');
+      expect(job.image).toBe('postgres:17-alpine');
       expect(JSON.stringify([job.env, job.script, job.secretRefs, asked, result, f.current()])).not.toContain('private-dump');
       expect(f.current().copiedAt).not.toBe(oldCopiedAt);
+    });
+
+    it('exports with the source version\'s tools and restores with the newer target version\'s', async () => {
+      const f = inspection();
+      f.store.merge(f.project, { environments: { target: { database: { version: 18 } } } });
+      expect(await f.call(await f.preview())).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
+      exportBucket();
+      vi.mocked(transfer.runTransferJob).mockImplementation(async () => ({ ok: true, target: manifest, restoreWarnings: 0 }) as any);
+      f.runPrivateTask.mockImplementation(async () => ({ exitCode: 0, output: 'HV_TRANSFER_RESULT ' + JSON.stringify({ ok: true, source: manifest, sourceIdentity: '42:617070' }) }));
+      expect(await f.migrate({ copyData: true, refreshData: true })).toMatchObject({ status: 'migrated' });
+      expect((f.runPrivateTask.mock.calls.find(([task]) => task.command.includes('pg_dump'))![0] as any).image).toBe('postgres:17-alpine');
+      expect(vi.mocked(transfer.runTransferJob).mock.calls[0]![1].image).toBe('postgres:18-alpine');
     });
 
     it.each(['refuses', 'fails', 'cannot be read'] as const)('deletes the database export file when the restore %s', async (end) => {

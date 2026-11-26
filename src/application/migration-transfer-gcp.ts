@@ -196,14 +196,41 @@ export function databaseRestoreScript(): string {
     'RESTORE=$?',
     'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
     'set -e',
-    // PostgreSQL diagnostics may contain SQL and data; report only the exit code.
-    'if [ "$RESTORE" -ne 0 ]; then',
-    '  blocked "The copy could not be written to the new database (pg_restore exit $RESTORE). The new database had already been cleared and may hold part of the copy."',
-    'fi',
+    ...RESTORE_FAILED,
     'DST=$(manifest "$DATABASE_URL")',
     `printf '${RESULT_MARKER}{"ok":true,"target":%s,"restoreWarnings":%s}\\n' "$DST" "\${WARNINGS:-0}"`,
   ].join('\n');
 }
+
+/** The official image holding one major version's PostgreSQL tools. */
+export const postgresToolsImage = (major: number) => `postgres:${major}-alpine`;
+
+/**
+ * Which PostgreSQL tools the two steps of a copy run with: the export with the source server's major version, the
+ * restore with the target server's. Tools newer than the server they write to can send it settings it does not know
+ * (version 18 tools open a restore with `SET transaction_timeout`, which servers before 17 reject). Restore tools read
+ * a dump made by the same or an older version and not a newer one, so the target may be newer than the source, never older.
+ */
+export function databaseCopyTools(sourceMajor: number | undefined, targetMajor: number | undefined): { exportImage: string; restoreImage: string } | { problem: string } {
+  const known = (major: number | undefined): major is number => typeof major === 'number' && Number.isInteger(major) && major >= 10 && major <= 18;
+  if (!known(sourceMajor)) return { problem: 'The PostgreSQL version of the source database is not known, so the tools for the copy cannot be chosen. Run hv_migrate with inspectSource=true and approve it, then copy again; nothing was exported or changed.' };
+  if (!known(targetMajor)) return { problem: 'The PostgreSQL version of the new database is not known, so the tools for the copy cannot be chosen; nothing was exported or changed.' };
+  if (sourceMajor > targetMajor) return { problem: `The source database runs PostgreSQL ${sourceMajor} and the new database PostgreSQL ${targetMajor}. A copy can only go to the same or a newer version; nothing was exported or changed.` };
+  return { exportImage: postgresToolsImage(sourceMajor), restoreImage: postgresToolsImage(targetMajor) };
+}
+
+/**
+ * What to say when pg_restore failed. Its log may quote rows, so none of it is repeated: only the name of a setting
+ * the server did not know, when that is the error, and that name only if it is a plain setting name.
+ */
+const RESTORE_FAILED = [
+  'if [ "$RESTORE" -ne 0 ]; then',
+  '  SETTING=$(sed -n \'s/.*unrecognized configuration parameter "\\([a-z_][a-z0-9_.]*\\)"$/\\1/p\' /tmp/restore.log | head -n 1)',
+  '  WHY="the restore stopped at its first error"',
+  '  if [ -n "$SETTING" ]; then WHY="the database does not know the setting $SETTING, which the PostgreSQL tools of this copy use"; fi',
+  '  blocked "The copy could not be written to the new database: $WHY (pg_restore exit $RESTORE). The new database had already been cleared and may hold part of the copy."',
+  'fi',
+];
 
 /** Parses the single result line a transfer task printed. */
 export function parseTransferResult(text: string): Record<string, unknown> | undefined {
@@ -236,9 +263,7 @@ export function databaseTransferScript(): string {
     'RESTORE=$?',
     'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
     'set -e',
-    'if [ "$RESTORE" -ne 0 ]; then',
-    '  blocked "The copy could not be written to the new database (pg_restore exit $RESTORE). The new database had already been cleared and may hold part of the copy."',
-    'fi',
+    ...RESTORE_FAILED,
     'DST=$(manifest "$DATABASE_URL")',
     `printf '${RESULT_MARKER}{"ok":true,"source":%s,"target":%s,"restoreWarnings":%s}\\n' "$SRC" "$DST" "\${WARNINGS:-0}"`,
   ].join('\n');
