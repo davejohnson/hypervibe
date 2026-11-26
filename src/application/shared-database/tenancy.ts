@@ -17,7 +17,7 @@ import { MAINTENANCE_DATABASE, findSharedServer, serverPlanReview, sharedServerS
  * file decides when each of its calls is allowed and what gets recorded.
  */
 export const SHARED_DATABASE_OPERATION = 'gcpSharedDatabase';
-export type SharedDatabaseStep = 'server' | 'allocate' | 'rotate' | 'retire' | 'release' | 'unprotect-server' | 'remove-server' | 'switch';
+export type SharedDatabaseStep = 'server' | 'allocate' | 'rotate' | 'retire' | 'release' | 'unprotect-server' | 'remove-server' | 'switch' | 'confirm-moved';
 export type SharedDatabaseRecord = NonNullable<GcpDatabaseBinding['database']>;
 
 /** Everything a step needs, saved on its reviewed action. None of it is secret. */
@@ -36,8 +36,13 @@ export interface StepMetadata {
   connectionLimit?: number;
   /** retire: the secret version every service had moved to when this was reviewed. */
   secretVersion?: string;
-  /** switch: the environment's own server the database is copied to, the secret version holding its connection, and both servers' PostgreSQL version. */
+  /**
+   * A move's steps: the environment's own server, both servers' PostgreSQL version, and the secret version holding the
+   * connection the workloads are switched to (`secretVersion` above is the one they run now).
+   */
   own?: { instanceName: string; secretVersion: string; majorVersion: number };
+  /** server, allocate: set when the environment still has a server of its own and this database is being made for a move onto the shared one. */
+  ownInstance?: string;
 }
 
 export interface ReviewedServerPlan { planId: string; state: EngineStateIdentity; segment: EngineActionSegment }

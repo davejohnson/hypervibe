@@ -682,8 +682,8 @@ before anything is requested or created: on-demand workers that count pending
 work, migration to or from it (by spec or by saved record), declarative
 `dataMigration`, direct queries (`hv_db_query`), `database.size`,
 `database.version`, `deletionProtection: true` (only the server is protected;
-removing an environment's database always asks for confirmation), and moving
-an existing database onto it (moving one off it is described below). Backups, checkpoints and restore drills
+removing an environment's database always asks for confirmation). Moving an
+existing database onto it or off it is described below. Backups, checkpoints and restore drills
 from the spec are refused for every engine database already. Extensions that
 need Cloud SQL's elevated role cannot be installed by the app's logins there,
 and Hypervibe cannot detect that a migration needs one: such an app must keep
@@ -824,8 +824,7 @@ what exists, not from a saved stage:
 What is saved about a move is two notes on the environment's database record:
 `move` (the own server chosen, while the app is still on the shared one) and
 `movedFrom` (the shared record, from the switch until clean-up). There is no
-rehearsal and no way back built in: moving back would be the opposite move,
-which does not exist yet.
+rehearsal and no way back built in: moving back is the opposite move, below.
 
 - While a move is under way, these are refused with the reason: putting
   `"placement": "app"` back, tearing the environment down, removing its
@@ -893,6 +892,73 @@ which does not exist yet.
   PostgreSQL servers that carry the same grant and the copy job's real script
   (`gcp-shared-database-move.postgres.test.ts`).
 
+### Moving a database onto the shared server (implemented, not run live)
+
+Adding `"placement": "app"` to the database of an environment that has a
+server of its own plans the opposite move, by the same module and the same
+copy job. Again the next round is read from what exists:
+
+1. **Prepare**: first the database is read as the app itself and refused,
+   before anything is created, if the copy would refuse it, if it is too big,
+   if its server runs another PostgreSQL version than the shared server
+   really does (as Google reports it; one not created yet gets version 16), or if
+   it uses any extension beyond `plpgsql`. What the spec cannot have on the
+   shared server (`size`, `version`, `deletionProtection: true`, a worker that
+   counts pending work) is refused where specs are checked, as for any
+   environment there. Then the shared server is created if the app has none
+   (billable, confirmed) and the environment's database and logins are made on
+   it. The new login is stored as a new version of the environment's one
+   connection secret; services stay on their own server, pinned to the version
+   they run.
+2. **Switch** (confirmed): the app is shut out of its own server, the database
+   is copied and checked, and only then is the environment recorded as one on
+   the shared server; the services' change waits for that. A failure before
+   the record changes undoes the pause. After it, the own server stays shut,
+   and the next plan finishes whatever is left.
+3. **Clean up**: the own server is deleted only when workloads are positively
+   seen on the shared database (the same rule as the other direction). A
+   server with deletion protection on (production's default) takes two plans:
+   one turns the protection off, the next deletes the server, confirmed. The
+   deletion waits for a step of its own that looks at the workloads once more
+   when the plan is applied. (The engine's own check that no service changed
+   since the plan would catch a redeploy, but not a newest revision that
+   stopped being ready.) Once protection is off it stays off: if a workload
+   is later seen elsewhere, the plan waits and changes nothing. So this
+   direction is three plans, or four for a protected server; each plan says
+   which it is.
+
+- Nothing is created in either direction unless at least one workload uses
+  the database's connection and all of them run its newest version; one
+  function asks this for both directions, before step 1 and before the switch.
+- A write to the environment's connection secret that is cut short in step 1
+  (Google stored the shared database's login, Hypervibe never heard) does not
+  block the next plan: the step that makes the database sets that version
+  aside and stores a login anew when it runs again.
+- Saved about this move: `moveTo` (the database being made on the shared
+  server, while the app is still on its own) and `movedFrom` (the own server,
+  from the switch until it is deleted).
+- Until the own server is gone it stays in the configuration exactly as it
+  was, with the workloads pointed elsewhere (`workloadDatabase`, below). A
+  plan that would also change it (for example because a `size` was dropped
+  from the spec together with adding the placement) is refused: set the
+  server back to defaults first, then move.
+- Refused while this move is under way: taking `"placement": "app"` away
+  again, teardown, removing the database, a password change, removing the
+  shared server, and any other step on the database from an older saved plan.
+- The shared server's database lets only its own roles in, where a server of
+  its own lets everyone connect. That difference is Hypervibe's own doing and
+  is neither refused nor compared.
+- Tested offline only, in the same test as the other direction (the database
+  is moved off the shared server and back again), with Cloud SQL's own grant
+  on both servers from the start. Not tested, and not run live: creating the
+  shared server as part of this move (the test's server already exists), the
+  extension and version refusals, pausing a real Cloud SQL server of its own
+  (its limits are listed under pausing below), and that real OpenTofu shows no
+  change to the own server or the services in round 1.
+- Known gap: if the own server disappears without Hypervibe's record of the
+  move being cleared (its saved state lost), the note stays and every plan
+  keeps saying the move is finishing.
+
 The configuration generator can point every workload of an
 environment at a database that is named outright, with its socket and its
 connection secret together, while the instance the environment itself creates
@@ -908,7 +974,7 @@ database on the shared server is what the switch above uses; during a move the
 connection secret's newest version already belongs to the new server, so the
 pause then relies on reading the pinned version itself. The one for a database
 on a server of its own (`src/application/gcp-dedicated-database-pause.ts`) is
-used by no plan yet. Tested offline against real local PostgreSQL servers; not
+what the move onto the shared server uses, in the same way. Tested offline against real local PostgreSQL servers; not
 yet run on Google Cloud.
 
 - Paused means the app cannot connect with either of its two logins, their

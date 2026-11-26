@@ -63,6 +63,12 @@ export interface DedicatedPauseParams {
   secret: { id: string; labels: Record<string, string>; version: string };
   /** How long to wait for sessions to end. Default 5 seconds. */
   sessionWaitMs?: number;
+  /**
+   * The secret's newest version already holds another database's connection (the one this database is being moved to),
+   * so what is recorded about the newest version says nothing about this one. The pinned version's own content is still
+   * read and must be a login of this server and database; that check alone then stands.
+   */
+  newestIsAnotherDatabase?: boolean;
 }
 
 class Stop extends Error {
@@ -96,16 +102,17 @@ async function known(ports: DedicatedPausePorts, params: DedicatedPauseParams): 
   if (seen.state === 'absent') throw blocked(`${name} has no connection secret (${params.secret.id}), so its database cannot be paused.`);
   const labels = seen.value.labels;
   if (labels['managed-by'] !== 'hypervibe' || labels['hv-environment'] !== owner) throw blocked(`Secret ${params.secret.id} is not owned by this Hypervibe environment.`);
-  const active = labels['hv-db-login'];
-  if (seen.value.unrecorded || !seen.value.hasEnabledVersion || labels['hv-db-instance'] !== params.instanceName || !isLogin(active)) throw blocked(`${name}'s connection secret does not hold a login for database server ${params.instanceName}. Run hv_plan and hv_apply first.`);
-  if (labels['hv-db-retire'] !== undefined) throw blocked(`${name}'s database password is still being changed: its previous login has not been switched off yet. Finish that with hv_plan and hv_apply first.`);
-  if (seen.value.latestVersion !== params.secret.version) throw blocked(`${name}'s services use version ${params.secret.version} of its connection secret, which is not its newest (${seen.value.latestVersion}). Run hv_plan and hv_apply first.`);
-
   // What an undo must make work again is exactly what the pinned version holds. If that cannot be read and recognised now, a pause could not be undone.
   const pinned = await ports.readSecretVersion(params.secret.id, params.secret.version);
+  const held = pinned.state === 'present' ? parseConnectionUrl(pinned.value) : undefined;
+  const active = params.newestIsAnotherDatabase ? held?.login : labels['hv-db-login'];
+  if (!params.newestIsAnotherDatabase) {
+    if (seen.value.unrecorded || !seen.value.hasEnabledVersion || labels['hv-db-instance'] !== params.instanceName || !isLogin(active)) throw blocked(`${name}'s connection secret does not hold a login for database server ${params.instanceName}. Run hv_plan and hv_apply first.`);
+    if (labels['hv-db-retire'] !== undefined) throw blocked(`${name}'s database password is still being changed: its previous login has not been switched off yet. Finish that with hv_plan and hv_apply first.`);
+    if (seen.value.latestVersion !== params.secret.version) throw blocked(`${name}'s services use version ${params.secret.version} of its connection secret, which is not its newest (${seen.value.latestVersion}). Run hv_plan and hv_apply first.`);
+  }
   if (pinned.state !== 'present') throw blocked(pinned.state === 'unknown' ? pinned.reason : `Version ${params.secret.version} of ${params.secret.id} no longer exists. Nothing was changed.`);
-  const held = parseConnectionUrl(pinned.value);
-  if (!held || held.login !== active || held.databaseName !== params.databaseName || held.connectionName !== params.connectionName) {
+  if (!held || !isLogin(active) || held.login !== active || held.databaseName !== params.databaseName || held.connectionName !== params.connectionName) {
     throw blocked(`Version ${params.secret.version} of ${params.secret.id} is not the connection to ${name}'s database that was recorded. Nothing was changed.`);
   }
 

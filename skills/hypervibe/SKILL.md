@@ -215,7 +215,16 @@ own in three rounds of `hv_plan` and `hv_apply`: create the server (billable),
 switch (the app returns database errors while its data is copied and checked;
 tell the user before they confirm), then delete the old copy. Run `hv_plan`
 again after each round until nothing is left; a started move cannot be
-cancelled. This has not been run on Google Cloud yet; say so before starting.
+cancelled. It was run on Google Cloud once (2026-11-25, a small two-table app,
+about two minutes of errors during the switch); larger databases are untried.
+
+Adding `"placement": "app"` to a database that has its own server moves it the
+other way, onto the shared server, in the same manner: make the database there
+(and the shared server, billable, if the app has none), switch with the same
+short outage, then delete the own server, which takes one more round when it
+has deletion protection on. Extensions beyond `plpgsql` and non-default `size`
+or `version` are refused before anything is created. Not run on Google Cloud
+yet; say so before starting.
 
 For read-only questions, use read-only commands without editing desired state or
 adopting infrastructure. Use `hv_inspect` for provider forensics; `hv_import`

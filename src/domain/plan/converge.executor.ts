@@ -62,7 +62,7 @@ const planActionSchema: z.ZodType<PlanAction> = z.object({
     // Confirmation follows what an action is shown as, and apply runs its step: the two must agree, so a saved plan
     // can never present a deletion as an update or a new server as free.
     const destroys = sharedStep === 'release' || sharedStep === 'remove-server';
-    const types: Record<string, string[]> = { server: ['create'], allocate: ['create', 'update'], rotate: ['update'], retire: ['update'], release: ['destroy'], 'unprotect-server': ['update'], 'remove-server': ['destroy'], switch: ['update'] };
+    const types: Record<string, string[]> = { server: ['create'], allocate: ['create', 'update'], rotate: ['update'], retire: ['update'], release: ['destroy'], 'unprotect-server': ['update'], 'remove-server': ['destroy'], switch: ['update'], 'confirm-moved': ['update'] };
     // Confirmation is given by action id, so the id must name the step it runs.
     const honest = action.id === `shared-database:${sharedStep}` && action.resource.kind === 'database' && action.metadata?.engineSegment === undefined && (types[sharedStep] ?? []).includes(action.type)
       && (!destroys || (action.dataBearing === true && action.requiresConfirm === true))
