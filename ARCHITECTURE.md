@@ -210,6 +210,21 @@ to its project, environment, service and purpose. Missing credentials are not
 permission to widen access or silently create a new identity. See the
 [connection rules](docs/development/connections.md).
 
+One exception is accepted (owner's decision, 2026-11-26). While a migration copy
+job runs in a Google Cloud project, the access it needs to the source is held in
+a temporary secret in that project: a signed link to a database export, a source
+database URL, or a source bucket's access keys. The target app's own identity can
+read every secret of its project, so it could read these for as long as the job
+runs. That is accepted because one owner holds both sides of a migration.
+Hypervibe creates the secret directly, marks it as belonging to that one job,
+records it before writing it, mounts it by reference at one pinned version, and
+deletes it with the job or on the next run; Secret Manager also expires it by
+itself. Its value still never reaches a plan, result, log, error, OpenTofu state
+or job definition. The isolated route, a copy account of its own and a container
+the app is denied
+([#747](https://github.com/davejohnson/hypervibe/issues/747)), is not used by
+this path.
+
 ## Runtime Secrets
 
 Generate app-owned secrets within the encrypted lifecycle; request values only

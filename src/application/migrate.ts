@@ -50,7 +50,7 @@ import {
   type DatabaseManifest,
   manifestsMatch,
   runTransferJob,
-  transferCredentialHandoffProblem,
+  TRANSFER_SECRET_NOTICE,
   databaseTransferScript,
   storageTransferScript,
   type DatabaseTransferResult,
@@ -520,12 +520,12 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     return { status: 'blocked', message: 'The saved copy does not prove that every requested database and file bucket matched. Run hv_migrate with copyData=true and refreshData=true to make a verified copy before releasing or moving traffic.' };
   }
 
-  // A Railway export needs its signed download URL, other databases need their
-  // source URL, and bucket transfers need source access keys inside the target job.
-  const copyHandoff = transferCredentialHandoffProblem(!!sourceSpec.database || buckets.length > 0);
+  // A Railway export hands the target job its signed download URL, other databases their source URL, and bucket
+  // transfers the source's access keys: each in a temporary secret that exists only while its job does.
+  const needsSourceValue = !!sourceSpec.database || buckets.length > 0;
   if (params.cutover) {
     if (!completedCopy) return { status: 'blocked', message: `Migrate ${params.from} to ${params.to} and check the app there before the cutover.` };
-    return cutoverEnvironment(ctx, params, lease, copyHandoff);
+    return cutoverEnvironment(ctx, params, lease, needsSourceValue);
   }
 
   if (params.verifyOnly) {
@@ -533,7 +533,6 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     const copy = migration()!;
     const missing = selectionProblem();
     if (missing) return { status: 'blocked', message: missing };
-    if (copyHandoff) return { status: 'blocked', message: copyHandoff };
     const prepared = await prepareMigrationBuckets(params.project, sourceEnvironment, buckets);
     if (!prepared.prepared) return { status: 'blocked', message: prepared.blocked };
     const result = await verifyMigratedCopy({ lease, buckets: prepared.prepared, project: params.project, from: params.from, to: params.to, sourceSpec, sourceEnvironment, spec, context, environmentLabel,
@@ -545,9 +544,8 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
 
   // 3b. The target database runs at least the source's PostgreSQL major version.
   if (sourceSpec.database && spec.environments[params.to]!.database) {
-    // An earlier observation can size an independently prepared target while data
-    // transfer is unavailable. It cannot establish the source version for a new copy.
-    const known = reuseCopy || (completedCopy && sourceSpec.database.provider === 'railway' && copyHandoff) ? migration()?.sourceMajor : undefined;
+    // An earlier observation cannot establish the source version for a new copy.
+    const known = reuseCopy ? migration()?.sourceMajor : undefined;
     const hasKnownMajor = typeof known === 'number' && Number.isSafeInteger(known) && known > 0;
     const privateInspection = sourceSpec.database.provider === 'railway' && !hasKnownMajor;
     const sourceMajor = hasKnownMajor ? { major: known } : privateInspection
@@ -608,7 +606,6 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
       next: `${params.from} is unchanged and still serving. Check the app at ${Object.values(released.urls)[0] ?? 'its URL'}. The data was copied at ${copy.copiedAt}; run hv_migrate again with refreshData=true to copy it again before the final cutover.`,
     };
   }
-  if (copyHandoff) return { status: 'blocked', message: copyHandoff };
   const sourceAccess = sourceSpec.database && !privateRailwaySource ? await acquireManagedDatabaseAccess(params.project, sourceEnvironment) : undefined;
   if (sourceAccess && !sourceAccess.ok) return { status: 'blocked', message: `Could not open the source database: ${sourceAccess.error}` };
   try {
@@ -621,7 +618,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
         status: 'needs_copy_approval',
         ...(summary ? { database: { tables: summary.tables, rows: summary.rows, version: summary.version } } : {}),
         storage: storageNames,
-        message: `Hypervibe will copy ${what}${storageNames.length ? ` and every file in ${storageNames.join(', ')}` : ''} into ${params.to}, replacing anything there now. ${params.from}'s app, data and settings are not changed.`,
+        message: `Hypervibe will copy ${what}${storageNames.length ? ` and every file in ${storageNames.join(', ')}` : ''} into ${params.to}, replacing anything there now. ${params.from}'s app, data and settings are not changed.${needsSourceValue ? ` ${TRANSFER_SECRET_NOTICE}` : ''}`,
       };
     }
     const transfer: TransferContext = {
@@ -816,7 +813,7 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
  * then its existing domain forwards to the target. The source's resources and
  * DNS stay in place. Recovery after target writes needs the newer data.
  */
-async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease, copyHandoff?: string): Promise<MigrateResult> {
+async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease, needsSourceValue: boolean): Promise<MigrateResult> {
   const store = new SpecStore();
   const { spec, revision } = store.get(params.project)!;
   const source = spec.environments[params.from]!;
@@ -856,13 +853,12 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
     if (done !== 'done') return done;
     return observeTrafficMove();
   }
-  if (copyHandoff) return { status: 'blocked', message: copyHandoff };
   if (!params.confirmCutover) {
     return {
       status: 'needs_cutover_approval', domain,
       steps: [
         `Pause ${params.from}: ${domain} shows a maintenance page (HTTP 503) and its web and worker services are suspended. Let running jobs and uploads finish first.`,
-        `Copy the ${params.from} database and files to ${params.to} again, replacing the earlier copy, and verify every table and file.`,
+        `Copy the ${params.from} database and files to ${params.to} again, replacing the earlier copy, and verify every table and file.${needsSourceValue ? ` ${TRANSFER_SECRET_NOTICE}` : ''}`,
         ...(Object.keys(retarget).length ? [`Set ${Object.keys(retarget).join(', ')} on ${params.to} to ${sourceOrigin}, so links and logins use ${domain}.`] : []),
         `Send ${domain} to ${params.to} (${web}). ${params.from} stays paused with its data. ${recovery}`,
       ],

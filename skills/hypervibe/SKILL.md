@@ -154,8 +154,8 @@ exact `gcpSetupPlanId`. This one-time check runs two temporary Cloud Run jobs
 and may incur charges. Using disposable data, it verifies the copy account
 can read the test version and download the file through its short-lived link,
 and requires both direct reads by the app account to be denied. Report the outcome and cleanup,
-including any period when the deleted file stays recoverable. The private
-handoff and actual data copy require a separate plan.
+including any period when the deleted file stays recoverable. `hv_migrate`'s
+data copy does not use this restricted access.
 
 When only the app's direct export-file access needs retesting, preview
 `migrationAccess="verify-export-file-access"` with the same project, source
@@ -171,8 +171,8 @@ For a prepared Railway-to-GCP file move, select one declared data bucket via
 `hv_connections` prepare workflow. Share its browser review. This approval
 prepares the unscheduled job and its bucket permissions. If its final check
 is interrupted or fails after creation, resume the original approved plan
-ID to verify the job and grants. Passing source
-credentials and running a copy require their own reviewed workflow.
+ID to verify the job and grants. `hv_migrate` copies files with a temporary job
+of its own and does not use this prepared one.
 
 Use `hv_migrate` with `inspectSource=true` to review one query of the running
 Railway PostgreSQL database. The connection needs its pre-registered SSH
@@ -182,11 +182,16 @@ rows. The destination can be on any cloud or can be undeclared.
 
 `hv_migrate` proposes an OpenTofu-managed Google Cloud environment for a new
 destination. It can import runtime settings into an existing AWS environment.
-Guided migration to Azure is unavailable. Railway database and bucket transfers
-still require a planned private credential handoff. A fresh comparison of
-private Railway and Cloud SQL databases also
-requires reviewed verification jobs. Historical receipts record what matched at
-the time of the copy. Report these limits before requesting a maintenance window.
+Guided migration to Azure is unavailable. Copying a Railway database and Railway
+buckets into Google Cloud is built and tested offline but has not been run on a
+live migration; say so before relying on it. Before asking for approval of a
+copy, tell the user in plain words what the approval text says: while a copy job
+runs, the access it needs to the source is held in a temporary secret in the
+Google Cloud project, which the app there could read, and Hypervibe deletes it
+when the job ends. A fresh comparison (`verifyOnly`) of a private Railway
+database is refused; the copy's own check is its proof. Historical receipts
+record what matched at the time of the copy. Report these limits before
+requesting a maintenance window.
 For supported operations the workflow also stops at
 `needs_secret_import` and `needs_copy_approval`. The source keeps serving.
 After a verified copy, a re-run releases without copying again; pass

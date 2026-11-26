@@ -114,6 +114,8 @@ export interface TransferResources {
   secretIds: string[];
   ownershipToken?: string;
   jobUid?: string;
+  /** Copy jobs: false once the job exists, true durably before its first :run request. Absent in records of earlier versions. */
+  runRequested?: boolean;
   /** Written before jobs.create and advanced durably before the first :run request. */
   probe?: { stage: 'before-run' | 'run-may-be-submitted'; serviceAccount: string; etag?: string };
 }

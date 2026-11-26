@@ -22,13 +22,34 @@ Guided migration defaults new destinations to Google Cloud. It can import runtim
 
 Prepare a separate Cloud Run environment and check the app on its temporary
 hostname. A working target does not establish that the production data can move.
-The guided GCP transfer still needs a separately approved execution and a private handoff for the database dump URL and bucket credentials.
-Railway PostgreSQL and Railway bucket copies that need this handoff are blocked.
-A fresh comparison of private Railway and Cloud SQL databases also needs
-reviewed native jobs. A historical receipt only describes the earlier copy.
-The application pause and forwarding flow below is a separate capability.
-Follow [the private transfer implementation](https://github.com/davejohnson/hypervibe/issues/747)
-and [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
+`hv_migrate` copies a Railway PostgreSQL database and Railway buckets into the
+Google Cloud environment and checks the copy: every table's rows and content
+checksum, every file's bytes. This is built and tested offline. It has not been
+run on a live migration yet
+([#870](https://github.com/davejohnson/hypervibe/issues/870)).
+
+The database is exported inside Railway by a temporary task and uploaded to the
+Google Cloud project's bucket; a temporary Cloud Run job downloads it and
+restores it. Files are copied by a temporary Cloud Run job that reads the Railway
+bucket. Each job needs something private of the source: the signed link to the
+export, or the Railway bucket's access keys. Hypervibe puts each in a temporary
+secret in the Google Cloud project just before the job, gives the job a
+reference to one exact version of it, and deletes it when the job ends. If
+Hypervibe is interrupted, the next `refreshData` copy removes what was left, and
+Secret Manager deletes the secret by itself an hour after the job's time limit.
+
+While a job runs, the app in that Google Cloud project could read the temporary
+secret, because the app's identity can read every secret of its project. This
+was accepted on 2026-11-26: one owner holds both sides of a migration. The
+approval for the copy says so. The separate copy account and restricted
+container described below are not used by this copy.
+
+Still missing: the export file stays in the project's bucket after the restore
+and is not deleted by Hypervibe; and a fresh comparison (`verifyOnly`) of a
+private Railway database is refused, so the proof of a Railway database copy is
+the check made by the copy itself. A historical receipt only describes the
+earlier copy. The application pause and forwarding flow below is a separate
+capability. See [the GCP rehearsal](https://github.com/davejohnson/hypervibe/issues/254).
 
 To prepare a job for one file bucket, use `hv_connections` with action
 `prepare`, provider `cloudrun`, `migrationAccess="prepare-bucket-copy"`,
@@ -40,9 +61,10 @@ browser and resume the same request with its `gcpSetupPlanId`. Setup leaves
 the job idle. If setup stops during its final check, resume the same approved
 plan ID. Hypervibe can verify the existing job and both permissions against
 the saved plan without repeating the cloud changes. The review keeps the
-original attempt and shows when verification succeeded. Transferring files still needs a
-separately reviewed private credential handoff and job execution. PostgreSQL
-migration has its own prerequisites.
+original attempt and shows when verification succeeded. `hv_migrate` does not use
+this prepared job: it copies files with a temporary job of its own, as described
+above. Whether to finish or remove this separate route is undecided
+([#747](https://github.com/davejohnson/hypervibe/issues/747)).
 
 For a prepared Railway source and Cloud Run destination, preview the copy
 account and its empty global Secret Manager container with
@@ -93,9 +115,8 @@ Hypervibe checks cleanup of the jobs, the test version and the exact file
 generation. Google keeps metadata for the destroyed secret version. The
 preview shows any bucket soft-delete period, during which the deleted test
 file is recoverable. A failed or unfinished check leaves access unverified.
-A passing check records the two accounts' access at that time. Moving Railway
-credentials and customer data still requires the separate private handoff
-and approved copy plan.
+A passing check records the two accounts' access at that time. `hv_migrate`'s
+copy does not use this restricted route.
 
 To retest only the app account's direct access to an export file, preview
 `migrationAccess="verify-export-file-access"` for the same project, source

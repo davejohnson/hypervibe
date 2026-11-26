@@ -110,7 +110,7 @@ describe('temporary Cloud Run transfer ownership and completion', () => {
     expect(await provider.run()).toMatchObject({ ok: false });
     expect(provider.calls.some((call) => call.startsWith('DELETE'))).toBe(false);
   });
-  it('does not write a credential into or remove an unreviewed secret container', async () => {
+  it('does not write a private source value when the transfer has nowhere to record its temporary secret', async () => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
     expect(await runTransferJob(context, { ...job, sourceSecrets: { SOURCE_DATABASE_URL: 'private-fixture' } })).toMatchObject({ ok: false });

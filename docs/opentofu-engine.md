@@ -202,6 +202,9 @@ release/apply behavior live.
 
 OpenTofu owns secret containers. Hypervibe keeps credential generation, private
 value storage and version publication inside its operational secret boundary.
+The one container Hypervibe creates itself is the temporary secret of a
+migration copy job, which exists only while that job does and never enters
+OpenTofu configuration or state ([data migration](data-migration.md#railway-to-google-cloud)).
 Raw credential values do not belong in public plans or generated configuration.
 Cloud Run receives Secret Manager references.
 
