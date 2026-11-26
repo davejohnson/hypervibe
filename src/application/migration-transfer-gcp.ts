@@ -61,9 +61,11 @@ export const RESULT_MARKER = 'HV_TRANSFER_RESULT ';
  * way SQL does (`public."a|b"`), so no character in a name can be mistaken for
  * a separator and no two tables share a key. The checksum sums a hash of every
  * row's text, so it is independent of row order and needs constant memory on
- * large tables. Run with PGTZ=UTC so timestamps render the same on both sides.
+ * large tables. A row is hashed as `ROW(alias.*)`: a bare alias would be read
+ * as a column of that name where a table has one. Run with PGTZ=UTC so
+ * timestamps render the same on both sides.
  */
-const MANIFEST_SQL = `SELECT json_build_object('tables', coalesce(json_object_agg(m.k, m.c), '{}'::json), 'totalRows', coalesce(sum(split_part(m.c, ':', 1)::numeric), 0)::text, 'version', current_setting('server_version_num'))::text FROM (SELECT format('%I.%I', table_schema, table_name) AS k, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) || '':'' || coalesce(sum((''x'' || substr(md5(t::text), 1, 15))::bit(60)::bigint::numeric), 0) AS c FROM %I.%I t', table_schema, table_name), false, true, '')))[1]::text AS c FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg_toast%') m`;
+const MANIFEST_SQL = `SELECT json_build_object('tables', coalesce(json_object_agg(m.k, m.c), '{}'::json), 'totalRows', coalesce(sum(split_part(m.c, ':', 1)::numeric), 0)::text, 'version', current_setting('server_version_num'))::text FROM (SELECT format('%I.%I', table_schema, table_name) AS k, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) || '':'' || coalesce(sum((''x'' || substr(md5(ROW(hv_migrate_row.*)::text), 1, 15))::bit(60)::bigint::numeric), 0) AS c FROM %I.%I hv_migrate_row', table_schema, table_name), false, true, '')))[1]::text AS c FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg_toast%') m`;
 
 const MANIFEST_FUNCTIONS = [
   'set -o pipefail',

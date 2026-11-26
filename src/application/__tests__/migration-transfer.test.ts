@@ -159,12 +159,13 @@ describe('copy check with table names no separator survives (live PostgreSQL, #8
     // A separator, a quote and a backslash, a line break, and two schema/table pairs that read the same once joined by a dot.
     const tables = ['public."a|b"', 'public."we""ird\\name"', 'public."line\nbreak"', '"x.y".z', 'x."y.z"', 'public.plain'];
     try {
-      psql(url(sourceDb), `CREATE SCHEMA "x.y"; CREATE SCHEMA x; ${tables.map((table) => `CREATE TABLE ${table} (v int); INSERT INTO ${table} VALUES (1), (2), (3);`).join(' ')}`);
+      psql(url(sourceDb), `CREATE SCHEMA "x.y"; CREATE SCHEMA x; ${tables.map((table) => `CREATE TABLE ${table} (v int); INSERT INTO ${table} VALUES (1), (2), (3);`).join(' ')}
+        CREATE TABLE named_columns (t int, hv_migrate_row int, u int); INSERT INTO named_columns VALUES (1, 1, 1);`);
       // The copy itself carries every one of them and is certified.
       const copied = run(databaseTransferScript());
       expect(copied.ok).toBe(true);
-      expect(Object.keys(copied.source.tables).sort()).toEqual([...tables].sort());
-      expect(copied.source.totalRows).toBe('18');
+      expect(Object.keys(copied.source.tables).sort()).toEqual([...tables, 'public.named_columns'].sort());
+      expect(copied.source.totalRows).toBe('19');
       expect(copied.source.version).toMatch(/^\d+$/);
       expect(manifestsMatch(copied.source, copied.target)).toEqual({ match: true, differences: [] });
       // The same number of rows with other values, then another number of rows: each wrong table is named, and no other.
@@ -177,9 +178,14 @@ describe('copy check with table names no separator survives (live PostgreSQL, #8
         expect(manifestsMatch(checked.source, checked.target)).toEqual({ match: false, differences: [`${table}: ${checked.source.tables[table]} → ${checked.target.tables[table]}`] });
         psql(url(targetDb), `UPDATE ${table} SET v = v - 10`);
       }
+      // A column named like the name the checksum gives each row must not stand in for the whole row.
+      psql(url(targetDb), 'UPDATE named_columns SET u = 2');
+      const column = run(databaseManifestScript());
+      expect(manifestsMatch(column.source, column.target).differences).toEqual([expect.stringMatching(/^public\.named_columns: 1:\d+ → 1:\d+$/)]);
+      psql(url(targetDb), 'UPDATE named_columns SET u = 1');
       psql(url(targetDb), 'DELETE FROM "a|b" WHERE v = 3');
       const fewer = run(databaseManifestScript());
-      expect(fewer.target.totalRows).toBe('17');
+      expect(fewer.target.totalRows).toBe('18');
       expect(manifestsMatch(fewer.source, fewer.target).differences).toEqual([expect.stringMatching(/^public\."a\|b": 3:\d+ → 2:\d+$/)]);
       psql(url(targetDb), 'INSERT INTO "a|b" VALUES (3)');
       const same = run(databaseManifestScript());
