@@ -736,9 +736,11 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
     variables: { SOURCE_DATABASE_URL: `\${{${databaseServiceName}.DATABASE_URL}}`, UPLOAD_URL: sign('PUT') }, timeoutMs: 30 * 60 * 1000,
   });
   const cleanedUp = railway.adapter.lastPrivateTaskCleanup;
-  const exportResult = parseTransferResult(exported.output) as { ok?: boolean; source?: DatabaseManifest; sourceIdentity?: unknown } | undefined;
+  const exportResult = parseTransferResult(exported.output) as { ok?: boolean; error?: unknown; source?: DatabaseManifest; sourceIdentity?: unknown } | undefined;
   if (exported.exitCode !== 0 || !exportResult?.ok || !exportResult.source) {
-    return { blocked: `The private export inside Railway did not complete (${exported.error ?? `exit ${exported.exitCode ?? 'unknown'}`}).${cleanedUp ? '' : ' Its temporary task may still exist in Railway; Hypervibe will report it in hv_status.'}` };
+    // A refusal ends the task normally and gives its reason in the result line, as the copy job in Google Cloud does.
+    const refusal = exported.exitCode === 0 && exportResult?.ok === false && typeof exportResult.error === 'string' ? exportResult.error : undefined;
+    return { blocked: `The private export inside Railway did not complete${refusal ? `: ${refusal}` : ` (${exported.error ?? `exit ${exported.exitCode ?? 'unknown'}`}).`}${cleanedUp ? '' : ' Its temporary task may still exist in Railway; Hypervibe will report it in hv_status.'}` };
   }
   // The temporary task can read the source database. Nothing is restored while it may still exist.
   if (!cleanedUp) return { blocked: 'The private export finished, but its temporary task could not be removed from Railway, and that task can read the source database. Remove the temporary Hypervibe task service in Railway (hv_status lists it), then run the migration again. The target was not changed.' };

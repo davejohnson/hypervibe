@@ -376,11 +376,27 @@ describe.runIf(major >= 15)('moving a database from the shared server to a serve
     expect(changes(prepared)).toEqual(['create secret-container:hv-production-database-url-copy', 'create database:postgres', 'create database-credential:postgres']);
     expect(prepared.confirmActions).toEqual(['database:postgres']);
     expect(prepared.warnings.join(' ')).toContain('This plan is step 1');
-    const done = await apply(prepared);
+    // Hypervibe is stopped between Google storing the own server's login and Hypervibe recording it (issue 865).
+    google.stoppedAfterStoring = 'hv-production-database-url';
+    const stopped = await apply(prepared);
+    google.stoppedAfterStoring = '';
+    expect(stopped.success).toBe(false);
+    expect(urls()).toHaveLength(before.urls + 1);
+    // Stopped at the same point a second time: the leftover is set aside, and the next one is left unrecorded in its turn.
+    google.stoppedAfterStoring = 'hv-production-database-url';
+    expect((await apply(await plan(own()))).success).toBe(false);
+    google.stoppedAfterStoring = '';
+    expect(web()).toBe(before.web);
+    expect(await asApp(sharedUrl, 'SELECT order_count()')).toBe('3000');
+    // Running again recovers: the version nobody recorded is set aside and the login is made and stored anew.
+    const again = await plan(own());
+    expect(changes(again)).toEqual(['create database-credential:postgres']);
+    const done = await apply(again);
     expect(done.success, JSON.stringify(done)).toBe(true);
     const ownServer = google.servers.find((server) => !server.settings.userLabels['hv-shared-database'])!.name;
     expect(record()).toMatchObject({ placement: 'app', move: { instanceName: ownServer } });
-    expect(urls()).toHaveLength(before.urls + 1);
+    // Two versions were set aside, so the own server's login is the third new one.
+    expect(urls()).toHaveLength(before.urls + 3);
     expect(urlParts(urls().at(-1)!)).toMatchObject({ user: 'app_a', database: 'app', connectionName: `${GCP}:${REGION}:${ownServer}` });
     // The service still runs the shared database's connection, and that connection still works.
     expect(web()).toBe(before.web);

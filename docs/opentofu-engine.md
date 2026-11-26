@@ -845,10 +845,16 @@ rehearsal and no way back built in: moving back is the opposite move, below.
   version Hypervibe never heard back about. The next `hv_plan` still plans the
   switch, and applying it sets that version aside and either completes the
   move or lets the app back in.
-- Known dead end: if Hypervibe is stopped in the first round between Google
-  storing the own server's login and Hypervibe recording it, the move is
-  refused from then on with the reason. A dropped answer alone is settled on
-  the spot by reading back what was stored; only a stopped process leaves this.
+- If Hypervibe is stopped in the first round between Google storing the own
+  server's login and Hypervibe recording it, the next `hv_plan` plans that
+  round again: the version nobody recorded is set aside by ownership alone
+  (both logins get new passwords, so whatever it held stops working) and a
+  login is stored anew. The services stay on the version they run throughout.
+  The login step's setup is repeatable for this: it acts as the login itself,
+  not as the owner role the login defaults to after a first run. Tested
+  offline, including being stopped twice; not run on Google Cloud. An
+  environment that always had its own server and is stopped at the same point
+  during its first setup is still refused at plan time, as before.
 - The copy login's secret (`<connection secret>-copy`) is created in the first
   round and removed by the first plan after the switch. It is never mounted
   into a service; like every secret of the project the app's cloud identity

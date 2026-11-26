@@ -56,18 +56,21 @@ export interface StorageTransferResult {
 export const RESULT_MARKER = 'HV_TRANSFER_RESULT ';
 
 /**
- * One row per table, "schema.table|rows:checksum", from a single psql query.
- * The checksum sums a hash of every row's text, so it is independent of row
- * order and needs constant memory on large tables. Run with PGTZ=UTC so
+ * The whole manifest as one JSON object, `{"tables":{"schema.table":"rows:checksum"},"totalRows":"n","version":"n"}`,
+ * from a single psql query. The server writes the JSON and quotes each name the
+ * way SQL does (`public."a|b"`), so no character in a name can be mistaken for
+ * a separator and no two tables share a key. The checksum sums a hash of every
+ * row's text, so it is independent of row order and needs constant memory on
+ * large tables. A row is hashed as `ROW(alias.*)`: a bare alias would be read
+ * as a column of that name where a table has one. Run with PGTZ=UTC so
  * timestamps render the same on both sides.
  */
-const MANIFEST_SQL = `SELECT table_schema || '.' || table_name || '|' || (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) || '':'' || coalesce(sum((''x'' || substr(md5(t::text), 1, 15))::bit(60)::bigint::numeric), 0) AS c FROM %I.%I t', table_schema, table_name), false, true, '')))[1]::text FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg_toast%' ORDER BY 1`;
+const MANIFEST_SQL = `SELECT json_build_object('tables', coalesce(json_object_agg(m.k, m.c), '{}'::json), 'totalRows', coalesce(sum(split_part(m.c, ':', 1)::numeric), 0)::text, 'version', current_setting('server_version_num'))::text FROM (SELECT format('%I.%I', table_schema, table_name) AS k, (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) || '':'' || coalesce(sum((''x'' || substr(md5(ROW(hv_migrate_row.*)::text), 1, 15))::bit(60)::bigint::numeric), 0) AS c FROM %I.%I hv_migrate_row', table_schema, table_name), false, true, '')))[1]::text AS c FROM information_schema.tables WHERE table_type = 'BASE TABLE' AND table_schema NOT IN ('pg_catalog', 'information_schema') AND table_schema NOT LIKE 'pg_toast%') m`;
 
 const MANIFEST_FUNCTIONS = [
-  // A failed read must fail the task, never report an empty manifest.
   'set -o pipefail',
-  `manifest() { PGTZ=UTC psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL.replace(/"/g, '\\"')}"; }`,
-  'json_manifest() { awk -F"|" \'BEGIN{printf "{"} NR>1{printf ","} {printf "\\"%s\\":\\"%s\\"", $1, $2; total+=$2} END{printf "}|%d", total}\'; }',
+  // A failed read, or anything but the one object asked for, must fail the task, never report an empty manifest.
+  `manifest() { M=$(PGTZ=UTC psql "$1" -At -v ON_ERROR_STOP=1 -c "${MANIFEST_SQL}") && case "$M" in '{"tables"'*'}') printf '%s' "$M" ;; *) return 1 ;; esac; }`,
 ];
 
 /**
@@ -78,7 +81,7 @@ export function databaseManifestScript(): string {
   return [
     'set -eu',
     ...MANIFEST_FUNCTIONS,
-    'emit() { M=$(manifest "$2" | json_manifest); printf \'"%s":{"tables":%s,"totalRows":"%s"}\' "$1" "${M%|*}" "${M##*|}"; }',
+    'emit() { E=$(manifest "$2") && printf \'"%s":%s\' "$1" "$E"; }',
     'OUT=""',
     'if [ -n "${SOURCE_DATABASE_URL:-}" ]; then OUT=$(emit source "$SOURCE_DATABASE_URL"); fi',
     'if [ -n "${DATABASE_URL:-}" ]; then T=$(emit target "$DATABASE_URL"); OUT="${OUT:+$OUT,}$T"; fi',
@@ -111,7 +114,8 @@ export function storageCheckScript(): string {
 export const DATABASE_IDENTITY_FUNCTIONS = [
   'identity() { psql "$1" -X -At -v ON_ERROR_STOP=1 -c "' + POSTGRES_DATABASE_IDENTITY_SQL + '" 2>/dev/null; }',
   'valid_identity() { case "$1" in ""|*[!0-9a-f:]*) return 1 ;; esac; printf "%s" "$1" | LC_ALL=C grep -Eq "' + POSTGRES_DATABASE_IDENTITY_PATTERN + '"; }',
-  'blocked() { printf \'' + RESULT_MARKER + '{"ok":false,"error":"%s"}\\n\' "$1"; exit 1; }',
+  // A refusal still exits 0: the runner reads the result line only of a task that did not fail.
+  'blocked() { printf \'' + RESULT_MARKER + '{"ok":false,"error":"%s"}\\n\' "$1"; exit 0; }',
 ];
 export const READ_SOURCE_IDENTITY = [
   'if ! SOURCE_IDENTITY=$(identity "$SOURCE_DATABASE_URL") || ! valid_identity "$SOURCE_IDENTITY"; then',
@@ -159,11 +163,10 @@ export function databaseExportScript(): string {
     ...MANIFEST_FUNCTIONS,
     ...DATABASE_IDENTITY_FUNCTIONS,
     ...READ_SOURCE_IDENTITY,
-    'VERSION=$(psql "$SOURCE_DATABASE_URL" -At -c "SHOW server_version_num")',
-    'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
+    'SRC=$(manifest "$SOURCE_DATABASE_URL")',
     'pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump',
     'curl -sf -X PUT -H "Content-Type: application/octet-stream" --upload-file /tmp/source.dump "$UPLOAD_URL"',
-    `printf '${RESULT_MARKER}{"ok":true,"sourceIdentity":"%s","source":{"tables":%s,"totalRows":"%s","version":"%s"},"bytes":%s}\\n' "$SOURCE_IDENTITY" "\${SRC%|*}" "\${SRC##*|}" "$VERSION" "$(wc -c < /tmp/source.dump)"`,
+    `printf '${RESULT_MARKER}{"ok":true,"sourceIdentity":"%s","source":%s,"bytes":%s}\\n' "$SOURCE_IDENTITY" "$SRC" "$(wc -c < /tmp/source.dump)"`,
   ].join('\n');
 }
 
@@ -186,11 +189,10 @@ export function databaseRestoreScript(): string {
     'set -e',
     // PostgreSQL diagnostics may contain SQL and data; report only the exit code.
     'if [ "$RESTORE" -ne 0 ]; then',
-    `  echo '${RESULT_MARKER}{"ok":false,"error":"The copy could not be written to the new database (pg_restore exit '"$RESTORE"')."}'`,
-    '  exit 1',
+    '  blocked "The copy could not be written to the new database (pg_restore exit $RESTORE). The new database had already been cleared and may hold part of the copy."',
     'fi',
-    'DST=$(manifest "$DATABASE_URL" | json_manifest)',
-    `printf '${RESULT_MARKER}{"ok":true,"target":{"tables":%s,"totalRows":"%s","version":"%s"},"restoreWarnings":%s}\\n' "\${DST%|*}" "\${DST##*|}" "$(psql "$DATABASE_URL" -At -c "SHOW server_version_num")" "\${WARNINGS:-0}"`,
+    'DST=$(manifest "$DATABASE_URL")',
+    `printf '${RESULT_MARKER}{"ok":true,"target":%s,"restoreWarnings":%s}\\n' "$DST" "\${WARNINGS:-0}"`,
   ].join('\n');
 }
 
@@ -213,9 +215,7 @@ export function databaseTransferScript(): string {
     ...DATABASE_IDENTITY_FUNCTIONS,
     ...READ_SOURCE_IDENTITY,
     ...READ_TARGET_IDENTITY,
-    'version() { psql "$1" -At -c "SHOW server_version_num"; }',
-    'SRC_VERSION=$(version "$SOURCE_DATABASE_URL")',
-    'SRC=$(manifest "$SOURCE_DATABASE_URL" | json_manifest)',
+    'SRC=$(manifest "$SOURCE_DATABASE_URL")',
     // A failed source dump must not destroy even a distinct target.
     'if pg_dump --format=custom --no-owner --no-privileges "$SOURCE_DATABASE_URL" > /tmp/source.dump 2>/tmp/dump.log; then :; else',
     '  DUMP=$?; blocked "The source database could not be read (pg_dump exit $DUMP); no data was replaced."',
@@ -228,12 +228,10 @@ export function databaseTransferScript(): string {
     'WARNINGS=$(grep -c "error:" /tmp/restore.log || true)',
     'set -e',
     'if [ "$RESTORE" -ne 0 ]; then',
-    `  echo '${RESULT_MARKER}{"ok":false,"error":"The copy could not be written to the new database (pg_restore exit '"$RESTORE"')."}'`,
-    '  exit 1',
+    '  blocked "The copy could not be written to the new database (pg_restore exit $RESTORE). The new database had already been cleared and may hold part of the copy."',
     'fi',
-    'DST_VERSION=$(version "$DATABASE_URL")',
-    'DST=$(manifest "$DATABASE_URL" | json_manifest)',
-    `printf '${RESULT_MARKER}{"ok":true,"source":{"tables":%s,"totalRows":"%s","version":"%s"},"target":{"tables":%s,"totalRows":"%s","version":"%s"},"restoreWarnings":%s}\\n' "\${SRC%|*}" "\${SRC##*|}" "$SRC_VERSION" "\${DST%|*}" "\${DST##*|}" "$DST_VERSION" "\${WARNINGS:-0}"`,
+    'DST=$(manifest "$DATABASE_URL")',
+    `printf '${RESULT_MARKER}{"ok":true,"source":%s,"target":%s,"restoreWarnings":%s}\\n' "$SRC" "$DST" "\${WARNINGS:-0}"`,
   ].join('\n');
 }
 

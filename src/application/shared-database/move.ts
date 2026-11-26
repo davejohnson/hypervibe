@@ -174,6 +174,19 @@ export async function planMove(request: MovePlanRequest): Promise<DatabaseMove> 
   }
   const own = record.move?.instanceName;
   const labels = seen.state === 'present' ? seen.value.labels : {};
+  // Step 1 was cut short while the own server's login was being stored: the secret's newest version is one nobody recorded,
+  // or one already set aside. Either way it holds nothing usable, the services still run the shared database's version,
+  // and step 1 is planned again; its login step sets the leftover aside and stores a login anew.
+  if (seen.state === 'present' && own && (seen.value.unrecorded || labels['hv-db-instance'] === undefined)) {
+    const stillRunning = await request.runningSecretVersions();
+    if ('blocked' in stillRunning) throw blocked(stillRunning.blocked);
+    const run = [...new Set(stillRunning.versions)];
+    if (run.length !== 1 || !/^[1-9][0-9]*$/.test(run[0]!) || run[0] === seen.value.latestVersion) {
+      throw blocked(`An unfinished write left ${secret.id} with a version Hypervibe has no record of, and ${name}'s services do not all run one earlier version of it (found: ${run.join(', ') || 'none'}). Hypervibe will not guess which database the app should use; nothing was planned.`);
+    }
+    // The secret's versions are the move's own business here, as the copy secret's are.
+    return { ...prepare(run[0]!, false), secretIds: [copySecretId, secret.id] };
+  }
   if (seen.state !== 'present' || !own || seen.value.unrecorded || !seen.value.hasEnabledVersion || !seen.value.latestVersion || labels['hv-db-instance'] !== own) {
     throw blocked(`${name}'s connection secret (${secret.id}) holds neither the login of its database on the shared server nor one for a server of its own. Hypervibe will not guess which database the app should use; nothing was planned.`);
   }
