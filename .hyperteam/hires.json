@@ -25,6 +25,32 @@
         "monthlyUsd": 60
       },
       "hiredAt": "2026-11-26T18:11:31.629Z"
+    },
+    {
+      "id": "reviewer-moss",
+      "role": "reviewer",
+      "focus": "Security problems in pull requests and in what merged, once a week: anything that leaks data, skips a permission check, trusts input it shouldn't, or exposes a secret.",
+      "name": "Moss",
+      "roleVersion": 1,
+      "repositoryId": 1142935404,
+      "repositoryName": "davejohnson/hypervibe",
+      "agent": "hyperteam-reviewer-moss",
+      "runtime": "self-hosted",
+      "model": {
+        "provider": "anthropic",
+        "model": "claude-opus-5-5",
+        "price": {
+          "input": 4,
+          "output": 20
+        },
+        "priceKnown": true,
+        "line": "opus",
+        "access": "subscription"
+      },
+      "budget": {
+        "monthlyUsd": 60
+      },
+      "hiredAt": "2026-11-26T18:11:38.422Z"
     }
   ]
 }
