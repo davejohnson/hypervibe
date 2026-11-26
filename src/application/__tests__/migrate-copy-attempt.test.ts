@@ -57,10 +57,7 @@ afterEach(() => {
   rmSync(directory, { recursive: true, force: true });
 });
 
-function fixture(kind: 'database' | 'files' | 'both', worker: 'simulated' | 'current' = 'simulated') {
-  // State-machine cases use a transport that accepts the fixture's synthetic inputs.
-  // The credential-admission cases below exercise the installed worker's real capability.
-  if (worker === 'simulated') vi.spyOn(transfer, 'transferCredentialHandoffProblem').mockReturnValue(undefined);
+function fixture(kind: 'database' | 'files' | 'both') {
   const ctx = createCommandContext();
   const project = ctx.repos.projects.create({ name: 'copy-attempt', defaultPlatform: 'railway' });
   const hasDatabase = kind !== 'files';
@@ -169,16 +166,37 @@ describe('copy evidence preservation', () => {
     await expect(f.migrate({ copyData: true, refreshData: true })).rejects.toThrow('Controller disconnected');
     const observe = vi.spyOn(transfer, 'verifyTransferResourcesAbsent').mockResolvedValue(false);
     const recover = vi.spyOn(transfer, 'recoverTerminalTransferResources').mockResolvedValue(false);
-    for (const options of [{ copyData: true, refreshData: true }, { cutover: true, confirmCutover: true }]) {
+    // Whatever is run next tries to finish the cleanup: it removes only that transfer's own ended leftovers, so a read-only check may do it too.
+    for (const options of [{ copyData: true, refreshData: true }, { cutover: true, confirmCutover: true }, { verifyOnly: true }]) {
       await expect(f.migrate(options)).resolves.toMatchObject({ status: 'blocked', message: expect.stringContaining('previous transfer') });
     }
     expect(observe).toHaveBeenCalledWith(expect.objectContaining({ gcpProjectId: 'fixture-project' }), resources);
     expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
     expect(f.releaseCalls()).toHaveLength(0);
-    expect(recover).toHaveBeenCalledTimes(1);
+    expect(recover).toHaveBeenCalledTimes(3);
     recover.mockResolvedValue(true);
     await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'migrated' });
     expect(transfer.runTransferJob).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks to try again in a few minutes, instead of blocking for good, while an interrupted job may still be settling', async () => {
+    const f = fixture('database');
+    const started = Date.now();
+    const resources = { gcpProjectId: 'fixture-project', region: 'us-central1', jobId: 'hv-migrate-database-0123456789abcdef', secretIds: ['hv-migrate-database-0123456789abcdef-dump-url'], ownershipToken: 'token', recordedAt: started };
+    vi.mocked(transfer.runTransferJob).mockImplementationOnce(async (context) => {
+      await context.recordTransferResources!(resources);
+      throw new Error('Controller disconnected');
+    });
+    await expect(f.migrate({ copyData: true, refreshData: true })).rejects.toThrow('Controller disconnected');
+    // The job is not there. Its creation may still be in flight, so that alone does not clear the record.
+    const observe = vi.spyOn(transfer, 'verifyTransferResourcesAbsent').mockResolvedValue(true);
+    const recover = vi.spyOn(transfer, 'recoverTerminalTransferResources').mockResolvedValue(false);
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toEqual({ status: 'blocked', message: expect.stringMatching(/Try again in 10 minutes; what it left is then removed first\. Nothing new was started\.$/) });
+    expect(observe).not.toHaveBeenCalled();
+    expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
+    vi.useFakeTimers({ now: started + 10 * 60_000, toFake: ['Date'] });
+    recover.mockResolvedValue(true);
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'migrated' });
   });
 
   it('does not touch target data when the incomplete attempt cannot be persisted', async () => {
@@ -352,9 +370,28 @@ describe('all declared application buckets are required', () => {
   });
 });
 
-describe('current source credential handoff', () => {
+/** The project's bucket as Hypervibe's object listing and deletion see it. `refuseDelete` answers every deletion with HTTP 403. */
+function exportBucket(names: string[] = [], refuseDelete = false) {
+  const objects = new Map(names.map((name, index) => [name, String(index + 1)]));
+  const deleted: string[] = [];
+  vi.mocked(globalThis.fetch).mockImplementation(async (input, init = {}) => {
+    const url = new URL(String(input));
+    if (url.hostname !== 'storage.googleapis.com') throw new Error('Unexpected external request');
+    const object = /^\/storage\/v1\/b\/[^/]+\/o\/(.+)$/.exec(url.pathname)?.[1];
+    if (!object) return Response.json({ items: [...objects].filter(([name]) => name.startsWith(url.searchParams.get('prefix') ?? '')).map(([name, generation]) => ({ name, generation })) });
+    if (init.method !== 'DELETE' || refuseDelete) return Response.json({}, { status: 403 });
+    const name = decodeURIComponent(object);
+    if (objects.get(name) !== url.searchParams.get('generation')) return Response.json({}, { status: 404 });
+    objects.delete(name);
+    deleted.push(name);
+    return new Response(null, { status: 204 });
+  });
+  return { objects, deleted, add: (name: string) => objects.set(name, String(objects.size + 100)) };
+}
+
+describe('private source values of a Railway copy', () => {
   function railwayFixture() {
-    const f = fixture('database', 'current');
+    const f = fixture('database');
     const store = new SpecStore();
     store.merge(f.project, { environments: {
       source: { database: { provider: 'railway' } },
@@ -450,12 +487,77 @@ describe('current source credential handoff', () => {
     it('reports why the private export inside Railway refused, which ends normally with its reason (#854)', async () => {
       const f = inspection();
       expect(await f.call(await f.preview())).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
-      vi.spyOn(transfer, 'transferCredentialHandoffProblem').mockReturnValue(undefined);
       const reason = 'The source database identity could not be verified; no data was replaced.';
+      exportBucket();
       f.runPrivateTask.mockImplementation(async () => ({ exitCode: 0, output: 'HV_TRANSFER_RESULT ' + JSON.stringify({ ok: false, error: reason }) }));
       const result = await f.migrate({ copyData: true, refreshData: true });
       expect(f.runPrivateTask.mock.calls.some(([job]) => job.command.includes('pg_dump'))).toBe(true);
       expect(result).toMatchObject({ status: 'blocked', message: `The private export inside Railway did not complete: ${reason}` });
+    });
+
+    it('copies a private Railway database: the export link reaches the Google Cloud job as a private value and appears nowhere else', async () => {
+      const f = inspection();
+      expect(await f.call(await f.preview())).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
+      const asked = await f.migrate({ refreshData: true });
+      expect(asked).toMatchObject({ status: 'needs_copy_approval', message: expect.stringContaining(transfer.TRANSFER_SECRET_NOTICE) });
+      expect(f.runPrivateTask.mock.calls.some(([job]) => job.command.includes('pg_dump'))).toBe(false);
+      // An export an earlier attempt left, a test file of another feature under the same folder, and another target's export.
+      const bucket = exportBucket(['migrations/target/1700000000000.dump', 'migrations/target/hypervibe-access-probe-1', 'migrations/other/1700000000000.dump']);
+      let duringRestore: string[] = [];
+      vi.mocked(transfer.runTransferJob).mockImplementation(async () => { duringRestore = [...bucket.objects.keys()]; return { ok: true, target: manifest, restoreWarnings: 0 } as any; });
+      f.runPrivateTask.mockImplementation(async () => { bucket.add('migrations/target/1800000000000.dump'); return { exitCode: 0, output: 'HV_TRANSFER_RESULT ' + JSON.stringify({ ok: true, source: manifest, sourceIdentity: '42:617070' }) }; });
+      const result = await f.migrate({ copyData: true, refreshData: true });
+      expect(result).toMatchObject({ status: 'migrated', database: { tables: 1, rows: '1', match: true } });
+      // The earlier export was gone before this one was made; this one was there for the restore and is gone after it. Nothing else was touched.
+      expect(duringRestore.sort()).toEqual(['migrations/other/1700000000000.dump', 'migrations/target/1800000000000.dump', 'migrations/target/hypervibe-access-probe-1']);
+      expect(bucket.deleted).toEqual(['migrations/target/1700000000000.dump', 'migrations/target/1800000000000.dump']);
+      expect([...bucket.objects.keys()].sort()).toEqual(['migrations/other/1700000000000.dump', 'migrations/target/hypervibe-access-probe-1']);
+      expect(f.runPrivateTask.mock.calls.some(([job]) => job.command.includes('pg_dump'))).toBe(true);
+      const [, job] = vi.mocked(transfer.runTransferJob).mock.calls[0]!;
+      expect(job.sourceSecrets).toEqual({ DUMP_URL: 'https://fixture.invalid/private-dump' });
+      expect(JSON.stringify([job.env, job.script, job.secretRefs, asked, result, f.current()])).not.toContain('private-dump');
+      expect(f.current().copiedAt).not.toBe(oldCopiedAt);
+    });
+
+    it.each(['refuses', 'fails', 'cannot be read'] as const)('deletes the database export file when the restore %s', async (end) => {
+      const f = inspection();
+      expect(await f.call(await f.preview())).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
+      const bucket = exportBucket();
+      f.runPrivateTask.mockImplementation(async () => { bucket.add('migrations/target/1800000000000.dump'); return { exitCode: 0, output: 'HV_TRANSFER_RESULT ' + JSON.stringify({ ok: true, source: manifest, sourceIdentity: '42:617070' }) }; });
+      vi.mocked(transfer.runTransferJob).mockImplementation(async () => {
+        if (end === 'fails') throw new Error('The transfer execution failed.');
+        return (end === 'refuses' ? { ok: false, error: 'The target database identity could not be verified; no data was replaced.' } : { ok: true, target: { ...manifest, tables: {} }, restoreWarnings: 0 }) as any;
+      });
+      const copy = f.migrate({ copyData: true, refreshData: true });
+      if (end === 'fails') await expect(copy).rejects.toThrow('The transfer execution failed.');
+      else expect(await copy).toMatchObject({ status: 'blocked' });
+      expect(bucket.deleted).toEqual(['migrations/target/1800000000000.dump']);
+      expect(bucket.objects.size).toBe(0);
+    });
+
+    it('does not count a copy whose database export file could not be deleted, and exports nothing while an earlier one cannot be removed', async () => {
+      const f = inspection();
+      expect(await f.call(await f.preview())).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
+      const bucket = exportBucket(['migrations/target/1700000000000.dump'], true);
+      const result = await f.migrate({ copyData: true, refreshData: true });
+      expect(result).toEqual({ status: 'blocked', message: expect.stringMatching(/^A database export file may remain under migrations\/target\/ in bucket \S+ and could not be deleted\. .* Nothing was exported or changed\.$/) });
+      expect(f.runPrivateTask.mock.calls.some(([job]) => job.command.includes('pg_dump'))).toBe(false);
+      expect(transfer.runTransferJob).not.toHaveBeenCalled();
+      expect(bucket.objects.size).toBe(1);
+      expect(f.current().copyAttempt?.status).toBe('incomplete');
+    });
+
+    it('never repeats a signed link that Railway or the export task reports back', async () => {
+      const f = inspection();
+      expect(await f.call(await f.preview())).toMatchObject({ ok: true, data: { status: 'source_inspected' } });
+      exportBucket();
+      // The upload link as this copy signs it, and another signed link of the same kind.
+      const other = 'https://storage.googleapis.com/bucket/migrations/target/1.dump?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=0123456789abcdef';
+      f.runPrivateTask.mockImplementation((async ({ variables }: { variables: Record<string, string> }) => ({ exitCode: undefined, output: '',
+        error: `GraphQL Error: serviceCreate failed: {"variables":{"UPLOAD_URL":"${variables.UPLOAD_URL}"},"also":"${other}"}` })) as never);
+      const result = await f.migrate({ copyData: true, refreshData: true });
+      expect(result).toMatchObject({ status: 'blocked', message: expect.stringContaining('The private export inside Railway did not complete (GraphQL Error: serviceCreate failed') });
+      expect(JSON.stringify(result)).not.toMatch(/private-dump|X-Goog-Signature|0123456789abcdef/);
     });
 
     it('accepts explicit action confirmation without browser consent', async () => {
@@ -466,41 +568,27 @@ describe('current source credential handoff', () => {
     });
   });
 
-  it('stops before exporting a private Railway dump and keeps the previous receipt', async () => {
-    const f = railwayFixture();
-    vi.mocked(transfer.runTransferJob).mockRestore();
-    const result = await f.migrate({ copyData: true, refreshData: true });
-    expect(f.runPrivateTask.mock.calls.some(([job]) => job.command.includes('pg_dump'))).toBe(false);
-    expect(f.current().copiedAt).toBe(oldCopiedAt);
-    expect(result).toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
-    expect(launch.launchEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ stopAfter: 'infrastructure' }));
-  });
-
-  it('keeps Railway serving when the final copy cannot receive its private inputs', async () => {
+  it('says in the final-copy approval that the source access is held in a temporary secret, and changes nothing before it is given', async () => {
     const f = railwayFixture();
     vi.spyOn(readiness, 'migrationCutoverReadiness').mockResolvedValue({ domain: 'source.example.com', alreadyForwarding: false, problems: [] });
     const registry = vi.spyOn(commands, 'createCommandRegistry').mockReturnValue({ get: () => ({
       execute: async () => ({ ok: false, error: { message: 'Unexpected source pause' } }),
     }) } as any);
     const before = f.store.get(f.project)!.spec;
-    const result = await f.migrate({ cutover: true, confirmCutover: true });
+    const result = await f.migrate({ cutover: true });
     expect(f.store.get(f.project)!.spec).toEqual(before);
     expect(registry).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
-  });
-
-  it('finishes target preparation and identifies an unavailable copy before asking for its approval', async () => {
-    const f = railwayFixture();
-    await expect(f.migrate({ refreshData: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
-    expect(launch.launchEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ stopAfter: 'infrastructure' }));
-    expect(f.current().copiedAt).toBe(oldCopiedAt);
-  });
-
-  it('uses the previously observed major for target preparation without starting a Railway service', async () => {
-    const f = railwayFixture();
-    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
     expect(f.runPrivateTask).not.toHaveBeenCalled();
-    expect(launch.launchEnvironment).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ stopAfter: 'infrastructure' }));
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: 'needs_cutover_approval', steps: expect.arrayContaining([expect.stringContaining(transfer.TRANSFER_SECRET_NOTICE)]) });
+  });
+
+  it('does not copy again on the strength of an earlier look at the source: a new copy needs the source reviewed first', async () => {
+    const f = railwayFixture();
+    await expect(f.migrate({ copyData: true, refreshData: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/source version could not be reviewed/i) });
+    expect(f.runPrivateTask).not.toHaveBeenCalled();
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+    expect(f.current().copiedAt).toBe(oldCopiedAt);
   });
 
   it('saves the exact private version inspection for review without reading SQL or starting a service', async () => {
@@ -525,7 +613,7 @@ describe('current source credential handoff', () => {
     const applied = await f.migrate({ planId: result.planId, confirmActions: result.confirmActions });
     expect(applied).toMatchObject({ status: 'source_inspected', inventory: { versionNumber: 170002, tables: 4, estimatedRows: '20' } });
     expect(f.versionInspection.inspect).toHaveBeenCalledTimes(1);
-    expect(await f.migrate()).toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
+    expect(await f.migrate()).toMatchObject({ status: 'needs_copy_approval', message: expect.stringContaining(transfer.TRANSFER_SECRET_NOTICE) });
     expect(f.store.get(f.project)?.spec.environments.target.database?.version).toBe(17);
     expect(f.versionInspection.inspect).toHaveBeenCalledTimes(1);
     expect(f.current().sourceMajor).toBeUndefined();
@@ -669,11 +757,13 @@ describe('current source credential handoff', () => {
     expect(transfer.runTransferJob).not.toHaveBeenCalled();
   });
 
-  it('stops verification before asking for bucket credentials that cannot reach the job', async () => {
-    const f = fixture('files', 'current');
-    await expect(f.migrate({ verifyOnly: true })).resolves.toMatchObject({ status: 'blocked', message: expect.stringMatching(/handoff/i) });
-    expect(adapterFactory.getStorageAdapter).not.toHaveBeenCalled();
-    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+  it('hands a bucket check the source access keys as private values only, and returns none of them', async () => {
+    const f = fixture('files');
+    const result = await f.migrate({ verifyOnly: true });
+    expect(result).toMatchObject({ status: 'verified' });
+    const [, job] = vi.mocked(transfer.runTransferJob).mock.calls[0]!;
+    expect(job.sourceSecrets).toEqual({ RCLONE_CONFIG_SRC_ACCESS_KEY_ID: 'fixture-key', RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: 'fixture-secret' });
+    expect(JSON.stringify([job.env, job.script, result, f.current()])).not.toMatch(/fixture-key|fixture-secret/);
   });
 
   it('keeps a read-only Railway database comparison from launching unreviewed native tasks', async () => {

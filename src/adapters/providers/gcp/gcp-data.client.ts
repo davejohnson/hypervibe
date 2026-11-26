@@ -53,9 +53,10 @@ export function readBucket(token: string, bucket: string): Promise<Response> {
 }
 
 /** One page of a bucket's objects, every stored version included. */
-export function listBucketObjects(token: string, bucket: string, pageToken?: string): Promise<Response> {
+export function listBucketObjects(token: string, bucket: string, pageToken?: string, prefix?: string): Promise<Response> {
   const url = new URL(`https://storage.googleapis.com/storage/v1/b/${bucket}/o`);
   url.searchParams.set('versions', 'true');
+  if (prefix) url.searchParams.set('prefix', prefix);
   url.searchParams.set('fields', 'items(name,generation),nextPageToken');
   if (pageToken) url.searchParams.set('pageToken', pageToken);
   return fetchWithRetry(url.toString(), { headers: { Authorization: `Bearer ${token}` } });
@@ -114,6 +115,8 @@ export interface TransferResources {
   secretIds: string[];
   ownershipToken?: string;
   jobUid?: string;
+  /** When this record was last written (ms since 1970): at the start of a copy job, and again just before its run is requested. */
+  recordedAt?: number;
   /** Written before jobs.create and advanced durably before the first :run request. */
   probe?: { stage: 'before-run' | 'run-may-be-submitted'; serviceAccount: string; etag?: string };
 }

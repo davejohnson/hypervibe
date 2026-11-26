@@ -69,6 +69,17 @@ export function addSecretVersion(token: string, gcpProjectId: string, secretId: 
   });
 }
 
+/**
+ * Creates an empty container that Secret Manager itself deletes after `ttlSeconds`, whatever becomes of its creator.
+ * Only for a short-lived secret that belongs to one temporary job; every lasting container is OpenTofu's to create.
+ * Attempted once: a thrown error means the outcome is unknown.
+ */
+export function createTemporarySecret(token: string, gcpProjectId: string, secretId: string, labels: Record<string, string>, ttlSeconds: number): Promise<Response> {
+  return request(token, `${API}/projects/${gcpProjectId}/secrets?secretId=${encodeURIComponent(secretId)}`, {
+    method: 'POST', body: JSON.stringify({ labels, replication: { automatic: {} }, ttl: `${ttlSeconds}s` }),
+  });
+}
+
 export function deleteSecret(token: string, gcpProjectId: string, secretId: string): Promise<Response> {
   return request(token, secretUrl(gcpProjectId, secretId), { method: 'DELETE' });
 }

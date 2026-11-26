@@ -69,7 +69,7 @@ export async function startPostgres(prefix: string): Promise<LocalPostgres> {
 
 /** Secret Manager as the real client sees it. `loseNextAnswer` stores the next version and then drops the connection, as a lost acknowledgement does. */
 export interface FakeSecretManager {
-  state: { secrets: Map<string, { labels: Record<string, string>; versions: string[] }>; loseNextAnswer: boolean; failNextAccess: boolean; sent: string[];
+  state: { secrets: Map<string, { labels: Record<string, string>; versions: string[]; ttl?: string }>; loseNextAnswer: boolean; failNextAccess: boolean; sent: string[];
     /** Runs once, while the next value for this secret is being stored. */
     whileStoring?: { secretId: string; run: () => Promise<void> } };
   answer(input: string | URL, init?: RequestInit): Promise<Response | undefined>;
@@ -91,10 +91,18 @@ export function fakeSecretManager(gcpProjectId: string): FakeSecretManager {
     const url = new URL(String(input));
     if (url.hostname !== 'secretmanager.googleapis.com') return undefined;
     const method = init?.method ?? 'GET';
+    if (url.pathname === `/v1/projects/${gcpProjectId}/secrets` && method === 'POST') {
+      const id = url.searchParams.get('secretId')!;
+      if (state.secrets.has(id)) return json({}, 409);
+      const body = JSON.parse(String(init!.body)) as { labels?: Record<string, string>; ttl?: string };
+      state.secrets.set(id, { labels: body.labels ?? {}, versions: [], ...(body.ttl ? { ttl: body.ttl } : {}) });
+      return json({ name: `projects/${gcpProjectId}/secrets/${id}`, labels: body.labels ?? {} });
+    }
     const parts = new RegExp(`^/v1/projects/${gcpProjectId}/secrets/([^/:]+)(.*)$`).exec(url.pathname);
     if (!parts) return json({}, 404);
     const held = state.secrets.get(parts[1]!);
     const name = `projects/${gcpProjectId}/secrets/${parts[1]}`;
+    if (parts[2] === '' && method === 'DELETE') return state.secrets.delete(parts[1]!) ? json({}) : json({}, 404);
     if (parts[2] === ':addVersion' && method === 'POST') {
       if (!held) return json({}, 404);
       const value = Buffer.from((JSON.parse(String(init!.body)) as { payload: { data: string } }).payload.data, 'base64').toString('utf8');

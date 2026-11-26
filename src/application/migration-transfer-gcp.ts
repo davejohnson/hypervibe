@@ -3,12 +3,11 @@ import { isDeepStrictEqual } from 'node:util';
 import { PROBE_IMAGE, probeCommand, probeEnvironment, parseAccessProbeFileEvidence, type AccessProbeFileEvidence, type AccessProbeJobInput } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
 export { parseAccessProbeFileEvidence, type AccessProbeFileEvidence, type AccessProbeJobInput } from '../adapters/providers/gcp/gcp-transfer-probe-workload.js';
 import { POSTGRES_DATABASE_IDENTITY_PATTERN, POSTGRES_DATABASE_IDENTITY_SQL } from '../domain/services/postgres-database-identity.js';
-import { readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
+import { addSecretVersion, createTemporarySecret, deleteSecret, readSecretContainer } from '../adapters/providers/gcp/gcp-secret-manager.client.js';
 import { cloudRunJobRequest, readCloudRunOperation } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { listLogEntries, readGcpProject } from '../adapters/providers/gcp/gcp-data.client.js';
 import type { TransferResources } from '../adapters/providers/gcp/gcp-data.client.js';
 export { signedObjectUrl, type TransferResources } from '../adapters/providers/gcp/gcp-data.client.js';
-import { observeSecret } from './infrastructure-engine.js';
 
 /**
  * Data transfer that runs inside the target cloud, next to the target data.
@@ -16,8 +15,18 @@ import { observeSecret } from './infrastructure-engine.js';
  * A temporary Cloud Run job does the copy, so nothing depends on the user's
  * machine, its installed PostgreSQL tools or its internet connection. The job
  * runs as the app's runtime identity (which already reaches the target
- * database and bucket). Cloud Run receives reviewed Secret Manager references.
+ * database and bucket). Cloud Run receives Secret Manager references only.
  * The job emits transfer evidence and is removed after its execution.
+ *
+ * What the job needs of the source and must not be seen (a signed link to a
+ * database export, a source database URL, a source bucket's access keys) is
+ * held in one temporary secret per value, in the target project: written just
+ * before the job, mounted by reference at one pinned version, and deleted with
+ * the job. While it exists the target app's own identity can read it, as it
+ * can every secret of the project. That is accepted (owner's decision,
+ * 2026-11-26): one owner holds both sides of a migration. The isolated route
+ * (a copy account of its own and a container the app is denied, #747) is not
+ * used here.
  */
 export interface TransferContext {
   token: () => Promise<string>;
@@ -249,7 +258,7 @@ export interface TransferJob {
   image: string;
   script: string;
   env: Record<string, string>;
-  /** Private handoff input. Requires an engine-managed credential slot. */
+  /** env name -> private source value. Each travels in a temporary secret of its own and never in the job definition. */
   sourceSecrets: Record<string, string>;
   /** env name -> existing secret reference (for example the target DATABASE_URL). */
   secretRefs?: Record<string, { secretId: string; version: string }>;
@@ -259,12 +268,65 @@ export interface TransferJob {
   timeoutSeconds: number;
 }
 
-/** OpenTofu owns secret containers. The worker cannot receive private source values
- * until it has a reviewed migration-only container and pinned version for them. */
-export function transferCredentialHandoffProblem(needsSourceValue: boolean): string | undefined {
-  return needsSourceValue
-    ? 'This transfer needs an OpenTofu-managed credential handoff. Hypervibe cannot yet pass the private source data location or access keys to this Google Cloud job.'
-    : undefined;
+/**
+ * How long after a copy job's record was last written a request it made may still take effect at Google: a job being
+ * created, a run being started. Past it, a recorded job that is not there will not appear, and one that has no
+ * execution will not start.
+ */
+const SETTLE_MINUTES = 10;
+/** Minutes until a recorded transfer is past that time; 0 once it is, and for a record that carries no time. */
+export function transferSettleMinutes(resources: Pick<TransferResources, 'recordedAt'>, now = Date.now()): number {
+  if (typeof resources.recordedAt !== 'number' || !Number.isFinite(resources.recordedAt)) return 0;
+  return Math.max(0, Math.ceil((resources.recordedAt + SETTLE_MINUTES * 60_000 - now) / 60_000));
+}
+
+/** Said wherever a copy is put to the user for approval. */
+export const TRANSFER_SECRET_NOTICE = 'While a copy job runs, the access it needs to the source is held in a temporary secret in the Google Cloud project, which the app there could read; Hypervibe deletes that secret when the job ends.';
+
+const handoffSecretId = (jobId: string, name: string) => `${jobId}-${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
+/**
+ * Stores each private source value in a secret of its own and returns the references the job mounts.
+ * The ids were journalled before this runs, so whatever it leaves behind is found and deleted.
+ * No message here may carry a value.
+ */
+async function writeHandoffSecrets(context: TransferContext, resources: TransferResources, values: Record<string, string>, ttlSeconds: number): Promise<Array<Record<string, unknown>>> {
+  const references: Array<Record<string, unknown>> = [];
+  const labels = { 'managed-by': 'hypervibe', 'hv-temporary': 'true', 'hv-transfer': resources.ownershipToken! };
+  for (const [name, value] of Object.entries(values)) {
+    const secretId = handoffSecretId(resources.jobId, name);
+    let version: string | undefined;
+    try {
+      const created = await createTemporarySecret(await context.token(), context.gcpProjectId, secretId, labels, ttlSeconds);
+      if (!created.ok) throw new Error(`The temporary secret for the copy could not be created (HTTP ${created.status}).`);
+      const added = await addSecretVersion(await context.token(), context.gcpProjectId, secretId, value);
+      if (!added.ok) throw new Error(`The temporary secret for the copy could not be filled (HTTP ${added.status}).`);
+      const stored = await added.json().catch(() => undefined) as { name?: unknown } | undefined;
+      version = /\/versions\/([1-9][0-9]*)$/.exec(typeof stored?.name === 'string' ? stored.name : '')?.[1];
+    } catch (error) {
+      // A transport error is not repeated here: it may describe the request.
+      throw new Error(error instanceof Error && error.message.startsWith('The temporary secret for the copy') ? error.message : 'The temporary secret for the copy could not be written.');
+    }
+    if (!version) throw new Error('The temporary secret for the copy could not be pinned to one version.');
+    references.push({ name, valueSource: { secretKeyRef: { secret: secretId, version } } });
+  }
+  return references;
+}
+
+/** Deletes the journalled secrets that carry this transfer's own mark. One that does not is left alone and keeps the cleanup unfinished. */
+async function removeHandoffSecrets(context: TransferScope, resources: TransferResources): Promise<boolean> {
+  let gone = true;
+  for (const id of resources.secretIds) {
+    try {
+      const seen = await readSecretContainer(await context.token(), context.gcpProjectId, id);
+      if (seen.state === 'absent') continue;
+      if (seen.state !== 'present' || !resources.ownershipToken || seen.value.labels['managed-by'] !== 'hypervibe'
+          || seen.value.labels['hv-temporary'] !== 'true' || seen.value.labels['hv-transfer'] !== resources.ownershipToken) { gone = false; continue; }
+      const deleted = await deleteSecret(await context.token(), context.gcpProjectId, id);
+      if (!deleted.ok && deleted.status !== 404) gone = false;
+    } catch { gone = false; }
+  }
+  return gone;
 }
 
 type TemporaryJob = TransferJob | (Omit<TransferJob, 'purpose' | 'script'> & { purpose: 'access' });
@@ -314,11 +376,14 @@ export async function runAccessProbeJob(context: TransferContext, input: AccessP
 
 /** Runs one owned job to completion and returns its parsed result line. */
 async function runTemporaryJob<T extends JobResult>(context: TransferContext, job: TemporaryJob): Promise<T> {
-  const handoff = transferCredentialHandoffProblem(Object.keys(job.sourceSecrets).length > 0);
-  if (handoff) return { ok: false, error: handoff } as T;
   const id = `hv-migrate-${job.purpose}-${crypto.randomBytes(8).toString('hex')}`;
   const ownershipToken = crypto.randomUUID();
-  let resources: TransferResources = { gcpProjectId: context.gcpProjectId, region: context.region, jobId: id, secretIds: [], ownershipToken };
+  const secretIds = Object.keys(job.sourceSecrets).map((name) => handoffSecretId(id, name));
+  if (new Set(secretIds).size !== secretIds.length) return { ok: false, error: 'Two source values of this copy would share one temporary secret.' } as T;
+  // Journalled before anything is written, so a secret this run leaves behind is always found again.
+  if (secretIds.length && !context.recordTransferResources) return { ok: false, error: 'This copy has nowhere to record its temporary secret, so it was not started.' } as T;
+  let resources: TransferResources = { gcpProjectId: context.gcpProjectId, region: context.region, jobId: id, secretIds, ownershipToken,
+    ...(job.purpose === 'access' ? {} : { recordedAt: Date.now() }) };
   if (job.purpose === 'access') resources.probe = { stage: 'before-run', serviceAccount: context.runtimeServiceAccountEmail };
   if (!await verifyTransferResourcesAbsent(context, resources)) {
     return { ok: false, error: 'The temporary transfer job name could not be confirmed unused in the target project and region.' } as T;
@@ -333,6 +398,8 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
     for (const [name, ref] of Object.entries(job.secretRefs ?? {})) {
       secretEnv.push({ name, valueSource: { secretKeyRef: { secret: ref.secretId, version: ref.version } } });
     }
+    // Secret Manager deletes each of them by itself an hour after the job could last, should Hypervibe never return.
+    secretEnv.push(...await writeHandoffSecrets(context, resources, job.sourceSecrets, job.timeoutSeconds + 3600));
     const container: Record<string, unknown> = {
       image: job.image,
       ...(job.purpose === 'access' ? probeCommand : { command: ['/bin/sh'], args: ['-c', job.script] }),
@@ -361,12 +428,12 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
       throw new Error(`Creating the ${job.purpose} copy job failed (HTTP ${created.status}).`);
     }
     const creation = await waitOperation(context, await created.json());
-    if (creation.error) throw new Error('The transfer job could not be created.');
+    if (creation.error) { creationMayHaveStarted = false; throw new Error('The transfer job could not be created.'); }
     const createdJob = creation.response as { name?: string; uid?: string } | undefined;
     if (typeof createdJob?.uid !== 'string' || !createdJob.uid || !await scopedCloudRunName(context, createdJob.name, new RegExp(`^jobs/${id}$`))) {
       throw new Error('The created transfer job could not be identified.');
     }
-    resources = { ...resources, jobUid: createdJob.uid };
+    resources = { ...resources, jobUid: createdJob.uid, ...(job.purpose === 'access' ? {} : { recordedAt: Date.now() }) };
     await context.recordTransferResources?.(resources);
     const observedJob = await ownedJob(context, resources);
     if (!observedJob) throw new Error('The created job identity could not be verified.');
@@ -414,6 +481,13 @@ async function runTemporaryJob<T extends JobResult>(context: TransferContext, jo
   }
   if (executionMayBeRunning) {
     return { ok: false, error: `Completion of transfer job ${id} in ${context.gcpProjectId}/${context.region} is unverified. Its job identity is retained for recovery.` } as T;
+  }
+  if (thrown && creationMayHaveStarted && !resources.jobUid && job.purpose !== 'access') {
+    // Whether the job was created is not known. Deleting its secrets and forgetting it now would strand a job that still appears.
+    const appeared = await ownedJob(context, resources).catch(() => null);
+    if (appeared === undefined) {
+      return { ok: false, error: `Whether temporary job ${id} was created in ${context.gcpProjectId}/${context.region} is not known yet. Run the copy again in ${SETTLE_MINUTES} minutes; what this attempt left is removed first.` } as T;
+    }
   }
   let removed: boolean;
   if (resources.probe?.stage === 'before-run') {
@@ -506,6 +580,8 @@ async function ownedJob(context: TransferScope, resources: TransferResources): P
 
 /** jobs.delete cancels its executions and returns a long-running operation. Fence the delete to the observed revision. */
 async function removeTransferLeftovers(context: TransferScope, resources: TransferResources, terminalJob?: NativeJob): Promise<boolean> {
+  // Nothing is running that could still read them. Whether they are gone is part of every verdict below.
+  await removeHandoffSecrets(context, resources);
   try {
     for (let attempt = 0; attempt < 3; attempt++) {
       if (attempt) await new Promise(resolve => setTimeout(resolve, 2000));
@@ -568,13 +644,20 @@ export async function recoverTerminalTransferResources(context: TransferScope, r
         || !context.runtimeServiceAccountEmail || probe.serviceAccount !== context.runtimeServiceAccountEmail
         || !probe.serviceAccount.endsWith(`@${context.gcpProjectId}.iam.gserviceaccount.com`)
         || (probe.stage === 'run-may-be-submitted' && (!resources.jobUid || !probe.etag))) return false;
-  } else if (probe || !resources.jobUid) return false;
+  } else if (probe) return false;
   try {
     const job = await ownedJob(context, resources);
-    // A create can still arrive after its response was lost. Without a UID, a 404 does not settle that request.
-    if (!job) return !!resources.jobUid && verifyTransferResourcesAbsent(context, resources);
+    const settled = transferSettleMinutes(resources) === 0;
+    // A create can still arrive after its response was lost. Without a UID, a 404 does not settle that request: never for a
+    // test job, and for a copy job not until enough time has passed. Then only its temporary secrets are left to remove.
+    if (!job) return (!!resources.jobUid || (!probe && settled)) && removeTransferLeftovers(context, resources);
     if (probe?.stage === 'before-run') return await recoverUnsubmittedProbe(context, resources, job);
-    if (resources.secretIds.length || job.reconciling || !Number.isSafeInteger(job.executionCount) || !job.executionCount
+    // Google can report a job that never ran with an empty latestCreatedExecution. The UID is recorded before the first
+    // :run request: a copy job without one was never asked to run, and one whose record is old enough will not start now.
+    if (!probe && !job.executionCount && !job.latestCreatedExecution?.name) {
+      return !job.reconciling && (!resources.jobUid || settled) && removeTransferLeftovers(context, resources, job);
+    }
+    if (job.reconciling || !Number.isSafeInteger(job.executionCount) || !job.executionCount
         || !job.latestCreatedExecution?.name) return false;
     // Until at least one execution materializes a previously unacknowledged
     // :run could still be starting. A missing inventory is never terminal.
@@ -654,9 +737,7 @@ async function readResultLine(context: TransferContext, jobName: string, executi
         let parsed: Record<string, unknown>;
         try { parsed = JSON.parse(line.slice(line.indexOf(RESULT_MARKER) + RESULT_MARKER.length)); } catch { return undefined; }
         if (probe) return line.startsWith(RESULT_MARKER) ? parsed : undefined;
-        const errors = await listLogEntries(await context.token(), { resourceNames: [`projects/${context.gcpProjectId}`], filter: filter.replace(`textPayload:"${RESULT_MARKER.trim()}"`, 'textPayload:"HV_RESTORE_ERROR"'), pageSize: 5 }).then((response) => response.ok ? response.json() as Promise<{ entries?: Array<{ textPayload?: string }> }> : { entries: [] }).catch(() => ({ entries: [] }));
-        const sample = (errors.entries ?? []).map((entry) => (entry.textPayload ?? '').replace('HV_RESTORE_ERROR ', '').replace(/postgres(ql)?:\/\/\S+/g, '<url>').slice(0, 200));
-        return sample.length ? { ...parsed, restoreErrors: sample } : parsed;
+        return parsed;
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -689,9 +770,4 @@ export function s3SourceRemote(credentials: { endpoint: string; accessKeyId: str
     },
     secrets: { RCLONE_CONFIG_SRC_ACCESS_KEY_ID: credentials.accessKeyId, RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: credentials.secretAccessKey },
   };
-}
-
-export async function secretExists(context: TransferContext, secretId: string): Promise<boolean> {
-  const observed = await observeSecret(await context.token(), context.gcpProjectId, secretId);
-  return observed.state === 'present' && observed.value.hasEnabledVersion;
 }

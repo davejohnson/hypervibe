@@ -5,6 +5,8 @@ export function redactSensitiveString(value: string): string {
   return value
     .replace(/-----BEGIN [^-]+PRIVATE KEY-----[\s\S]*?-----END [^-]+PRIVATE KEY-----/g, REDACTED)
     .replace(/([a-z][a-z0-9+.-]*:\/\/)([^@\s/]+:[^@\s/]+)@/gi, `$1${REDACTED}@`)
+    // A signed link is its own credential: Google Cloud Storage (X-Goog-Signature) and S3-style (X-Amz-Signature, Signature).
+    .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]*[?&](?:X-Goog-Signature|X-Amz-Signature|Signature)=[^\s"'<>]*/gi, REDACTED)
     .replace(/\bgithub_pat_[A-Za-z0-9_]+/g, REDACTED)
     .replace(/\bgh[oprsu]_[A-Za-z0-9_]{20,}/g, REDACTED)
     .replace(/\bglpat-[A-Za-z0-9_-]{20,}/g, REDACTED)

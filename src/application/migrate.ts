@@ -37,10 +37,13 @@ import {
 import { RailwayAdapter } from '../adapters/providers/railway/railway.adapter.js';
 import { railwayExportPrefix } from '../domain/services/railway-export-prefix.js';
 import { buildSourceBucketName } from '../domain/services/cloud-prepare.execute.js';
+import { deleteBucketObject, listBucketObjects } from '../adapters/providers/gcp/gcp-data.client.js';
+import { redactSensitiveString } from '../utils/redact-sensitive-string.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import {
   databaseExportScript,
   verifyTransferResourcesAbsent,
+  transferSettleMinutes,
   recoverTerminalTransferResources,
   databaseManifestScript,
   storageCheckScript,
@@ -50,7 +53,7 @@ import {
   type DatabaseManifest,
   manifestsMatch,
   runTransferJob,
-  transferCredentialHandoffProblem,
+  TRANSFER_SECRET_NOTICE,
   databaseTransferScript,
   storageTransferScript,
   type DatabaseTransferResult,
@@ -431,12 +434,24 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     const scope = { gcpProjectId: context.gcpProjectId, region: context.region,
       token: () => context.adapter.engineAccessToken() };
     const retry = params.copyData && params.refreshData && !params.verifyOnly && !params.cutover;
-    const cleared = await verifyTransferResourcesAbsent(scope, pendingTransfer)
-      || (retry && await recoverTerminalTransferResources(scope, pendingTransfer));
+    const copyJob = !pendingTransfer.probe;
+    const wait = copyJob ? transferSettleMinutes(pendingTransfer) : 0;
+    // A copy job that is not there yet may still appear while its creation is in flight: its record is kept until that time has passed.
+    const inFlight = copyJob && !pendingTransfer.jobUid && wait > 0;
+    // Finishing a copy job's cleanup removes only what carries that transfer's own mark and has ended or never ran, so any run may do it.
+    const cleared = (!inFlight && await verifyTransferResourcesAbsent(scope, pendingTransfer))
+      || ((retry || copyJob) && await recoverTerminalTransferResources(scope, pendingTransfer));
+    if (!cleared && copyJob && wait > 0) {
+      return { status: 'blocked', message: `The previous transfer into ${params.to} (job ${pendingTransfer.jobId}) was interrupted and may still be settling. Try again in ${wait} minute${wait === 1 ? '' : 's'}; what it left is then removed first. Nothing new was started.` };
+    }
     if (!cleared) {
       return { status: 'blocked', message: `Cleanup of the previous transfer into ${params.to} is unverified for job ${pendingTransfer.jobId}. A reviewed refresh can finish cleanup once its recorded execution is terminal. No replacement copy was started.` };
     }
     lease.record(null);
+  }
+  // A copy that died may have left its database export file behind. Whatever is run next removes it; a new copy insists on it.
+  if (sourceSpec.database?.provider === 'railway') {
+    await removeRailwayExports(() => context.adapter.engineAccessToken(), buildSourceBucketName(context.gcpProjectId), params.to);
   }
   const environment = () => ctx.repos.environments.findById(context.environment.id) ?? context.environment;
   const recorded = (environment().platformBindings as { engine?: EngineBinding }).engine;
@@ -520,12 +535,12 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     return { status: 'blocked', message: 'The saved copy does not prove that every requested database and file bucket matched. Run hv_migrate with copyData=true and refreshData=true to make a verified copy before releasing or moving traffic.' };
   }
 
-  // A Railway export needs its signed download URL, other databases need their
-  // source URL, and bucket transfers need source access keys inside the target job.
-  const copyHandoff = transferCredentialHandoffProblem(!!sourceSpec.database || buckets.length > 0);
+  // A Railway export hands the target job its signed download URL, other databases their source URL, and bucket
+  // transfers the source's access keys: each in a temporary secret that exists only while its job does.
+  const needsSourceValue = !!sourceSpec.database || buckets.length > 0;
   if (params.cutover) {
     if (!completedCopy) return { status: 'blocked', message: `Migrate ${params.from} to ${params.to} and check the app there before the cutover.` };
-    return cutoverEnvironment(ctx, params, lease, copyHandoff);
+    return cutoverEnvironment(ctx, params, lease, needsSourceValue);
   }
 
   if (params.verifyOnly) {
@@ -533,7 +548,6 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     const copy = migration()!;
     const missing = selectionProblem();
     if (missing) return { status: 'blocked', message: missing };
-    if (copyHandoff) return { status: 'blocked', message: copyHandoff };
     const prepared = await prepareMigrationBuckets(params.project, sourceEnvironment, buckets);
     if (!prepared.prepared) return { status: 'blocked', message: prepared.blocked };
     const result = await verifyMigratedCopy({ lease, buckets: prepared.prepared, project: params.project, from: params.from, to: params.to, sourceSpec, sourceEnvironment, spec, context, environmentLabel,
@@ -545,9 +559,8 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
 
   // 3b. The target database runs at least the source's PostgreSQL major version.
   if (sourceSpec.database && spec.environments[params.to]!.database) {
-    // An earlier observation can size an independently prepared target while data
-    // transfer is unavailable. It cannot establish the source version for a new copy.
-    const known = reuseCopy || (completedCopy && sourceSpec.database.provider === 'railway' && copyHandoff) ? migration()?.sourceMajor : undefined;
+    // An earlier observation cannot establish the source version for a new copy.
+    const known = reuseCopy ? migration()?.sourceMajor : undefined;
     const hasKnownMajor = typeof known === 'number' && Number.isSafeInteger(known) && known > 0;
     const privateInspection = sourceSpec.database.provider === 'railway' && !hasKnownMajor;
     const sourceMajor = hasKnownMajor ? { major: known } : privateInspection
@@ -608,7 +621,6 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
       next: `${params.from} is unchanged and still serving. Check the app at ${Object.values(released.urls)[0] ?? 'its URL'}. The data was copied at ${copy.copiedAt}; run hv_migrate again with refreshData=true to copy it again before the final cutover.`,
     };
   }
-  if (copyHandoff) return { status: 'blocked', message: copyHandoff };
   const sourceAccess = sourceSpec.database && !privateRailwaySource ? await acquireManagedDatabaseAccess(params.project, sourceEnvironment) : undefined;
   if (sourceAccess && !sourceAccess.ok) return { status: 'blocked', message: `Could not open the source database: ${sourceAccess.error}` };
   try {
@@ -621,7 +633,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
         status: 'needs_copy_approval',
         ...(summary ? { database: { tables: summary.tables, rows: summary.rows, version: summary.version } } : {}),
         storage: storageNames,
-        message: `Hypervibe will copy ${what}${storageNames.length ? ` and every file in ${storageNames.join(', ')}` : ''} into ${params.to}, replacing anything there now. ${params.from}'s app, data and settings are not changed.`,
+        message: `Hypervibe will copy ${what}${storageNames.length ? ` and every file in ${storageNames.join(', ')}` : ''} into ${params.to}, replacing anything there now. ${params.from}'s app, data and settings are not changed.${needsSourceValue ? ` ${TRANSFER_SECRET_NOTICE}` : ''}`,
       };
     }
     const transfer: TransferContext = {
@@ -730,17 +742,28 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   const bucket = buildSourceBucketName(context.gcpProjectId);
   const object = `${railwayExportPrefix(params.to)}${Date.now()}.dump`;
   const sign = (method: 'PUT' | 'GET') => signedObjectUrl({ clientEmail: key.client_email, privateKey: key.private_key, bucket, object, method, expiresSeconds: 3600 });
+  // The export file is a copy of the whole database. None is left in the bucket: not from an earlier attempt, and not from this one, however it ends.
+  const exportsLeft = `A database export file may remain under ${railwayExportPrefix(params.to)} in bucket ${bucket} and could not be deleted. Run the copy again to remove it, or delete it there.`;
+  const noExports = () => removeRailwayExports(() => context.adapter.engineAccessToken(), bucket, params.to);
+  if (!await noExports()) return { blocked: `${exportsLeft} Nothing was exported or changed.` };
+  const source = railway.adapter;
+  const railwayScope = { projectId: bindings.projectId, environmentId: bindings.environmentId };
+  const targetSecretVersion = secret.value.latestVersion;
+  const exportAndRestore = async (): Promise<NonNullable<Extract<MigrateResult, { status: 'migrated' }>['database']> | { blocked: string; details?: unknown }> => {
+  const links = [sign('PUT'), sign('GET')];
+  // What Railway or the task reports may quote the request it was given, links included.
+  const safe = (text: string) => links.reduce((kept, link) => kept.split(link).join('[redacted]'), redactSensitiveString(text)).slice(0, 300);
   // The newest client reads every supported older server.
-  const exported = await railway.adapter.runPrivateTask({
-    projectId: bindings.projectId, environmentId: bindings.environmentId, image: 'postgres:18-alpine', command: databaseExportScript(),
-    variables: { SOURCE_DATABASE_URL: `\${{${databaseServiceName}.DATABASE_URL}}`, UPLOAD_URL: sign('PUT') }, timeoutMs: 30 * 60 * 1000,
+  const exported = await source.runPrivateTask({
+    ...railwayScope, image: 'postgres:18-alpine', command: databaseExportScript(),
+    variables: { SOURCE_DATABASE_URL: `\${{${databaseServiceName}.DATABASE_URL}}`, UPLOAD_URL: links[0]! }, timeoutMs: 30 * 60 * 1000,
   });
-  const cleanedUp = railway.adapter.lastPrivateTaskCleanup;
+  const cleanedUp = source.lastPrivateTaskCleanup;
   const exportResult = parseTransferResult(exported.output) as { ok?: boolean; error?: unknown; source?: DatabaseManifest; sourceIdentity?: unknown } | undefined;
   if (exported.exitCode !== 0 || !exportResult?.ok || !exportResult.source) {
     // A refusal ends the task normally and gives its reason in the result line, as the copy job in Google Cloud does.
     const refusal = exported.exitCode === 0 && exportResult?.ok === false && typeof exportResult.error === 'string' ? exportResult.error : undefined;
-    return { blocked: `The private export inside Railway did not complete${refusal ? `: ${refusal}` : ` (${exported.error ?? `exit ${exported.exitCode ?? 'unknown'}`}).`}${cleanedUp ? '' : ' Its temporary task may still exist in Railway; Hypervibe will report it in hv_status.'}` };
+    return { blocked: `The private export inside Railway did not complete${refusal ? `: ${safe(refusal)}` : ` (${exported.error ? safe(exported.error) : `exit ${exported.exitCode ?? 'unknown'}`}).`}${cleanedUp ? '' : ' Its temporary task may still exist in Railway; Hypervibe will report it in hv_status.'}` };
   }
   // The temporary task can read the source database. Nothing is restored while it may still exist.
   if (!cleanedUp) return { blocked: 'The private export finished, but its temporary task could not be removed from Railway, and that task can read the source database. Remove the temporary Hypervibe task service in Railway (hv_status lists it), then run the migration again. The target was not changed.' };
@@ -748,17 +771,47 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   if (!sourceIdentity) return { blocked: 'The private export did not verify the source database identity; the target was not changed.' };
   const restored = await runTransferJob<{ ok: boolean; error?: string; target?: DatabaseManifest; restoreWarnings?: number }>(transfer, {
     purpose: 'database', image: 'postgres:18-alpine', script: databaseRestoreScript(), env: { SOURCE_DATABASE_IDENTITY: sourceIdentity },
-    sourceSecrets: { DUMP_URL: sign('GET') },
-    secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion } },
+    sourceSecrets: { DUMP_URL: links[1]! },
+    secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: targetSecretVersion } },
     cloudSqlConnectionName: gcpDatabaseConnectionName(targetDatabase, context.region), timeoutSeconds: 3600,
   });
   if (!restored.ok) return { blocked: restored.error ?? 'Restoring the database in Google Cloud failed.' };
   const compared = manifestsMatch(exportResult.source, restored.target);
   const result = { tables: Object.keys(exportResult.source.tables).length, rows: exportResult.source.totalRows, match: compared.match,
     differences: compared.differences, restoreWarnings: restored.restoreWarnings ?? 0 };
-  const errors = (restored as { restoreErrors?: string[] }).restoreErrors ?? [];
-  if (!compared.match) return { blocked: `The copied database does not match the source: ${compared.differences.slice(0, 5).join('; ')}${errors.length ? `. Restore errors: ${errors.join(' | ')}` : ''}`, details: result };
+  if (!compared.match) return { blocked: `The copied database does not match the source: ${compared.differences.slice(0, 5).join('; ')}`, details: result };
   return result;
+  };
+  let outcome: Awaited<ReturnType<typeof exportAndRestore>>;
+  try { outcome = await exportAndRestore(); }
+  catch (error) { await noExports(); throw error; }
+  if (!await noExports()) return { blocked: 'blocked' in outcome ? `${outcome.blocked} ${exportsLeft}` : `The database was copied and matched, but the copy does not count yet. ${exportsLeft}` };
+  return outcome;
+}
+
+/**
+ * Deletes every database export file that copies into this target left in the project's bucket, every stored version of
+ * each. False when one may remain. Only one copy into a target runs at a time, so none of them is in use.
+ */
+async function removeRailwayExports(token: () => Promise<string>, bucket: string, to: string): Promise<boolean> {
+  const prefix = railwayExportPrefix(to);
+  try {
+    let pageToken: string | undefined;
+    for (let page = 0; page < 100; page++) {
+      const listed = await listBucketObjects(await token(), bucket, pageToken, prefix);
+      if (!listed.ok) return false;
+      const body = await listed.json() as { items?: Array<{ name?: string; generation?: string }>; nextPageToken?: string };
+      for (const item of body.items ?? []) {
+        if (typeof item.name !== 'string' || !item.name.startsWith(prefix) || !/^[0-9]+\.dump$/.test(item.name.slice(prefix.length))) continue;
+        if (typeof item.generation !== 'string') return false;
+        const deleted = await deleteBucketObject(await token(), bucket, item.name, item.generation);
+        if (!deleted.ok && deleted.status !== 404) return false;
+      }
+      if (!body.nextPageToken) return true;
+      pageToken = body.nextPageToken;
+    }
+    return false;
+  } catch { return false; }
 }
 
 /** Plans and applies the source environment, accepting only pause and traffic changes. */
@@ -816,7 +869,7 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
  * then its existing domain forwards to the target. The source's resources and
  * DNS stay in place. Recovery after target writes needs the newer data.
  */
-async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease, copyHandoff?: string): Promise<MigrateResult> {
+async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease, needsSourceValue: boolean): Promise<MigrateResult> {
   const store = new SpecStore();
   const { spec, revision } = store.get(params.project)!;
   const source = spec.environments[params.from]!;
@@ -856,13 +909,12 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
     if (done !== 'done') return done;
     return observeTrafficMove();
   }
-  if (copyHandoff) return { status: 'blocked', message: copyHandoff };
   if (!params.confirmCutover) {
     return {
       status: 'needs_cutover_approval', domain,
       steps: [
         `Pause ${params.from}: ${domain} shows a maintenance page (HTTP 503) and its web and worker services are suspended. Let running jobs and uploads finish first.`,
-        `Copy the ${params.from} database and files to ${params.to} again, replacing the earlier copy, and verify every table and file.`,
+        `Copy the ${params.from} database and files to ${params.to} again, replacing the earlier copy, and verify every table and file.${needsSourceValue ? ` ${TRANSFER_SECRET_NOTICE}` : ''}`,
         ...(Object.keys(retarget).length ? [`Set ${Object.keys(retarget).join(', ')} on ${params.to} to ${sourceOrigin}, so links and logins use ${domain}.`] : []),
         `Send ${domain} to ${params.to} (${web}). ${params.from} stays paused with its data. ${recovery}`,
       ],

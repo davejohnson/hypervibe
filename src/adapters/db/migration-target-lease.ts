@@ -37,11 +37,11 @@ export function acquireMigrationTargetLease(projectId: string, target: string) {
           return;
         }
         // Under the exclusive lock, the only allowed refinement is learning the
-        // immutable UID of the job this attempt created.
+        // immutable UID of the job this attempt created, with the time that was recorded.
         const previous = pending();
-        if (previous && !isDeepStrictEqual(
-          { ...previous, jobUid: previous.jobUid ?? resources.jobUid }, { ...resources, jobUid: resources.jobUid },
-        )) {
+        const fixed = ({ jobUid: _uid, recordedAt: _at, ...rest }: TransferResources) => rest;
+        if (previous && (!isDeepStrictEqual(fixed(previous), fixed(resources))
+          || (previous.jobUid !== undefined && previous.jobUid !== resources.jobUid))) {
           throw new Error('An earlier transfer still has outstanding cleanup.');
         }
         db.prepare('INSERT OR REPLACE INTO pending (id, resources) VALUES (1, ?)').run(JSON.stringify(resources));
