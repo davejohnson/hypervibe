@@ -1,8 +1,8 @@
 {
  "scripts": {
-  "databaseTransferScript": "cac694dc8cf7c2f4bf2a78576c2212bf0c3783509915810f4e1f103968f2fca5",
+  "databaseTransferScript": "4f765af351626a80310a1b11680a4d1b554a98ac82e0973d4749231f159f021b",
   "databaseExportScript": "c550d48083b478ba090555e37dc0aec6282039313f4cb8f1f45cc05632830df8",
-  "databaseRestoreScript": "45b85875670ad81ef1f18da45c6875e8448b5ecb01cd147739b82ac02593b3aa",
+  "databaseRestoreScript": "e9465afeab922a345ad4cc2ae9cb6bb9252d9f0ecae329b5cccf42d7a5643520",
   "databaseManifestScript": "755550e6b6b59c31f9085458a2f1e95b70f3b71a40fc462d9c348d886668599d",
   "storageTransferScript": "cd1dbf02eaa1518bd50f86053386ab8760408d973fedd299fbb241ff0b36b5f3",
   "storageCheckScript": "04b93d0b1d391f6d60e46cba3c05087f0b47e4727766b6c39593a32e740f41dd"

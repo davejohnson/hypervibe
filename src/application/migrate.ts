@@ -54,6 +54,8 @@ import {
   manifestsMatch,
   runTransferJob,
   TRANSFER_SECRET_NOTICE,
+  databaseCopyTools,
+  postgresToolsImage,
   databaseTransferScript,
   storageTransferScript,
   type DatabaseTransferResult,
@@ -558,6 +560,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
   }
 
   // 3b. The target database runs at least the source's PostgreSQL major version.
+  let copySourceMajor: number | undefined;
   if (sourceSpec.database && spec.environments[params.to]!.database) {
     // An earlier observation cannot establish the source version for a new copy.
     const known = reuseCopy ? migration()?.sourceMajor : undefined;
@@ -569,6 +572,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     if ('status' in sourceMajor) return sourceMajor;
     if ('blocked' in sourceMajor) return { status: 'blocked', message: sourceMajor.blocked };
     if (!privateInspection) recordMigration({ sourceMajor: sourceMajor.major });
+    copySourceMajor = sourceMajor.major;
     const targetMajor = spec.environments[params.to]!.database!.version ?? 16;
     if (sourceMajor.major > targetMajor) {
       if (sourceMajor.major > 18) return { status: 'blocked', message: `The source runs PostgreSQL ${sourceMajor.major}, which Cloud SQL does not offer yet.` };
@@ -658,7 +662,8 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     const superseded = () => migration()?.copyAttempt?.id !== copyAttempt.id || migration()?.copyAttempt?.status !== 'incomplete' || !!selectionProblem();
     let database: Extract<MigrateResult, { status: 'migrated' }>['database'];
     if (privateRailwaySource) {
-      const copied = await copyPrivateRailwayDatabase(ctx, { project: params.project, sourceEnvironment, to: params.to, context, transfer, database: gcpDatabaseLocation(context.gcpProjectId, (environment().platformBindings as { engine?: EngineBinding }).engine) });
+      const copied = await copyPrivateRailwayDatabase(ctx, { project: params.project, sourceEnvironment, to: params.to, context, transfer,
+        sourceMajor: copySourceMajor, targetMajor: spec.environments[params.to]!.database?.version ?? 16, database: gcpDatabaseLocation(context.gcpProjectId, (environment().platformBindings as { engine?: EngineBinding }).engine) });
       if ('blocked' in copied) return { status: 'blocked', message: copied.blocked, ...(copied.details ? { details: copied.details } : {}) };
       database = copied;
     } else if (sourceAccess && summary) {
@@ -667,7 +672,7 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
       const secret = await observeSecret(await transfer.token(), context.gcpProjectId, engineSecretId(params.to, ENGINE_DATABASE_URL_KEY));
       if (!targetDatabase || secret.state !== 'present' || !secret.value.latestVersion) return { status: 'blocked', message: 'The target database is not ready yet. Run hv_migrate again.' };
       const result = await sourceAccess.lease.withConnection((sourceUrl) => runTransferJob<DatabaseTransferResult>(transfer, {
-        purpose: 'database', image: `postgres:${major}-alpine`, script: databaseTransferScript(), env: {},
+        purpose: 'database', image: postgresToolsImage(major), script: databaseTransferScript(), env: {},
         sourceSecrets: { SOURCE_DATABASE_URL: sourceUrl },
         secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: secret.value.latestVersion! } },
         cloudSqlConnectionName: gcpDatabaseConnectionName(targetDatabase, context.region), timeoutSeconds: 3600,
@@ -724,9 +729,13 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   project: Project; sourceEnvironment: Environment; to: string;
   context: Awaited<ReturnType<typeof resolveEngineContext>> & { gcpProjectId: string };
   transfer: TransferContext; database?: GcpDatabaseLocation;
+  /** PostgreSQL major versions of the two servers: the source's from its reviewed inspection, the target's as it was created. */
+  sourceMajor?: number; targetMajor?: number;
 }): Promise<NonNullable<Extract<MigrateResult, { status: 'migrated' }>['database']> | { blocked: string; details?: unknown }> {
   const { context, transfer } = params;
   if (!('adapter' in context)) return { blocked: 'The target environment is not ready.' };
+  const tools = databaseCopyTools(params.sourceMajor, params.targetMajor);
+  if ('problem' in tools) return { blocked: tools.problem };
   const component = ctx.repos.components.findByEnvironmentAndType(params.sourceEnvironment.id, 'postgres');
   const bindings = params.sourceEnvironment.platformBindings as { projectId?: string; environmentId?: string };
   if (!component?.externalId || !bindings.projectId || !bindings.environmentId) return { blocked: 'The source Railway database is not tracked by Hypervibe.' };
@@ -753,9 +762,9 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   const links = [sign('PUT'), sign('GET')];
   // What Railway or the task reports may quote the request it was given, links included.
   const safe = (text: string) => links.reduce((kept, link) => kept.split(link).join('[redacted]'), redactSensitiveString(text)).slice(0, 300);
-  // The newest client reads every supported older server.
+  // The export runs with the source server's own version of the tools.
   const exported = await source.runPrivateTask({
-    ...railwayScope, image: 'postgres:18-alpine', command: databaseExportScript(),
+    ...railwayScope, image: tools.exportImage, command: databaseExportScript(),
     variables: { SOURCE_DATABASE_URL: `\${{${databaseServiceName}.DATABASE_URL}}`, UPLOAD_URL: links[0]! }, timeoutMs: 30 * 60 * 1000,
   });
   const cleanedUp = source.lastPrivateTaskCleanup;
@@ -770,7 +779,7 @@ async function copyPrivateRailwayDatabase(ctx: CommandContext, params: {
   const sourceIdentity = parsePostgresDatabaseIdentity(exportResult.sourceIdentity);
   if (!sourceIdentity) return { blocked: 'The private export did not verify the source database identity; the target was not changed.' };
   const restored = await runTransferJob<{ ok: boolean; error?: string; target?: DatabaseManifest; restoreWarnings?: number }>(transfer, {
-    purpose: 'database', image: 'postgres:18-alpine', script: databaseRestoreScript(), env: { SOURCE_DATABASE_IDENTITY: sourceIdentity },
+    purpose: 'database', image: tools.restoreImage, script: databaseRestoreScript(), env: { SOURCE_DATABASE_IDENTITY: sourceIdentity },
     sourceSecrets: { DUMP_URL: links[1]! },
     secretRefs: { DATABASE_URL: { secretId: engineSecretId(params.to, ENGINE_DATABASE_URL_KEY), version: targetSecretVersion } },
     cloudSqlConnectionName: gcpDatabaseConnectionName(targetDatabase, context.region), timeoutSeconds: 3600,
