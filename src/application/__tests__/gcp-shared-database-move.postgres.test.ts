@@ -38,7 +38,7 @@ type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 /** Google, as far as these commands look at it. Reached by the mocks below, which are hoisted above everything else in this file. */
 const google = vi.hoisted(() => ({
-  servers: [] as Array<{ name: string; region: string; state: string; connectionName: string; settings: { userLabels: Record<string, string>; deletionProtectionEnabled: boolean } }>,
+  servers: [] as Array<{ name: string; region: string; state: string; connectionName: string; databaseVersion?: string; settings: { userLabels: Record<string, string>; deletionProtectionEnabled: boolean } }>,
   secrets: new Map<string, { labels: Record<string, string>; versions: string[] }>(),
   /** Cloud Run service name -> "the DATABASE_URL secret version it runs|the server its socket is on". */
   services: new Map<string, string>(),
@@ -185,7 +185,8 @@ function standInPlan({ configuration, state, planId, verifyPlannedChanges }: Par
     const instance = files['shared-database.tf.json'].resource.google_sql_database_instance.shared;
     const present = google.servers.some((server) => server.name === instance.name);
     if (!present) {
-      add('google_sql_database_instance.shared', 'create', () => { google.servers.push({ name: instance.name, region: instance.region, state: 'RUNNABLE', connectionName: `${GCP}:${REGION}:${instance.name}`,
+      // Google reports the version a server really runs; the local server standing for this one runs whatever this machine has.
+      add('google_sql_database_instance.shared', 'create', () => { google.servers.push({ name: instance.name, region: instance.region, state: 'RUNNABLE', connectionName: `${GCP}:${REGION}:${instance.name}`, databaseVersion: `POSTGRES_${major}`,
         settings: { userLabels: instance.settings[0].user_labels, deletionProtectionEnabled: instance.settings[0].deletion_protection_enabled } }); });
     }
     const shown = { format_version: '1.2', resource_changes: [{ address: 'google_sql_database_instance.shared', type: 'google_sql_database_instance',
@@ -541,6 +542,12 @@ describe.runIf(major >= 15)('and back: moving that database from its own server 
     ownServer = record()!.instanceName as string;
     const before = { web: web(), urls: urls().length };
     expect(await withNoWorkloads(() => blockedBy(shared()))).toContain('No service of production uses its database');
+    // A shared server on another PostgreSQL version than the own server: refused before anything is made.
+    const sharedServer = google.servers.find((server) => server.settings.userLabels['hv-shared-database'])!;
+    sharedServer.databaseVersion = `POSTGRES_${major - 1}`;
+    expect(await blockedBy(shared())).toContain(`production's database server runs PostgreSQL ${major}; the app's shared database server runs ${major - 1}, and a move keeps the version`);
+    sharedServer.databaseVersion = `POSTGRES_${major}`;
+    expect(await tenants()).toEqual([]);
     expect(record()).toEqual({ instanceName: ownServer });
     const prepared = await plan(shared());
     expect(changes(prepared).sort()).toEqual(['create secret-container:hv-production-database-url-copy', 'create shared-database:allocate']);

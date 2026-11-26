@@ -74,7 +74,8 @@ const withoutMove = (record: SharedDatabaseRecord): SharedDatabaseRecord => { co
  * Whether this database can be moved at all, read as the app itself before anything is created or paid for: the copy
  * job's own questions, how big it is and, onto the shared server, that it needs nothing the shared server cannot give.
  */
-async function refuseUnmovable(cloud: SharedDatabaseCloud, name: string, held: { connectionName: string; login: string; password: string; databaseName: string }, ontoShared: boolean): Promise<void> {
+async function refuseUnmovable(cloud: SharedDatabaseCloud, name: string, held: { connectionName: string; login: string; password: string; databaseName: string }, sharedServerVersion?: number): Promise<void> {
+  const ontoShared = sharedServerVersion !== undefined;
   const facts = await cloud.withSession({ connectionName: held.connectionName, user: held.login, password: held.password, database: held.databaseName }, async (session) => {
     await session.query('SET search_path = pg_catalog');
     const size = await session.query(`SELECT pg_database_size(current_database())::text AS bytes, (current_setting('server_version_num')::int / 10000)::text AS major,
@@ -94,8 +95,8 @@ async function refuseUnmovable(cloud: SharedDatabaseCloud, name: string, held: {
   if (!Number.isFinite(facts.bytes) || facts.bytes > LARGEST_DATABASE_BYTES) {
     throw blocked(`${name}'s database is ${Number.isFinite(facts.bytes) ? shown(facts.bytes) : 'of unknown size'}; a move can copy at most ${shown(LARGEST_DATABASE_BYTES)} for now. Nothing was planned.`);
   }
-  if (ontoShared && facts.major !== SHARED_SERVER_MAJOR_VERSION) {
-    throw blocked(`${name}'s database server runs PostgreSQL ${facts.major}; the app's shared database server runs ${SHARED_SERVER_MAJOR_VERSION}, and a move keeps the version. Nothing was planned.`);
+  if (ontoShared && facts.major !== sharedServerVersion) {
+    throw blocked(`${name}'s database server runs PostgreSQL ${facts.major}; the app's shared database server runs ${sharedServerVersion}, and a move keeps the version. Nothing was planned.`);
   }
   if (ontoShared && facts.extensions) {
     throw blocked(`${name}'s database uses extensions (${String(facts.extensions).slice(0, 200)}) that the app's logins cannot install on the shared database server, so it must keep a server of its own. Nothing was planned.`);
@@ -169,7 +170,7 @@ export async function planMove(request: MovePlanRequest): Promise<DatabaseMove> 
     }
     // Nothing is created unless every workload runs this very connection: that is what is switched later, and what a failed switch falls back to.
     if (await oneRunningVersion(request) !== onShared.latestVersion) throw blocked(`${name}'s services do not run the newest version of its connection secret yet. Apply with "placement": "app" still on the database until nothing is left, then move it.`);
-    await refuseUnmovable(cloud, name, held, false);
+    await refuseUnmovable(cloud, name, held);
     return prepare(onShared.latestVersion!, false);
   }
   const own = record.move?.instanceName;
@@ -372,6 +373,10 @@ export async function planMoveToShared(request: MovePlanRequest & { prepared: Pr
     throw blocked(`Finish moving ${name}'s database onto the app's shared database server before changing its password: put "passwordGeneration" back to what it was until the move is done.`);
   }
   const ownConnection = `${scope.gcpProjectId}:${scope.region}:${own}`;
+  // The shared server's PostgreSQL version as Google reports it. One that does not exist yet is created with the version every shared server gets.
+  const listed = await cloud.listServers(scope.gcpProjectId);
+  if (listed.state === 'unknown') throw blocked(listed.reason);
+  const sharedVersion = listed.servers.find((server) => server.instanceName === prepared.reviewed.instanceName)?.majorVersion ?? SHARED_SERVER_MAJOR_VERSION;
   const copySecretId = databaseCopySecretId(secret.id);
   // Both secrets' versions are the move's own business meanwhile: a write cut short is put right by the step that made it, when it runs again.
   const base = { instanceName: own, ownServer: 'keep' as const, secretIds: [copySecretId, secret.id], after: [], reviewed: prepared.reviewed };
@@ -395,7 +400,7 @@ export async function planMoveToShared(request: MovePlanRequest & { prepared: Pr
       throw blocked(pinned.state === 'unknown' ? pinned.reason : `The newest version of ${secret.id} is not the connection to ${name}'s own database server. Nothing was planned.`);
     }
     if (await oneRunningVersion(request) !== seen.value.latestVersion) throw blocked(`${name}'s services do not run the newest version of its connection secret yet. Apply without "placement": "app" until nothing is left, then move the database.`);
-    await refuseUnmovable(cloud, name, held, true);
+    await refuseUnmovable(cloud, name, held, sharedVersion);
     return prepare(seen.value.latestVersion);
   }
   const pinnedVersion = await oneRunningVersion(request, prepared.credential.version);
@@ -407,7 +412,7 @@ export async function planMoveToShared(request: MovePlanRequest & { prepared: Pr
   const outage = 'How long depends on the size of the database and has not been measured';
   const metadata: StepMetadata = { operation: SHARED_DATABASE_OPERATION, step: 'switch', gcpProjectId: scope.gcpProjectId, region: scope.region, instanceName: String(prepared.reviewed.instanceName),
     databaseName: identity.names.database, tenantId: identity.tenantId, secretId: secret.id, labels: secret.labels, secretVersion: pinnedVersion,
-    own: { instanceName: own, secretVersion: prepared.credential.version, majorVersion: SHARED_SERVER_MAJOR_VERSION } };
+    own: { instanceName: own, secretVersion: prepared.credential.version, majorVersion: sharedVersion } };
   return { ...base, stage: 'switch', workloads: { connection: prepared.connection, secretVersion: prepared.credential.version },
     warnings: [`${TO_SHARED(name)} This plan is step 2. While it runs, ${name}'s app cannot reach its database and will return database errors until the copy is checked and its services have restarted. ${outage}. Run hv_plan again afterwards for step 3.`],
     before: [{ id: 'shared-database:switch', type: 'update', resource, verified: true, requiresConfirm: true,

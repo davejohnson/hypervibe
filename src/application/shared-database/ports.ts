@@ -16,6 +16,8 @@ export interface SeenServer {
   runnable: boolean;
   /** Google itself refuses to delete it while this is on. */
   deletionProtection: boolean;
+  /** The PostgreSQL major version Google reports for it, when it reports one. */
+  majorVersion?: number;
   labels: Record<string, string>;
 }
 

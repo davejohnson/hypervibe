@@ -900,7 +900,8 @@ copy job. Again the next round is read from what exists:
 
 1. **Prepare**: first the database is read as the app itself and refused,
    before anything is created, if the copy would refuse it, if it is too big,
-   if its server runs another PostgreSQL version than the shared server, or if
+   if its server runs another PostgreSQL version than the shared server
+   really does (as Google reports it; one not created yet gets version 16), or if
    it uses any extension beyond `plpgsql`. What the spec cannot have on the
    shared server (`size`, `version`, `deletionProtection: true`, a worker that
    counts pending work) is refused where specs are checked, as for any
