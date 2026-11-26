@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { localReviewBuild } from './local-review-build.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { reviewDetail, reviewIndex, reviewPagePolicy } from '../presentation/local-review.js';
@@ -72,7 +73,8 @@ export async function startLocalReviewServer(options: ReviewServerOptions): Prom
     const probe = /^\/health\?challenge=([a-f0-9]{32})$/.exec(url);
     if (probe && request.method === 'GET') {
       const proof = createHmac('sha256', capability).update(probe[1]).digest('hex');
-      response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ proof }));
+      // The build and process let a different Hypervibe build replace this server instead of showing its pages.
+      response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ proof, build: localReviewBuild(), pid: process.pid }));
       return;
     }
     const route = /^\/v\/([A-Za-z0-9_-]{32,128})(?:\/(?:r\/([A-Za-z0-9_-][\w.-]{0,255})(?:\/(report|approve))?)?)?$/.exec(url);
