@@ -1,3 +1,5 @@
+import { appCheckouts, behindMessage, checkoutFreshness } from '../lib/checkout-freshness.js';
+import { currentWorkspaceDirectories } from '../lib/workspace-context.js';
 import { withCommandReview } from './command-review.js';
 import { z } from 'zod';
 import './providers.js';
@@ -117,6 +119,49 @@ const ROOT_COMMANDS = new Set([
   'status',
 ]);
 
+type CommandInput = Record<string, unknown>;
+const always = (): boolean => true;
+/**
+ * The commands that read the app's setup from its checkout and then plan or change something, each with the calls of
+ * it that do. Every such call refuses, before doing anything, a checkout that is behind its upstream branch. Calls
+ * that only read are left out by their rule; commands not listed do not depend on the checkout's files.
+ */
+const CHECKOUT_GUARDED: Record<string, (input: CommandInput) => boolean> = {
+  // hv_plan saves a plan run for every scope, so every scope is held to this.
+  hv_plan: always,
+  hv_apply: always,
+  hv_deploy: always,
+  hv_launch: always,
+  hv_destroy: always,
+  hv_import: always,
+  hv_ci_trigger: always,
+  hv_appstore_submit: always,
+  // Comparing two existing databases reads only. inspectSource is not exempt: it still saves a setup (issue 882).
+  hv_migrate: (input) => input.verifyOnly !== true,
+  hv_rollback: (input) => input.action !== 'preview',
+  // Reading the setup stays possible; saving one does not.
+  hv_spec: (input) => input.spec !== undefined,
+  hv_secrets: (input) => input.action === 'collect' || input.action === 'rotate',
+};
+
+async function checkoutGuard(name: string, input: unknown): Promise<{ refusal?: CommandEnvelope; warning?: string }> {
+  const values = (input ?? {}) as CommandInput;
+  if (!CHECKOUT_GUARDED[name]?.(values)) return {};
+  // Every checkout the command could read this app from, not merely the first directory of the session.
+  const checkouts = appCheckouts(typeof values.project === 'string' ? values.project : undefined);
+  const unchecked: string[] = [];
+  for (const root of checkouts) {
+    const freshness = await checkoutFreshness(root);
+    if (freshness.state === 'behind') {
+      return { refusal: commandError('VALIDATION', behindMessage(freshness, checkouts.length > 1 || (currentWorkspaceDirectories()?.length ?? 1) > 1 ? root : undefined), {
+        hint: 'Hypervibe reads the app\'s setup from files in this checkout; an older checkout describes an older app. Nothing was read, planned or changed.' }) };
+    }
+    if (freshness.state === 'unchecked') unchecked.push(freshness.reason);
+  }
+  // Not knowing is said, never passed off as up to date.
+  return unchecked.length ? { warning: `Hypervibe could not confirm this checkout is up to date: ${unchecked.join('; ')}.` } : {};
+}
+
 export function cliPathForCommand(id: string): string[] {
   const segments = id.replace(/^hv_/, '').split('_');
   return segments.length === 1 || ROOT_COMMANDS.has(segments.join('_'))
@@ -153,11 +198,16 @@ export class CommandRegistry implements CommandRegistrar {
       // Anything not proven read-only is classified as write so future
       // interfaces cannot accidentally grant mutation through a loose policy.
       access: READ_ONLY_COMMANDS.has(name) ? 'read' : 'write',
-      execute: async (input) => addConfirmationMetadata(
-        name,
-        inputShape,
-        redactCommandEnvelope(await handler(input as z.infer<z.ZodObject<Args>>))
-      ),
+      execute: async (input) => {
+        const checkout = await checkoutGuard(name, input);
+        if (checkout.refusal) return checkout.refusal;
+        const result = addConfirmationMetadata(
+          name,
+          inputShape,
+          redactCommandEnvelope(await handler(input as z.infer<z.ZodObject<Args>>))
+        );
+        return checkout.warning ? { ...result, warnings: [...(result.warnings ?? []), checkout.warning] } : result;
+      },
     });
   }
 

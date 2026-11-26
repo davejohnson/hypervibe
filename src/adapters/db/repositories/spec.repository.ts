@@ -39,6 +39,12 @@ export class ProjectSpecRepository {
     return row ? this.mapRow(row) : null;
   }
 
+  /** Every saved revision's number and document, newest first. */
+  findAll(projectId: string): Array<Pick<ProjectSpecRow, 'revision' | 'document'>> {
+    const rows = getDb().prepare('SELECT revision, document FROM project_specs WHERE project_id = ? ORDER BY revision DESC').all(projectId) as Array<{ revision: number; document: string }>;
+    return rows.map((row) => ({ revision: row.revision, document: JSON.parse(row.document) as unknown }));
+  }
+
   findByRevision(projectId: string, revision: number): ProjectSpecRow | null {
     const db = getDb();
     const row = db.prepare(
