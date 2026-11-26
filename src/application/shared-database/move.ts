@@ -2,7 +2,7 @@ import type { GcpDatabaseConnection } from '../../adapters/providers/gcp/tofu/gc
 import type { ActionResult } from '../../domain/plan/converge.executor.js';
 import type { PlanAction } from '../../domain/plan/plan.types.js';
 import { POSTGRES_DATABASE_IDENTITY_SQL, parsePostgresDatabaseIdentity } from '../../domain/services/postgres-database-identity.js';
-import { DATABASE_MOVE_FACTS, databaseMoveCopyJob, databaseMoveCopyVerified, databaseMoveFactsProblem, type DatabaseMoveCopyResult } from '../database-move-copy.js';
+import { DATABASE_MOVE_FACTS, DATABASE_MOVE_PRIVILEGES, databaseMoveCopyJob, databaseMoveCopyVerified, databaseMoveFactsProblem, type DatabaseMoveCopyResult } from '../database-move-copy.js';
 import type { GcpDatabaseBinding } from '../gcp-database-location.js';
 import { databaseCopySecretId, parseConnectionUrl } from '../infrastructure-engine-database.js';
 import { blocked } from './administrator.js';
@@ -104,11 +104,16 @@ export async function planMove(request: MovePlanRequest): Promise<DatabaseMove> 
       await session.query('SET search_path = pg_catalog');
       const size = await session.query('SELECT pg_database_size(current_database())::text AS bytes');
       const counted = await session.query(DATABASE_MOVE_FACTS);
-      return { bytes: Number(size.rows[0]?.bytes), counts: Object.values(counted.rows[0] ?? {})[0] };
+      const granted = await session.query(DATABASE_MOVE_PRIVILEGES);
+      return { bytes: Number(size.rows[0]?.bytes), counts: Object.values(counted.rows[0] ?? {})[0], granted: granted.rows.map((row) => String(Object.values(row)[0])) };
     }).catch(() => undefined);
     if (!facts) throw blocked(`${name}'s database could not be read to see whether it can be moved. Nothing was planned; try again.`);
     const problem = databaseMoveFactsProblem(facts.counts);
     if (problem) throw blocked(`${name}'s database ${problem}, so it cannot be moved. Nothing was planned.`);
+    // The copy job refuses these by the same statement; here it is found out before a server is paid for.
+    if (facts.granted.length) {
+      throw blocked(`${name}'s database grants access the copy cannot carry over (${facts.granted.slice(0, 5).join(' | ')}${facts.granted.length > 5 ? ` and ${facts.granted.length - 5} more` : ''}), so it cannot be moved. Take those grants away, or keep "placement": "app" on the database. Nothing was planned.`);
+    }
     if (!Number.isFinite(facts.bytes) || facts.bytes > LARGEST_DATABASE_BYTES) {
       throw blocked(`${name}'s database is ${Number.isFinite(facts.bytes) ? shown(facts.bytes) : 'of unknown size'}; a move can copy at most ${shown(LARGEST_DATABASE_BYTES)} for now. Nothing was planned.`);
     }
@@ -239,7 +244,7 @@ export async function applySwitch(context: MoveStepContext): Promise<ActionResul
   const backOut = async (why: string): Promise<ActionResult> => {
     const undone = await resumeDatabase(pause);
     return undone.success
-      ? { success: false, message: `${name}'s database was not moved: ${why} The app is connected to its database on the shared server again, and nothing it uses has changed.` }
+      ? { success: false, message: `${name}'s database was not moved: ${why} The app's login to its database on the shared server works again, and nothing it uses has changed. The app itself may take a few minutes to come back: its instances lost their connections and are restarting.` }
       : { success: false, status: 'pending', message: `${name}'s database was not moved: ${why} Letting the app back into its database on the shared server did not finish either, so it may still be shut out. Run hv_plan and hv_apply again: that either completes the move or lets the app back in.` };
   };
   if (!paused.success) return backOut('shutting the app out of the shared database did not finish.');
@@ -254,7 +259,7 @@ export async function applySwitch(context: MoveStepContext): Promise<ActionResul
     return backOut('the copy could not be run.');
   }
   if (!databaseMoveCopyVerified(result)) {
-    const said = typeof result?.error === 'string' && /^[\x20-\x7e]{1,300}$/.test(result.error) ? result.error
+    const said = typeof result?.error === 'string' && /^[\x20-\x7e]{1,900}$/.test(result.error) ? result.error
       : result?.ok ? `the copy differs from the original (${(result.different ?? []).join(', ') || 'unknown parts'}).` : 'the copy job gave no result.';
     return backOut(said);
   }
