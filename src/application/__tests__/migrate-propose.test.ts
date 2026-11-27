@@ -44,6 +44,15 @@ describe('proposed migration target', () => {
     expect(target.email).toBeUndefined();
     expect(Object.keys(target.services)).toEqual(['staging-web', 'staging-worker']);
   });
+
+  it('requests native database backups when moving a database with a daily backup policy', () => {
+    const source = { hosting: { provider: 'railway' }, services: {}, envVars: {},
+      database: { provider: 'railway', engine: 'postgres' }, backups: { mode: 'daily' } } as EnvironmentSpec;
+    const proposal = proposeTargetEnvironment(source, {});
+    expect(proposal.database).toEqual({ provider: 'cloudsql', automatedBackups: true });
+    expect(proposal.backups).toBeUndefined();
+    expect(proposeTargetEnvironment({ ...source, database: undefined }, {}).database).toBeUndefined();
+  });
 });
 
 // Contract: a migration must not silently drop how the app's schema is migrated.

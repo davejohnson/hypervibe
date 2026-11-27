@@ -8,6 +8,7 @@ import { LocalReviewCatalog } from '../../adapters/storage/local-review-catalog.
 import * as reviewService from '../local-review-service.js';
 import { acquireMigrationTargetLease } from '../../adapters/db/migration-target-lease.js';
 import { planRunDocumentSchema } from '../../domain/plan/converge.executor.js';
+import { PlanService } from '../../domain/plan/plan.service.js';
 import { SpecStore } from '../../domain/spec/spec.store.js';
 import { adapterFactory } from '../../domain/services/adapter.factory.js';
 import * as access from '../../domain/services/database-access.service.js';
@@ -16,8 +17,10 @@ import * as launch from '../launch.js';
 import * as engine from '../infrastructure-engine.js';
 import * as transfer from '../migration-transfer-gcp.js';
 import { migrateEnvironment } from '../migrate.js';
+import type { CommandEnvelope } from '../results.js';
 import { RailwayAdapter } from '../../adapters/providers/railway/railway.adapter.js';
 import * as readiness from '../migration-cutover-readiness.js';
+import * as backupEvidence from '../migration-database-backups.js';
 import * as commands from '../commands.js';
 
 const oldCopiedAt = '2026-11-01T00:00:00.000Z';
@@ -90,6 +93,156 @@ function fixture(kind: 'database' | 'files' | 'both') {
   const releaseCalls = () => vi.mocked(launch.launchEnvironment).mock.calls.filter(([, params]) => !params.stopAfter);
   return { ctx, project, target, current, migrate, releaseCalls };
 }
+
+describe('backup consent at cutover', () => {
+  function cutover() {
+    const f = fixture('database');
+    const store = new SpecStore();
+    const hostname = 'source.example.com';
+    const services = { web: { workloadKind: 'web', public: true } };
+    store.merge(f.project, { environments: { source: { services }, target: { services, database: { automatedBackups: true } } } });
+    const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'source')!;
+    const sourceSpec = () => store.get(f.project)!.spec.environments.source!;
+    const enableDaily = () => store.merge(f.project, { environments: { source: { backups: { mode: 'daily' } } } });
+    const command = commands.createCommandRegistry(f.ctx);
+    const run = (options = {}) => command.execute('hv_migrate', { project: f.project.id, from: 'source', to: 'target', cutover: true, ...options });
+    const route = { pending: false, forwarded: false };
+    let paused = false;
+    vi.spyOn(backupEvidence, 'observeMigrationDatabaseBackups').mockResolvedValue(true);
+    const action = (id: string, operation: string, name: string, metadata: Record<string, string> = {}) => ({
+      id: `maintenance:source:${id}`, type: 'noop', verified: true, resource: { kind: 'maintenance', name, provider: 'railway' },
+      metadata: { operation, ...metadata },
+    });
+    vi.spyOn(PlanService.prototype, 'plan').mockImplementation(async () => ({ blocked: [], actions: [
+      { id: 'domain:source', type: 'noop', verified: true, resource: { kind: 'domain', name: hostname, provider: 'railway' } },
+      ...(paused ? [action('edge', 'maintenanceEdgeEnable', hostname, { hostname }),
+        action('workload:web', 'maintenanceWorkloadSuspend', 'web', { serviceId: 'web-id', workloadKind: 'web' })] : []),
+      ...(sourceSpec().domainTarget ? [{ ...action('traffic', 'maintenanceEdgeRoute', hostname, { targetEnvironment: 'target', targetService: 'web' }),
+        type: route.forwarded ? 'noop' : 'update' }] : []),
+    ] } as never));
+    const plan = vi.fn(async () => ({ ok: true, data: { planId: 'source-plan', actions: !paused
+      ? [{ id: 'maintenance:source:edge', type: 'update' }]
+      : sourceSpec().domainTarget && !route.forwarded ? [{ id: 'maintenance:source:traffic', type: 'update' }] : [] } }));
+    const apply = vi.fn(async () => {
+      if (sourceSpec().domainTarget) route.forwarded = !route.pending;
+      else {
+        paused = true;
+        f.ctx.repos.environments.updatePlatformBindings(source.id, { maintenance: { state: 'active', mode: 'application',
+          updatedAt: '2026-11-01T00:01:00Z', workloads: { web: { serviceId: 'web-id', workloadKind: 'web' } },
+          edge: { hostname, accountId: 'account', zoneId: 'zone', routeId: 'route', scriptName: 'maintenance-page', contentHash: 'page-hash' } } });
+      }
+      return { ok: true, data: { applied: true } };
+    });
+    vi.spyOn(commands, 'createCommandRegistry').mockReturnValue({ get: (name: string) => ({ execute: name === 'hv_apply' ? apply : plan }) } as never);
+    return { ...f, run, sourceSpec, enableDaily, route, plan, apply };
+  }
+
+  function review(envelope: CommandEnvelope) {
+    expect(envelope).toMatchObject({ ok: true, data: { status: 'needs_cutover_approval', backupReviewId: expect.any(String),
+      steps: expect.arrayContaining([expect.stringMatching(/independent.*restore tests/i)]) } });
+    const { backupReviewId } = envelope.data as { backupReviewId: string };
+    expect(envelope.agentInstruction?.message).toContain(backupReviewId);
+    return backupReviewId;
+  }
+
+  it('holds an earlier preview when the source gains daily backups before the pause', async () => {
+    const f = cutover();
+    expect(await f.run()).toMatchObject({ ok: true, data: { status: 'needs_cutover_approval' } });
+    f.enableDaily();
+    const id = review(await f.run({ confirmCutover: true }));
+    expect(review(await f.run({ confirmCutover: true, backupReviewId: 'another review' }))).toBe(id);
+    expect(f.sourceSpec().maintenance).toBeUndefined();
+    expect(f.apply).not.toHaveBeenCalled();
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+    expect(await f.run({ confirmCutover: true, backupReviewId: id })).toMatchObject({ ok: true, data: { status: 'cut_over' } });
+    expect(f.current().finalCopy).toMatchObject({ backupReviewId: id });
+  });
+
+  it('keeps a verified final copy paused when the source gains daily backups during transfer', async () => {
+    const f = cutover();
+    vi.mocked(transfer.runTransferJob).mockImplementationOnce(async () => {
+      f.enableDaily();
+      return successfulDatabase as never;
+    });
+    const id = review(await f.run({ confirmCutover: true }));
+    const copy = f.current().finalCopy;
+    expect(copy?.copyAttemptId).toBe(f.current().copyAttempt?.id);
+    expect(f.sourceSpec().maintenance?.page).toBe('active');
+    expect(f.sourceSpec().domainTarget).toBeUndefined();
+    expect(f.route.forwarded).toBe(false);
+    expect(review(await f.run({ confirmCutover: true }))).toBe(id);
+    expect(await f.run({ confirmCutover: true, backupReviewId: id })).toMatchObject({ ok: true, data: { status: 'cut_over' } });
+    expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
+    expect(f.current().finalCopy).toMatchObject({ ...copy, backupReviewId: id });
+  });
+
+  it('continues an approved cutover with the same review when the final copy has to wait', async () => {
+    const f = cutover();
+    f.enableDaily();
+    const id = review(await f.run());
+    let waiting = true;
+    vi.mocked(launch.launchEnvironment).mockImplementation(async (_ctx, params) => {
+      if (params.stopAfter === 'infrastructure' && waiting) {
+        waiting = false;
+        return { status: 'pending', receipts: [], message: 'Target infrastructure is still settling.' };
+      }
+      return params.stopAfter ? { status: 'ready', stage: params.stopAfter } as never : { status: 'live', urls: {} } as never;
+    });
+    const approved = { confirmCutover: true, backupReviewId: id };
+    expect(await f.run(approved)).toMatchObject({ ok: true, data: { status: 'pending' }, hint: expect.stringContaining('backupReviewId') });
+    expect(transfer.runTransferJob).not.toHaveBeenCalled();
+    expect(await f.run(approved)).toMatchObject({ ok: true, data: { status: 'cut_over' } });
+    expect(f.current().finalCopy).toMatchObject({ backupReviewId: id });
+  });
+
+  it('reviews new backup terms on a pending route and remembers the accepted terms across retries', async () => {
+    const f = cutover();
+    f.route.pending = true;
+    expect(await f.run({ confirmCutover: true })).toMatchObject({ ok: true, data: { status: 'pending' } });
+    const attempts = f.apply.mock.calls.length;
+    const copy = f.current().finalCopy;
+    f.enableDaily();
+    const id = review(await f.run());
+    expect(review(await f.run({ confirmCutover: true }))).toBe(id);
+    expect(f.apply).toHaveBeenCalledTimes(attempts);
+    expect(f.current().finalCopy).toEqual(copy);
+    expect(await f.run({ confirmCutover: true, backupReviewId: id })).toMatchObject({ ok: true, data: { status: 'pending' } });
+    expect(f.current().finalCopy).toMatchObject({ ...copy, backupReviewId: id });
+    f.route.pending = false;
+    expect(await f.run()).toMatchObject({ ok: true, data: { status: 'cut_over' } });
+    expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops a traffic apply when the source gains daily backups while its route is being planned', async () => {
+    const f = cutover();
+    f.route.pending = true;
+    expect(await f.run({ confirmCutover: true })).toMatchObject({ ok: true, data: { status: 'pending' } });
+    const attempts = f.apply.mock.calls.length;
+    f.route.pending = false;
+    f.plan.mockImplementationOnce(async () => {
+      f.enableDaily();
+      return { ok: true, data: { planId: 'new-source-plan', actions: [{ id: 'maintenance:source:traffic', type: 'update' }] } };
+    });
+    expect(await f.run()).toMatchObject({ ok: false, error: { message: expect.stringMatching(/configuration changed.*traffic/i) } });
+    review(await f.run());
+    expect(f.apply).toHaveBeenCalledTimes(attempts);
+    expect(f.route.forwarded).toBe(false);
+  });
+
+  it('reports changed protection after traffic is live without changing the route, data or receipt', async () => {
+    const f = cutover();
+    expect(await f.run({ confirmCutover: true })).toMatchObject({ ok: true, data: { status: 'cut_over' } });
+    const attempts = f.apply.mock.calls.length;
+    const launches = vi.mocked(launch.launchEnvironment).mock.calls.length;
+    const copy = f.current().finalCopy;
+    f.enableDaily();
+    expect(await f.run()).toMatchObject({ ok: true, data: { status: 'cut_over', message: expect.stringMatching(/already forwards.*independent.*restore tests/i) } });
+    expect(f.apply).toHaveBeenCalledTimes(attempts);
+    expect(launch.launchEnvironment).toHaveBeenCalledTimes(launches);
+    expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
+    expect(f.current().finalCopy).toEqual(copy);
+  });
+});
 
 describe.each(['database', 'files', 'both'] as const)('%s refresh attempts', (kind) => {
   it.each(['failure', 'interruption'] as const)('blocks reuse and cutover after a partial %s and permits a fresh copy', async (outcome) => {

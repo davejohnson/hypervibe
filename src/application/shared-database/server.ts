@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { EngineConfiguration, EngineStateIdentity } from '../../domain/ports/infrastructure-engine.port.js';
+import { GCP_SHARED_DATABASE_LABEL as SHARED_SERVER_LABEL } from '../../domain/services/gcp-database-location.js';
 import { gcpSmallestDatabaseSize } from '../gcp-database-shape.js';
 import type { SeenServer } from './ports.js';
 
@@ -16,7 +17,7 @@ export interface SharedServerScope {
   region: string;
 }
 
-export const SHARED_SERVER_LABEL = 'hv-shared-database';
+export { SHARED_SERVER_LABEL };
 /** PostgreSQL 16 lets only the role that created a role manage it, so this never changes. */
 export const ADMINISTRATOR_LOGIN = 'hv_admin';
 /** Every administrator session uses this database: the tenant module's lock is per database. */

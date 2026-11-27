@@ -63,7 +63,8 @@ explicit message. Capabilities no engine builds yet are refused by one shared li
 | Private package build token (`npm_token`) | implemented; private-package live run unverified | implemented; native request, generated command and configuration verified; live run unverified | implemented; ACR task request and configuration verified; live run unverified |
 | Manual release without a local checkout | implemented for a verified GitHub repository connection; exact-commit archive and build request checked offline, live unverified | unavailable; local checkout required | unavailable; local checkout required |
 | Migrations as a release step | yes (`releaseCommand` mode) | blocked in spec and planning | blocked in spec and planning |
-| Daily backups, restore drills | blocked (#253) | blocked (#253) | blocked (#253) |
+| [Cloud-managed automated PostgreSQL backups](../default-backup-policy.md#use-the-clouds-automated-database-backups) | Dedicated Cloud SQL standard backups. The check was verified live on 2026-11-27. Enabling them on an existing instance was tested offline. Existing app-shared servers must already have them enabled. | Aurora always backs up the shared cluster. Offline checks cover one day of retention on creation and preservation of existing retention. | Flexible Server backs up the shared server. Offline checks cover seven days of retention on creation and preservation of existing retention and redundancy. |
+| Independent daily database and file backups with restore tests | blocked (#253) | blocked (#253) | blocked (#253) |
 | Promotion and promotion tests | blocked (#667) | blocked (#667) | blocked (#667) |
 | Email, webhooks, iOS releases | blocked (#626) | blocked (#626) | blocked (#626) |
 | Database resilience, seed command, credential aliases | blocked | blocked | blocked |

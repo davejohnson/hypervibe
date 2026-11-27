@@ -36,6 +36,23 @@ live: the final cutover, a repeat copy over a verified one, an interrupted
 copy, a source and target on different PostgreSQL versions, and a database or
 bucket of any real size.
 
+When the Railway source has a daily backup policy, a new destination database
+requests `database.automatedBackups: true`. For a previously prepared
+destination, set that field in its spec and review its infrastructure plan.
+Before pausing Railway and again before moving traffic, Hypervibe checks the
+backup setting on the actual destination Cloud SQL instance and the identity
+of its PostgreSQL database. If the daily policy covers only that database, the
+cutover approval explains that Cloud SQL will back it up without an independent
+Hypervibe copy or restore tests. If the policy also covers an upload bucket,
+service volume or retained database, cutover stays blocked. The file comparison
+verifies the migration copy. Recovering uploaded files later requires a
+separate backup. A source requirement to promote the verified staging release
+still applies.
+
+When the cutover review includes a `backupReviewId`, return it with
+`confirmCutover: true` after the user approves the displayed steps. A resumed
+traffic move can reuse the accepted review while its backup terms match.
+
 The database is exported inside Railway by a temporary task and uploaded to the
 Google Cloud project's bucket; a temporary Cloud Run job downloads it and
 restores it. Files are copied by a temporary Cloud Run job that reads the Railway

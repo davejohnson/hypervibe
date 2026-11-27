@@ -16,6 +16,22 @@ the distributed user workflow lives in
 
 Backup coverage reports every persistent database, declared or retained service mount, and object bucket through the shared provider contract. Ordinary planning and deployment must not require backup setup, an archive bucket, a completed recovery point or a tested restore. Use explicit `hv_plan scope="backups"` with daily intent for separately reviewed backup work; only that scope may propose a derived archive, and provisioning still requires exact billable-action confirmation. Omitted backup intent means unmanaged, not that provider snapshots are disabled. Preserve stronger native schedules, retention and PITR; an explicit exclusion never disables or deletes existing provider protection. Keep policy configuration, an available recovery point and a tested restore separate, and report unsupported or unknown coverage instead of treating versioning, replication or an empty action list as a backup. Read-only coverage defaults do not rewrite legacy deployment hashes; an outstanding explicit checkpoint retains its isolated priority.
 
+An environment may explicitly request cloud-managed PostgreSQL backups with
+`database.automatedBackups: true`. A change to the database's backup switch
+requires an infrastructure plan and exact action confirmation. Preserve the
+provider's retention, recovery settings and shared-server ownership. At a
+guided cutover, accepting these backups in place of the source's database-only
+daily program requires fresh evidence for the destination database and a review
+that explains the change in independent copies and restore tests. Keep cutover
+blocked for any additional protected bucket, volume or retained database.
+
+For new cloud document archives, use the environment's hosting provider. Plan a
+separate Cloud Storage bucket on Google Cloud, an S3 bucket on AWS, or a Blob
+Storage container on Azure. Show the destination and cost in the backup plan.
+Retain the source archive through migration until the replacement covers the
+required history and a restored database can resolve its file references.
+This is the target for [cloud file recovery](https://github.com/davejohnson/hypervibe/issues/253).
+
 ## DG-076
 
 Before replacing a release-evidence format, preserve a read-only way to inspect an existing recovery baseline. Keep original artifact/run/source provenance; never synthesize missing historical fingerprints from current desired state. Evidence compatibility, image availability, and a successful restore are separate claims.

@@ -602,6 +602,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const warnings = [
     `AWS ${context.connection.region}, ${awsProfileFor(environmentName)} profile.`,
     ...(environmentSpec.database ? [`Testing environments share one Aurora Serverless cluster (${context.shared.clusterIdentifier}); ${environmentName} gets its own database and logins on it.`] : []),
+    ...(environmentSpec.database?.automatedBackups ? ['Aurora automatically backs up the whole cluster. A new cluster starts with one day of retention. An existing cluster keeps its retention window.'] : []),
     ...(!binding.imageUri && !commit && workloads ? ['Hypervibe could not find this project\'s local repository, so the services are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
   return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,

@@ -1,5 +1,11 @@
 import { nativeDatabaseConnectivity } from '../registry/database-connectivity.js';
 
+export function nativeDatabaseProvider(host: string): string | undefined {
+  const matches = Object.entries(nativeDatabaseConnectivity).filter(([, connectivity]) =>
+    connectivity.compatibleHostingProviders.includes(host));
+  return matches.length === 1 ? matches[0]![0] : undefined;
+}
+
 /**
  * Fill an omitted `database.provider` with the hosting platform's own database
  * before validation. An explicit provider is never replaced; a host without a
@@ -11,11 +17,8 @@ export function withDefaultDatabaseProvider(environment: unknown): unknown {
   if (!database || typeof database !== 'object' || Array.isArray(database)) return environment;
   if ((database as { provider?: unknown }).provider !== undefined) return environment;
   const host = hosting && typeof hosting === 'object' ? (hosting as { provider?: unknown }).provider : undefined;
-  const matches = typeof host === 'string'
-    ? Object.entries(nativeDatabaseConnectivity).filter(([, connectivity]) => connectivity.compatibleHostingProviders.includes(host))
-    : [];
-  if (matches.length !== 1) return environment;
-  return { ...environment, database: { ...database, provider: matches[0][0] } };
+  const provider = typeof host === 'string' ? nativeDatabaseProvider(host) : undefined;
+  return provider ? { ...environment, database: { ...database, provider } } : environment;
 }
 
 /**

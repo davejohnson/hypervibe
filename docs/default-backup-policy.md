@@ -21,7 +21,7 @@ An environment may declare daily backup intent:
 Omitting `backups` means backup management was not requested. Its effective
 `mode: "disabled", source: "default"` describes Hypervibe intent, not observed
 provider protection; existing snapshots remain untouched. It does not authorize
-backup mutations or infer an archive bucket. To configure protection,
+backup mutations or infer an archive bucket. To configure the managed daily program,
 request the separate `hv_plan scope="backups"` workflow and review its exact
 actions. Coverage reads do not insert fields into older specs or change their
 existing deployment-contract hashes.
@@ -91,14 +91,30 @@ provider. Existing stronger protection must not be replaced by a smaller
 Hypervibe default. Policy operations do not restore data, change the source
 image, redeploy workloads, or create a one-time checkpoint.
 
-The managed engine treats native database backup defaults as creation-only.
-Ordinary GCP plans preserve the whole Cloud SQL backup configuration and its
-edition (Enterprise Plus supports longer PITR windows); AWS plans preserve
-Aurora retention; Azure plans preserve retention and geo-redundant backups.
-Missing retention fields do not authorize filling them with environment defaults.
-Changing this protection requires a separately reviewed backup action with exact
-confirmation. Such policy changes remain unavailable on these engine paths;
-declaring retention intent does not enable an ordinary infrastructure reduction.
+### Use the cloud's automated database backups
+
+Set `database.automatedBackups` to `true` in the environment's `hv_spec`, then
+review `hv_plan scope="infrastructure"` and apply any proposed change. This
+requests the provider's own PostgreSQL backups. Removing the setting leaves
+existing protection in place.
+
+| Database | What the setting does |
+| --- | --- |
+| Google Cloud SQL | Enables standard automated backups on the environment's dedicated instance. Enabling them can incur storage charges and requires approval. Existing retention, backup windows and point-in-time recovery settings are preserved. An environment on an app-shared server can use backups already enabled on that server. [Cloud SQL backups](https://docs.cloud.google.com/sql/docs/postgres/backup-recovery/backup-options) |
+| AWS Aurora PostgreSQL | Aurora always backs up the cluster. Hypervibe creates its shared cluster with a one-day recovery window and preserves longer retention. [Aurora backups](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Managing.Backups.html) |
+| Azure Database for PostgreSQL | Flexible Server automatically backs up the whole server. Hypervibe starts it with seven days of retention and preserves existing retention and redundancy. [Flexible Server backups](https://learn.microsoft.com/en-us/azure/postgresql/backup-restore/concepts-backup-restore) |
+
+This setting covers PostgreSQL only and creates no recurring Hypervibe job.
+Independent copies, uploaded files and restore tests need separate protection.
+A confirmed backup setting describes the schedule. A retained recovery point
+and a successful restore each need their own evidence.
+
+Cloud SQL instances using Google's enhanced Backup and DR service have a
+separate backup plan. Hypervibe currently verifies standard backups only.
+
+Without the setting, ordinary engine plans preserve the existing Cloud SQL
+backup configuration and edition, Aurora retention, and Azure retention and
+geo-redundancy. Missing retention fields are preserved.
 Ordinary sizing that conflicts with a retained Cloud SQL Enterprise Plus edition
 is blocked at planning; supported Enterprise size changes remain available.
 The real pinned-engine regression in
@@ -150,6 +166,12 @@ See the [shared recovery contract](recovery-contract.md) for the separate
 verification checks and the distinction between code rollback and data restore.
 
 ## Managed retained recovery sets
+
+For the planned cloud document-backup feature, the archive belongs on the
+hosting provider. A Google Cloud app gets a separate Cloud Storage bucket, an
+AWS app an S3 bucket, and an Azure app a Blob Storage container. The backup
+plan must identify the exact destination and its cost. The managed cloud
+engines currently block this program. [Cloud backup and recovery work](https://github.com/davejohnson/hypervibe/issues/253)
 
 The baseline is daily execution, retaining seven completed sets as history
 builds, and restore evidence no older than seven days. The first verified set

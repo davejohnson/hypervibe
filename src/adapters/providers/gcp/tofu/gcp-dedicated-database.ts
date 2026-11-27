@@ -1,4 +1,5 @@
 import type { EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
+import { gcpDedicatedDatabaseOwner } from '../../../../domain/services/gcp-database-location.js';
 import type { GcpDatabaseConnection } from './gcp-database-connection.js';
 
 /**
@@ -18,6 +19,8 @@ export interface GcpCloudSqlInput {
   /** Creation-only backup/PITR defaults; ordinary plans preserve existing native policy. */
   retainedBackups?: number;
   transactionLogDays?: number;
+  /** Keep native automated backups enabled on this instance, including after creation. */
+  automatedBackups?: true;
   /** PostgreSQL major version (default 16). */
   majorVersion?: number;
   /**
@@ -29,6 +32,12 @@ export interface GcpCloudSqlInput {
 }
 
 export const DATABASE_ENGINE_ADDRESSES = ['google_sql_database_instance.db', 'google_sql_database.app', 'google_sql_user.worker_waker'] as const;
+
+// All writable siblings of `enabled` in the pinned google 8.9.0 backup block. `backup_tier` is computed.
+const backupBlock = 'settings[0].backup_configuration';
+const preserveBackupSettings = [
+  'binary_log_enabled', 'start_time', 'location', 'point_in_time_recovery_enabled', 'transaction_log_retention_days', 'backup_retention_settings',
+].map(field => `${backupBlock}[0].${field}`);
 
 /** The Cloud SQL IAM database user for a service account email. */
 export function iamDatabaseUser(serviceAccountEmail: string): string {
@@ -50,6 +59,7 @@ export function dedicatedDatabase(params: {
   region: string;
   environmentId?: string;
   database?: GcpCloudSqlInput;
+  adoptInstance?: string;
   /** A database this environment previously created that is no longer desired. */
   retired?: boolean;
   /** Set when an on-demand worker counts pending work: the runtime identity that gets a read-only login ('' when unknown). */
@@ -57,8 +67,12 @@ export function dedicatedDatabase(params: {
 }): { resource: Record<string, Record<string, unknown>>; mappings: Record<string, EngineResourceMapping> } {
   const onDemand = params.workerLoginEmail !== undefined;
   const sql: Record<string, Record<string, unknown>> = {};
+  const automatedBackups = params.database?.automatedBackups === true;
+  // The public import action confirms ownership only. No setting may change on that same import.
+  const adoptOnly = automatedBackups && params.adoptInstance === params.database?.instanceName;
   const databaseMapping: EngineResourceMapping = { actionId: 'database:postgres', kind: 'database', name: 'postgres', dataBearing: true, billable: true,
-    costAttributes: ['settings.*.tier', 'settings.*.disk_size', 'settings.*.disk_type', 'settings.*.availability_type', 'settings.*.edition'] };
+    costAttributes: ['settings.*.tier', 'settings.*.disk_size', 'settings.*.disk_type', 'settings.*.availability_type', 'settings.*.edition',
+      ...(automatedBackups ? ['settings.*.backup_configuration.*.enabled'] : [])] };
   if (params.database) {
     if (!/^[a-z][a-z0-9-]{0,96}[a-z0-9]$/.test(params.database.instanceName)) throw new Error('Cloud SQL instance name is invalid.');
     if (!/^[a-z][a-z0-9_]{0,62}$/.test(params.database.databaseName)) throw new Error('Database name is invalid.');
@@ -70,11 +84,11 @@ export function dedicatedDatabase(params: {
       // Hypervibe's confirmation gate always governs deletion. A protected database also refuses
       // deletion here and in the Google console until protection is turned off in its own change.
       deletion_protection: params.database.deletionProtection === true,
-      // Backup changes need their own scoped review. Retain the provider's full policy,
-      // including fields absent from our input, on updates and interrupted-create adoption.
-      // Enterprise Plus can retain longer PITR logs, so its edition must survive too.
       lifecycle: [{
-        ignore_changes: ['settings[0].backup_configuration', 'settings[0].edition'],
+        // An opted-in environment owns only the on/off switch. Keep the existing policy on updates and adoption,
+        // including location, final backups, backups retained after deletion and the edition supporting longer PITR.
+        ignore_changes: adoptOnly ? 'all' : [...(automatedBackups ? [...preserveBackupSettings, 'settings[0].retain_backups_on_delete',
+          'settings[0].final_backup_config', 'settings[0].availability_type'] : [backupBlock]), 'settings[0].edition'],
         // Enterprise-only defaults cannot resize a retained Plus instance.
         // Evaluate the effective plan values, after ignore_changes preserves its
         // edition, instead of hiding all tier drift (which would disable sizing).
@@ -136,4 +150,44 @@ export function dedicatedDatabaseImports(projectId: string, database: GcpCloudSq
   if (!adoptInstance) return {};
   if (adoptInstance !== database?.instanceName) throw new Error('Only the desired database instance can be adopted.');
   return { 'google_sql_database_instance.db': `projects/${projectId}/instances/${adoptInstance}` };
+}
+
+interface PlannedInstance {
+  id?: string; name?: string; project?: string; region?: string; database_version?: string; instance_type?: string; connection_name?: string;
+  settings?: Array<{ user_labels?: Record<string, string>; backup_configuration?: Array<{ enabled?: boolean; backup_tier?: string }> }>;
+}
+
+/** Read refreshed provider values before saving the plan. Google Backup and DR owns enhanced schedules. */
+export function reviewDedicatedBackupPlan(shown: unknown, instanceName: string, scope: { projectId: string; region: string; environmentId: string }): { blocked: string } | { instance: 'create' | 'adopt' | 'existing' } {
+  type Row = { address?: string; deposed?: unknown; change?: { before?: PlannedInstance | null; after?: PlannedInstance | null; actions?: string[]; importing?: { id?: string } } };
+  const rows = (shown as { resource_changes?: Row[] } | null)?.resource_changes;
+  const instances = Array.isArray(rows) ? rows.filter(row => row.address === 'google_sql_database_instance.db' && !row.deposed) : [];
+  const change = instances.length === 1 ? instances[0]?.change : undefined;
+  const id = `projects/${scope.projectId}/instances/${instanceName}`;
+  const matchesScope = (instance?: PlannedInstance | null) => {
+    return instance?.name === instanceName && instance.project === scope.projectId && instance.region === scope.region
+      && /^POSTGRES_\d+$/.test(instance.database_version ?? '') && gcpDedicatedDatabaseOwner(instance.settings?.[0]?.user_labels, scope.environmentId);
+  };
+  // The pinned provider uses the name alone as its refreshed state ID. Google's connection name independently supplies project and region.
+  if (!change?.after || !matchesScope(change.after) || (change.before !== null && (!matchesScope(change.before)
+    || change.before?.id !== instanceName || change.before.instance_type !== 'CLOUD_SQL_INSTANCE'
+    || change.before.connection_name !== `${scope.projectId}:${scope.region}:${instanceName}`))) {
+    return { blocked: 'Hypervibe could not verify ownership of the dedicated Cloud SQL instance in this environment, project and region. Check its binding and labels before planning automated backups.' };
+  }
+  if (change.before && change.before.settings?.[0]?.backup_configuration?.[0]?.backup_tier !== 'STANDARD') {
+    return { blocked: `Hypervibe could not confirm the standard backup tier on Cloud SQL instance ${instanceName}. Check its backup policy. Enhanced schedules are managed separately by Google Cloud Backup and DR.` };
+  }
+  if (change.importing) {
+    if (!change.before || change.importing.id !== id || change.actions?.length !== 1 || change.actions[0] !== 'no-op') {
+      return { blocked: 'The plan would change an existing Cloud SQL instance during adoption. Adopting it and enabling automated backups need separate reviewed plans.' };
+    }
+    return { instance: 'adopt' };
+  }
+  if (change.before === null && (change.actions?.length !== 1 || change.actions[0] !== 'create')) {
+    return { blocked: 'Hypervibe could not verify creation of the Cloud SQL instance in this backup plan. Run hv_plan again.' };
+  }
+  if (change.after.settings?.[0]?.backup_configuration?.[0]?.enabled !== true) {
+    return { blocked: `The provider's plan did not confirm that automated backups would be enabled on Cloud SQL instance ${instanceName}. Check the instance's backup policy and run hv_plan again.` };
+  }
+  return { instance: change.before === null ? 'create' : 'existing' };
 }

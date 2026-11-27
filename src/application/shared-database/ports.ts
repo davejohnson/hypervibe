@@ -18,6 +18,8 @@ export interface SeenServer {
   deletionProtection: boolean;
   /** The PostgreSQL major version Google reports for it, when it reports one. */
   majorVersion?: number;
+  /** Only known when Cloud SQL reports the standard backup tier and its on/off setting. */
+  automatedBackups?: boolean;
   labels: Record<string, string>;
 }
 
