@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { GetBucketLocationCommand, GetBucketTaggingCommand, ListBucketsCommand, S3Client } from '@aws-sdk/client-s3';
 import { stateResources } from '../domain/ports/workload-diagnostics.port.js';
 import type { EngineAuthentication, EngineConfiguration, EngineStateIdentity, InfrastructureEngineBackend } from '../domain/ports/infrastructure-engine.port.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
@@ -8,6 +7,7 @@ import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js
 import { canonicalJsonSha256 } from '../lib/canonical-json.js';
 import { cloudBucketBackupBundle } from '../adapters/providers/cloud-bucket-backup-bundle.js';
 import { awsDailyBucketClients, type AwsDailyBucketConfig } from '../adapters/providers/aws/aws-daily-bucket-backup.js';
+import { observeAwsBackupBuckets } from '../adapters/providers/aws/aws-bucket-backup-observation.js';
 import { buildAwsBucketBackup } from '../adapters/providers/aws/tofu/aws-bucket-backup.config.js';
 import { awsEngineBackend } from '../adapters/providers/aws/tofu/aws-engine.backend.js';
 import { awsKey } from '../adapters/providers/aws/tofu/aws-engine.config.js';
@@ -78,23 +78,6 @@ async function stateValue<T>(engine: OpenTofuEngine, access: StateAccess, projec
   return inspected.present ? inspected.value : undefined;
 }
 
-/** GetBucketTagging returns a named NoSuchBucket error for absence. A generic
- * HEAD error or NoSuchTagSet cannot authorize creation over an existing bucket. */
-export async function observedAwsBackupBucket(s3: S3Client, name: string, accountId: string, region: string, environmentId: string) {
-  const target = { Bucket: name, ExpectedBucketOwner: accountId };
-  let tags;
-  try { tags = await s3.send(new GetBucketTaggingCommand(target)); }
-  catch (error) {
-    const failure = error as { name?: string; $metadata?: { httpStatusCode?: number } };
-    if (failure.name === 'NoSuchBucket' && failure.$metadata?.httpStatusCode === 404) return 'absent' as const;
-    throw new Error(cleanScope);
-  }
-  const location = await s3.send(new GetBucketLocationCommand(target));
-  const actualRegion = location.LocationConstraint === 'EU' ? 'eu-west-1' : location.LocationConstraint || 'us-east-1';
-  if (actualRegion !== region || !owns(Object.fromEntries((tags.TagSet ?? []).map(tag => [tag.Key, tag.Value])), environmentId)) throw new Error(cleanScope);
-  return 'owned' as const;
-}
-
 async function azureResource(tokens: AzureTokens, id: string, version: string) {
   const result = await azureRest(tokens, AZURE_SCOPES.arm, 'GET', ARM + id + '?api-version=' + version);
   if (result.status === 404 && (result.body.error as { code?: string } | undefined)?.code === 'ResourceNotFound') return undefined;
@@ -102,28 +85,6 @@ async function azureResource(tokens: AzureTokens, id: string, version: string) {
   return result.body;
 }
 const azureAccountId = (container: string) => container.split('/blobServices/')[0]!;
-
-/** The source timestamp can advance when an owner edits bucket policy. In that
- * case the next successful daily copy supplies fresh evidence for cutover. */
-async function awsBucketTimestamp(s3: S3Client, bucket: string, region: string) {
-  const seen = new Set<string>();
-  let continuation: string | undefined;
-  let timestamp: string | undefined;
-  do {
-    const page = await s3.send(new ListBucketsCommand({ Prefix: bucket, MaxBuckets: 1000, ContinuationToken: continuation }));
-    if (!Array.isArray(page.Buckets)) throw new Error(cleanScope);
-    for (const item of page.Buckets) {
-      if (item.Name !== bucket) continue;
-      if (timestamp || item.BucketRegion !== region || !item.CreationDate || !Number.isFinite(item.CreationDate.getTime())) throw new Error(cleanScope);
-      timestamp = item.CreationDate.toISOString();
-    }
-    continuation = page.ContinuationToken;
-    if (continuation && seen.has(continuation)) throw new Error(cleanScope);
-    if (continuation) seen.add(continuation);
-  } while (continuation);
-  if (!timestamp) throw new Error(cleanScope);
-  return timestamp;
-}
 
 export function cloudBucketBackupNames(state: EngineStateIdentity, storageName: string, prefix: string) {
   const suffix = canonicalJsonSha256([state.provider, state.projectId, state.environmentId, storageName]).slice(0, 20);
@@ -160,14 +121,9 @@ async function awsProgram(ctx: CommandContext, params: Params, engine: OpenTofuE
     if (bucket && (bucket.id !== archiveBucket || bucket.arn !== 'arn:aws:s3:::' + archiveBucket || !owns(bucket.tags_all, environment.id))) throw new Error(cleanScope);
     return { bucket: !!bucket, enrollment: retainedEnrollment(rows, 'aws', sourceBucket, archiveBucket) };
   });
-  const s3 = new S3Client({ region, credentials: context.credentials, maxAttempts: 1 });
-  let archivePresent: boolean;
-  let sourceEpoch: string;
-  try {
-    if (await observedAwsBackupBucket(s3, sourceBucket, accountId, region, environment.id) !== 'owned') return { blocked: cleanScope };
-    sourceEpoch = await awsBucketTimestamp(s3, sourceBucket, region);
-    archivePresent = (await observedAwsBackupBucket(s3, archiveBucket, accountId, region, environment.id)) === 'owned';
-  } finally { s3.destroy(); }
+  const observed = await observeAwsBackupBuckets(config, environment.id, context.credentials);
+  if (!observed) return { blocked: cleanScope };
+  const { archivePresent, sourceEpoch } = observed;
   if (archivePresent !== !!retained?.bucket) return { blocked: cleanScope };
   const clients = () => awsDailyBucketClients(config, context.credentials);
   await verifyEnrollment(retained?.enrollment, clients(), archivePresent);

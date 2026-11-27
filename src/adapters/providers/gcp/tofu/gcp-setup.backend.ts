@@ -11,6 +11,7 @@ export {
   type GcpProjectSetupParams, type GcpProjectSetupResult,
 } from './project-setup-executor.js';
 
+export { verifiedGcpRuntimeStorageRoles } from './verified-runtime-storage-roles.js';
 export { isolationGrants, type TransferIsolationScope } from './transfer-isolation.js';
 export { readSecretScopeInput, secretScopePolicyProblems, SECRET_ACCESSOR_ROLE } from './secret-scope-setup.js';
 

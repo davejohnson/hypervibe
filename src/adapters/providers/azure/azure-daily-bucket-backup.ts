@@ -1,5 +1,5 @@
 import type { TokenCredential } from '@azure/core-auth';
-import { ManagedIdentityCredential } from '@azure/identity';
+import { ClientSecretCredential, ManagedIdentityCredential } from '@azure/identity';
 import { z } from 'zod';
 import { AzureSdkBlobDataPlane } from './azure-blob-data-plane.js';
 import { decodeEnrollmentWitness, enrolledBucketClients } from '../../../domain/services/bucket-backup-enrollment.js';
@@ -25,6 +25,10 @@ export function azureDailyBucketClients(raw: unknown, credential: TokenCredentia
   return { source: new AzureSdkBlobDataPlane(config.sourceAccount, credential, config.sourceContainer),
     archive: new AzureSdkBlobDataPlane(config.archiveAccount, credential, config.archiveContainer),
     sourceIdentity: identity(config.sourceAccount, config.sourceContainer), destinationIdentity: identity(config.archiveAccount, config.archiveContainer) };
+}
+
+export function azureEnrollmentBucketClients(config: AzureDailyBucketConfig, tenantId: string, clientId: string, clientSecret: string) {
+  return azureDailyBucketClients(config, new ClientSecretCredential(tenantId, clientId, clientSecret));
 }
 
 export async function openAzureDailyBucketBackup(raw: unknown) {

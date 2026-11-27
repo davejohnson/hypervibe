@@ -146,6 +146,20 @@ function validValues(raw: unknown, projectId: string, runtimeEmail: string, expe
   return v?.project === projectId && v.member === 'serviceAccount:' + runtimeEmail && v.role === backupStorageRole &&
     equal(v.condition ?? [], expected ? [expected] : []) && Object.keys(v).every(key => ['id','project','member','role','etag','condition'].includes(key));
 }
+const emptyJobMaps = new Set(['annotations','template[].annotations','template[].labels']);
+const containerDependencies = 'template[].template[].containers[].depends_on';
+/** Google refreshed these omitted annotations, labels and container dependencies as empty on a
+ * previously applied migration job. Populated metadata and every other setting must match. */
+function unchangedMigrationJob(before: unknown, after: unknown, path: string): boolean {
+  if (equal(before,after)) return true;
+  if (emptyJobMaps.has(path)) return [before,after].every(v => v == null || equal(v,{}));
+  if (path === containerDependencies) return [before,after].every(v => v == null || equal(v,[]));
+  if (Array.isArray(before) || Array.isArray(after)) return Array.isArray(before) && Array.isArray(after) && before.length === after.length &&
+    before.every((v,i) => unchangedMigrationJob(v,after[i],path + '[]'));
+  const previous = object(before), current = object(after);
+  return !!previous && !!current && [...new Set([...Object.keys(previous),...Object.keys(current)])]
+    .every(key => unchangedMigrationJob(previous[key],current[key],path ? path + '.' + key : key));
+}
 /** The pinned provider refreshes execution status when a migration job has run and the
  * repository timestamp when release artifacts change. Accept these reads only on already-owned
  * addresses, with the same native identity and an exact no-op in the executable plan. */
@@ -182,7 +196,7 @@ function harmlessProjectRefresh(plan: Record<string, any>, projectId: string, ow
       const outputs = new Set(['conditions','terminal_condition','execution_count','latest_created_execution','observed_generation','update_time','etag','reconciling']);
       if (!job || before.name !== job || before.id !== 'projects/' + projectId + '/locations/' + before.location + '/jobs/' + job ||
           !z.uuid().safeParse(before.uid).success || !before.create_time || before.delete_time || before.expire_time ||
-          ![...fields].every(key => outputs.has(key)) || Number(after.execution_count) < Number(before.execution_count)) return false;
+          ![...fields].every(key => outputs.has(key) || unchangedMigrationJob(before[key],after[key],key)) || Number(after.execution_count) < Number(before.execution_count)) return false;
     } else return false;
   }
   return true;

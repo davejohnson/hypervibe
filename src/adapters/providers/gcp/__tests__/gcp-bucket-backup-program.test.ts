@@ -153,6 +153,15 @@ describe('Google Cloud daily bucket backups', () => {
       resource_changes: [grant,...(actual ?? rows.map(r => ({ ...r,change:{ actions:['no-op'],before:r.change.after,after:r.change.after } })))] },
       { scope,before,after }, new Set([repo,job]));
     expect(verify([repositoryDrift,executionDrift])).toBe(true);
+    const initialTask = { service_account:source.runtimeEmail, containers:[{ image:GCP_JOB_NODE_IMAGE, depends_on:null }] };
+    const originalJob = { ...oldJob, annotations:null, template:[{ annotations:null,labels:null,template:[initialTask] }] };
+    const refreshedContainer = { ...initialTask.containers[0], depends_on:[] };
+    const normalized = (container: object) => ({ ...originalJob, annotations:{},template:[{ annotations:{},labels:{},template:[{ ...initialTask,containers:[container] }] }] });
+    expect(verify([repositoryDrift,drift(job,originalJob,normalized(refreshedContainer))])).toBe(true);
+    expect(verify([drift(job,originalJob,{ ...normalized(refreshedContainer),annotations:{ changed:'yes' } })])).toBe(false);
+    expect(verify([drift(job,originalJob,normalized({ ...refreshedContainer, depends_on:['unreviewed'] }))])).toBe(false);
+    expect(verify([drift(job,originalJob,normalized({ ...refreshedContainer, sandbox_launcher:true }))])).toBe(false);
+    expect(verify([drift(job,originalJob,normalized({ ...refreshedContainer, ports:[] }))])).toBe(false);
     expect(verify([repositoryDrift,executionDrift],[])).toBe(false);
     expect(verify([repositoryDrift,repositoryDrift])).toBe(false);
     for (const extra of [{ uid: 'another' }, { id: jobId + 'x' }, { template: [] }, { delete_time:newTime }, { labels:{ 'managed-by':'other' } }]) {
@@ -227,6 +236,13 @@ describe('Google Cloud daily bucket backups', () => {
       const missing = await preview();
       expect(missing).toMatchObject({ ok: false });
       expect(JSON.stringify(missing)).toMatch(/original|managed|missing/i);
+      const manifestPath = path.join(paths.root, 'setup-manifest.json');
+      const originalManifest = readFileSync(manifestPath);
+      writeFileSync(manifestPath, JSON.stringify({ contributions: {} }));
+      const neverPrepared = await preview();
+      expect(neverPrepared).toMatchObject({ ok: false });
+      expect(JSON.stringify(neverPrepared)).toContain('no managed project storage grant');
+      writeFileSync(manifestPath, originalManifest);
       expect(nativeApply).not.toHaveBeenCalled();
       policy();
       const planned = await preview();

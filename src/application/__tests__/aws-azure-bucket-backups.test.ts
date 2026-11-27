@@ -12,7 +12,8 @@ import { buildAzureBucketBackup } from '../../adapters/providers/azure/tofu/azur
 import { AZURE_ROLES, deployRoleGrants } from '../../adapters/providers/azure/azure-setup.client.js';
 import { awsDailyBucketConfig } from '../../adapters/providers/aws/aws-daily-bucket-backup.js';
 import { azureDailyBucketConfig, azureBucketId } from '../../adapters/providers/azure/azure-daily-bucket-backup.js';
-import { cloudBucketBackupNames, observedAwsBackupBucket } from '../aws-azure-bucket-backups.js';
+import { observedAwsBackupBucket } from '../../adapters/providers/aws/aws-bucket-backup-observation.js';
+import { cloudBucketBackupNames } from '../aws-azure-bucket-backups.js';
 
 const state = { provider: 'azure', projectId: 'invoice', environmentId: 'production', partition: 'environment' as const };
 const prefix = 'hv-invoice-production', storageName = 'documents';

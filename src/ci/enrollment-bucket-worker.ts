@@ -1,7 +1,6 @@
-import { ClientSecretCredential } from '@azure/identity';
 import { z } from 'zod';
 import { awsDailyBucketClients, awsDailyBucketConfig } from '../adapters/providers/aws/aws-daily-bucket-backup.js';
-import { azureDailyBucketClients, azureDailyBucketConfig } from '../adapters/providers/azure/azure-daily-bucket-backup.js';
+import { azureEnrollmentBucketClients, azureDailyBucketConfig } from '../adapters/providers/azure/azure-daily-bucket-backup.js';
 import { checkBucketEnrollment } from '../domain/services/bucket-backup-enrollment.js';
 
 /** OpenTofu external data source. It runs locally with the explicitly supplied
@@ -23,7 +22,7 @@ async function main() {
     clients = awsDailyBucketClients(config, { accessKeyId: value('AWS_ACCESS_KEY_ID'), secretAccessKey: value('AWS_SECRET_ACCESS_KEY'), sessionToken: value('AWS_SESSION_TOKEN') });
   } else {
     if (value('ARM_SUBSCRIPTION_ID').toLowerCase() !== config.subscriptionId.toLowerCase()) throw new Error();
-    clients = azureDailyBucketClients(config, new ClientSecretCredential(value('ARM_TENANT_ID'), value('ARM_CLIENT_ID'), value('ARM_CLIENT_SECRET')));
+    clients = azureEnrollmentBucketClients(config, value('ARM_TENANT_ID'), value('ARM_CLIENT_ID'), value('ARM_CLIENT_SECRET'));
   }
   try {
     const [source, archive] = await Promise.all([checkBucketEnrollment(clients.source, input.enrollmentId), checkBucketEnrollment(clients.archive, input.enrollmentId)]);

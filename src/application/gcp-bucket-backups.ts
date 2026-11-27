@@ -9,7 +9,7 @@ import type { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { gcpEngineBackend } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
 import { gcpSetupBackend } from '../adapters/providers/gcp/tofu/gcp-setup.backend.js';
 import { backupAddresses, gcpBucketBackupProgram } from '../adapters/providers/gcp/tofu/gcp-bucket-backups.js';
-import { GoogleBucketBackupError, GoogleBackupRuntimeExposure, googleBackupOwnershipFromState, googleBackupSourceFromState, observeGoogleBackupProgram, type GoogleBackupOwnership } from '../adapters/providers/gcp/gcp-bucket-backup-evidence.js';
+import { GoogleBucketBackupError, GoogleBackupRuntimeExposure, readGoogleBackupApplicationAccount, googleBackupOwnershipFromState, googleBackupSourceFromState, observeGoogleBackupProgram, type GoogleBackupOwnership } from '../adapters/providers/gcp/gcp-bucket-backup-evidence.js';
 import { readGcsDailyBucketBackups } from '../adapters/providers/gcp/gcp-daily-bucket-backup.js';
 import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
 import { canonicalJsonSha256 } from '../lib/canonical-json.js';
@@ -109,14 +109,7 @@ interface AccessStage { environmentId: string; storageName: string; setup: GcpPr
 async function reviewApplicationAccess(exposure: GoogleBackupRuntimeExposure, project: Project, token: string, environmentId: string,
   verify: () => Promise<boolean>): Promise<AccessStage> {
   const { source, archiveName } = exposure.program;
-  const name = 'projects/' + source.projectId + '/serviceAccounts/' + source.runtimeEmail;
-  const readAccount = async () => {
-    const response = await fetch('https://iam.googleapis.com/v1/' + name.replace(source.runtimeEmail, encodeURIComponent(source.runtimeEmail)),
-      { headers: { Authorization: 'Bearer ' + token }, redirect: 'error', signal: AbortSignal.timeout(15000) });
-    if (!response.ok) throw new GoogleBucketBackupError('Google could not verify the original application account before narrowing its storage access.');
-    return z.object({ name: z.literal(name), projectId: z.literal(source.projectId), email: z.literal(source.runtimeEmail),
-      uniqueId: z.string().regex(/^[1-9]\d*$/), disabled: z.literal(false).optional() }).parse(await response.json());
-  };
+  const readAccount = () => readGoogleBackupApplicationAccount(source, token);
   const account = await readAccount();
   const scope = { projectId: source.projectId, projectNumber: source.projectNumber, runtimeEmail: source.runtimeEmail, runtimeUid: account.uniqueId,
     source: source.bucket, sourceCreated: source.timeCreated, archive: archiveName };

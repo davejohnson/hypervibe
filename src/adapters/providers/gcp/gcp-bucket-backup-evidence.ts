@@ -22,6 +22,15 @@ function birth(raw: unknown) {
 const google = 'registry.opentofu.org/hashicorp/google';
 /** Only messages composed from reviewed resource names and HTTP status may leave these reads. */
 export class GoogleBucketBackupError extends Error {}
+export async function readGoogleBackupApplicationAccount(source: GcpBucketBackupSource, token: string) {
+  const name = 'projects/' + source.projectId + '/serviceAccounts/' + source.runtimeEmail;
+  const response = await fetch('https://iam.googleapis.com/v1/' + name.replace(source.runtimeEmail, encodeURIComponent(source.runtimeEmail)),
+    { headers: { Authorization: 'Bearer ' + token }, redirect: 'error', signal: AbortSignal.timeout(15000) });
+  if (!response.ok) throw new GoogleBucketBackupError('Google could not verify the original application account before narrowing its storage access.');
+  return z.object({ name: z.literal(name), projectId: z.literal(source.projectId), email: z.literal(source.runtimeEmail),
+    uniqueId: z.string().regex(/^[1-9]\d*$/), disabled: z.literal(false).optional() }).parse(await response.json());
+}
+
 export class GoogleBackupRuntimeExposure extends GoogleBucketBackupError {
   constructor(readonly program: GcpBucketBackupProgram, readonly before: BackupGrantCondition | undefined) {
     super('The application runtime can change the planned archive through its project storage permission. Review the application storage restriction before the daily backup.');
