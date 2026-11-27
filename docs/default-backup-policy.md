@@ -165,26 +165,30 @@ writes or another verified consistency mechanism where needed.
 See the [shared recovery contract](recovery-contract.md) for the separate
 verification checks and the distinction between code rollback and data restore.
 
-## Back up an uploaded-files bucket
+## Back up a storage bucket
 
-Set `storage.documents.automatedBackups: true` on the environment that hosts
-the files. Substitute the bucket's name for `documents`. Run `hv_plan` for
+Set `storage.<name>.automatedBackups: true` on the environment that hosts
+the files, using the bucket name from the project spec. Run `hv_plan` for
 that environment with `scope="backups"`. Review the source, separate archive,
 daily job, access and charges before applying the plan.
 
-If a Google Cloud app already has project-wide storage access, the first
-plan restricts its existing permission so the app cannot write to the new
-archive. After applying that access change, plan backups again to review the
-archive and daily job. Existing migration export restrictions stay in place.
+On Google Cloud, an app's service account can have permission to change or
+delete files in every bucket in its project. When the app has that grant,
+the first plan excludes the proposed archive from it. The app can still
+manage uploads in its own bucket. After applying that change, plan backups
+again to review the archive and daily job.
 
 The job copies the files once a day and keeps the last seven successful daily
 copies as history builds. Each completed copy has its own manifest listing
 the original file names and where their bytes live in the archive. Once setup
 is complete, `hv_plan scope="backups"` lists the retained dates and manifest
 paths. To recover a file, choose the day, find the original key and download
-the corresponding backup object. The backup runs independently of PostgreSQL.
-It needs no invoice query or hourly check. Keep the old archive available
-through a move for dates that precede the first backup on the new cloud.
+the corresponding backup object.
+
+During a migration, each backup covers the files in its own source bucket.
+Keep backing up the live environment for as long as it receives uploads. A
+backup on the destination covers files that have reached that bucket. Keep
+the old archive available for recovery dates that precede the move.
 
 One daily copy supports up to 100,000 objects, 5 GiB per object, 100 GiB of
 files in total and a 32 MiB manifest. Allow for storage and requests for the

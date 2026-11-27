@@ -25,7 +25,7 @@ daily program requires fresh evidence for the destination database and a review
 that explains the change in independent copies and restore tests. Require
 separate recovery coverage for each protected bucket, volume or retained database.
 
-For new cloud document archives, use the environment's hosting provider. Plan a
+Create each bucket's backup archive on the environment's hosting provider. Plan a
 separate Cloud Storage bucket on Google Cloud, an S3 bucket on AWS, or a Blob
 Storage container on Azure. Show the destination and cost in the backup plan.
 For `storage.<name>.automatedBackups: true`, copy daily and keep the seven most
