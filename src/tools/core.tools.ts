@@ -44,6 +44,7 @@ import type { CommandContext } from '../application/context.js';
 import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
+import { dailyBucketNames, readCloudBucketBackup } from '../application/cloud-bucket-backups.js';
 import { planHostedDns } from '../application/dns-hosting.js';
 import { planEmailDns } from '../application/dns-integrations.js';
 import { awsEngine, cloudEngineFor, planSharedDatabaseRemoval } from '../application/cloud-engines.js';
@@ -722,7 +723,28 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       const selected = routingSpec?.spec.environments[routingEnvironment];
       if (scope === 'backups' && selected && (isEngineManaged(selected) || firstProviderSpecValidationFailure(routingSpec!.spec, routingEnvironment))) {
         if ([services, envVars, envFile, secretRefs, credential, intent].some(value => value !== undefined) || includeEnvFile) {
-          return commandError('VALIDATION', 'Backup reporting takes only project, env and scope. Remove deploy inputs.');
+          return commandError('VALIDATION', 'A backup plan takes only project, env and scope. Remove deploy inputs.');
+        }
+        const cloud = cloudEngineFor(routingSpec!.spec, routingEnvironment);
+        const buckets = dailyBucketNames(selected);
+        if (cloud && buckets.length) {
+          const planned = await cloud.planBucketBackups(ctx, { project, spec: routingSpec!.spec,
+            specRevision: routingSpec!.revision, environmentName: routingEnvironment });
+          if ('blocked' in planned) return commandError('VALIDATION', 'Daily bucket backup setup is blocked.',
+            { details: { blocked: planned.blocked }, next: ['hv_plan'] });
+          const changes = planned.actions.filter(action => action.type !== 'noop');
+          const points = retainedEnvironment && cloud.observeBucketBackup && changes.length === 0
+            ? await Promise.all(buckets.map(async storageName => {
+              const point = await readCloudBucketBackup(project, retainedEnvironment, selected, storageName);
+              return { storageName, ...(point ? { status: point.current ? 'current' : 'overdue', lastBackup: point.latestAt,
+                archive: point.archiveLocation ?? point.archive, recoveryPoints: point.recoveryPoints } : { status: 'No completed backup confirmed' }) };
+            })) : undefined;
+          return commandSuccess({ planId: planned.planRunId, ...ctx.repos.runs.planReport(planned.planRunId), environment: routingEnvironment,
+            scope, specRevision: planned.specRevision, actions: changes.map(({ metadata: _metadata, ...action }) => action),
+            confirmActions: planned.confirmActions, ...(points && { bucketBackups: points }) }, {
+            warnings: planned.warnings, hint: changes.length
+              ? 'Review the archive, access and daily copy costs with the user. Apply this exact plan after approval.'
+              : 'Daily bucket backup setup is up to date.', next: changes.length ? ['hv_apply'] : [] });
         }
         if (!selected.backups) return commandError('VALIDATION', 'Set explicit backups.mode in this environment before requesting a backup review.');
         const evidence = await explicitBackupEvidence(ctx, project, retainedEnvironment, selected);

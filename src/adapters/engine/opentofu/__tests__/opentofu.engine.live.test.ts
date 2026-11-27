@@ -13,7 +13,16 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { EngineConfiguration, EngineStateIdentity, InfrastructureEngineBackend } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { buildCloudRunConfiguration, gcpEngineBackend, secretEngineKey } from '../../../providers/gcp/tofu/gcp-engine.backend.js';
 import { buildArtifactRegistryConfiguration } from '../../../providers/gcp/tofu/gcp-project.backend.js';
+import { gcpBucketBackupProgram } from '../../../providers/gcp/tofu/gcp-bucket-backups.js';
+import { backupAccessAddress, backupAccessContribution, projectStorageDefinition, storageDefinitionCondition, verifyBackupAccessPlan } from '../../../providers/gcp/tofu/backup-archive-access.js';
+import { transferIsolationContribution } from '../../../providers/gcp/tofu/transfer-isolation.js';
+import { reviewGoogleBucketBackupPlan } from '../../../../application/gcp-bucket-backups.js';
 import { OpenTofuEngine } from '../engine.js';
+import { buildAwsBucketBackup } from '../../../providers/aws/tofu/aws-bucket-backup.config.js';
+import { awsEngineBackend } from '../../../providers/aws/tofu/aws-engine.backend.js';
+import { buildAzureBucketBackup } from '../../../providers/azure/tofu/azure-bucket-backup.config.js';
+import { azureEngineBackend } from '../../../providers/azure/tofu/azure-engine.backend.js';
+import { withBackupEnrollmentProvider, frozenEnrollmentWitness } from '../../../providers/backup-enrollment-witness.js';
 import { ensureEngineBinary } from '../install.js';
 import { buildCiReleaseConfiguration } from '../../../providers/gcp/tofu/gcp-ci.backend.js';
 import { buildGcpBootstrapConfiguration, buildGcpPreparationConfiguration, defaultGcpPreparationInput, gcpSetupBackend } from '../../../providers/gcp/tofu/gcp-setup.backend.js';
@@ -68,11 +77,96 @@ describe('OpenTofu engine (real binary, no cloud writes)', () => {
   const paths = engineStatePaths(state, dataDir);
   fs.mkdirSync(path.join(dataDir, 'plugins'), { recursive: true });
 
+  it('validates both file backup jobs and freezes the original native marker revisions across later refreshes', async () => {
+    const common = { prefix: 'hv-invoice-prod', programName: 'hv-invoice-backup', environmentId: 'prod', storageName: 'documents', worker: Buffer.from('test worker') };
+    const azureId = '11111111-2222-4333-8444-555555555555';
+    const aws = buildAwsBucketBackup({ ...common, config: { version: 1, provider: 's3', accountId: '111122223333', region: 'us-east-1',
+      sourceBucket: 'hv-native-source', archiveBucket: 'hv-native-archive' } });
+    const azure = buildAzureBucketBackup({ ...common, tenantId: azureId, location: 'eastus', config: { version: 1, provider: 'azure-blob',
+      subscriptionId: azureId, resourceGroup: 'hv-invoice', sourceAccount: 'hvtestsource01', sourceContainer: 'docs', archiveAccount: 'hvtestarchive01', archiveContainer: 'archive' } });
+    const env: Record<string, string> = {};
+    for (const name of ['TF_CLI_CONFIG_FILE', 'TF_PLUGIN_CACHE_DIR']) if (process.env[name]) env[name] = process.env[name];
+    const fixture: EngineConfiguration = { files: { 'enrollment.tf.json': {
+      variable: { witness: { type: 'string' } },
+      data: { external: { original_markers: { program: [process.execPath, '-e', "process.stdin.pipe(process.stdout);"], query: { witness: '${var.witness}' } } } },
+      resource: { terraform_data: { enrollment_witness: frozenEnrollmentWitness } }, output: { enrolled: { value: '${terraform_data.enrollment_witness.output}' } },
+    } }, resources: {} };
+    for (const [backend, configuration] of [[awsEngineBackend, aws], [azureEngineBackend, azure], [builtinBackend, fixture]] as const) {
+      const requirements = withBackupEnrollmentProvider(backend).providerRequirements;
+      const work = materializeWorkingDirectory({ parent: dataDir, configuration, requirements });
+      const options = { binary, workingDirectory: work, env, redact: [], timeoutMs: 300_000 };
+      const init = await runTofu({ kind: 'init' }, options);
+      expect(init.exitCode, init.stderr).toBe(0);
+      const checked = await runTofu({ kind: 'validate' }, options);
+      expect(checked.exitCode, checked.stdout).toBe(0);
+      if (backend !== builtinBackend) continue;
+      for (const [witness, changes] of [['original', 2], ['copied', 0]] as const) {
+        const plan = await runTofu({ kind: 'plan', out: 'witness.tfplan' }, { ...options, env: { ...env, TF_VAR_witness: witness } });
+        expect(plan.exitCode, plan.stderr).toBe(changes);
+        const applied = await runTofu({ kind: 'apply', planFile: 'witness.tfplan' }, options);
+        expect(applied.exitCode, applied.stderr).toBe(0);
+        const shown = await runTofu({ kind: 'output' }, options);
+        expect(JSON.parse(shown.stdout).enrolled.value).toBe('original');
+      }
+    }
+  }, 300_000);
+
   it('validates project-shared keyless CI infrastructure with the pinned provider', async () => {
     const configuration = buildCiReleaseConfiguration({ projectId: 'demo-project', projectNumber: '123456789',
       repository: 'owner/app', repositoryId: '345', releases: [{ environmentName: 'staging', branch: 'main', autoDeploy: true }], runtimeServiceAccountEmail: 'runtime@demo-project.iam.gserviceaccount.com' });
     expect(await engine.validate(gcpSetupBackend, configuration)).toEqual({ ok: true });
   }, 300_000);
+
+  it('validates the isolated daily bucket backup, dedicated identities and Cloud Scheduler trigger with the pinned Google provider', async () => {
+    const { configuration } = gcpBucketBackupProgram({ projectId: 'demo-project', projectNumber: '123456789', environmentId: 'env123',
+      deployEmail: 'deploy@demo-project.iam.gserviceaccount.com', runtimeEmail: 'runtime@demo-project.iam.gserviceaccount.com',
+      region: 'us-central1', location: 'US-CENTRAL1', storageName: 'files', bucket: 'demo-original-files', timeCreated: '2026-01-01T00:00:00Z' });
+    const work = materializeWorkingDirectory({ parent: dataDir, configuration, requirements: gcpEngineBackend.providerRequirements });
+    const options = { binary, workingDirectory: work, redact: [], timeoutMs: 300_000 };
+    const initEnv: Record<string, string> = {};
+    for (const key of ['TF_CLI_CONFIG_FILE', 'TF_PLUGIN_CACHE_DIR']) if (process.env[key]) initEnv[key] = process.env[key];
+    const init = await runTofu({ kind: 'init' }, { ...options, env: initEnv });
+    expect(init.exitCode, init.stderr).toBe(0);
+    // The provider only plans creates. Neither credentials nor a reachable cloud endpoint are available.
+    const env = { GOOGLE_OAUTH_ACCESS_TOKEN: 'synthetic', GCE_METADATA_HOST: '127.0.0.1:1',
+      HTTPS_PROXY: 'http://127.0.0.1:1', HTTP_PROXY: 'http://127.0.0.1:1', NO_PROXY: '127.0.0.1' };
+    const plan = await runTofu({ kind: 'plan', out: 'backup.tfplan' }, { ...options, env });
+    expect(plan.exitCode, plan.stderr || plan.stdout).toBe(2);
+    const shown = await runTofu({ kind: 'show-plan', planFile: 'backup.tfplan' }, { ...options, env });
+    expect(shown.exitCode, shown.stderr).toBe(0);
+    expect(reviewGoogleBucketBackupPlan(JSON.parse(shown.stdout), Object.keys(configuration.resources), {})).toBe(true);
+  }, 300_000);
+
+  it('plans the exact daily archive exclusion against synthetic state for a pre-existing migration-isolated Google role', async () => {
+    const projectId = 'demo-project', runtimeEmail = 'runtime@demo-project.iam.gserviceaccount.com';
+    const target = { projectId, targetRegion: 'us-central1', sourceEnvironmentId: 'rail', sourceRailwayProjectId: 'source', sourceRailwayEnvironmentId: 'prod', targetEnvironmentId: 'gcp' };
+    const scope = { projectId, projectNumber: '123456789', runtimeEmail, runtimeUid: '12345', source: 'demo-source', sourceCreated: '2026-01-01T00:00:00Z', archive: 'hv-backup-1234567890abcdef1234-files' };
+    const migration = transferIsolationContribution({ target, targetEnvironmentName: 'production', projectNumber: scope.projectNumber, runtimeEmail,
+      runtimeUniqueId: scope.runtimeUid, bucket: projectId + '-hv-build-source', bucketTimeCreated: scope.sourceCreated, copyUniqueId: '883', secretCreateTime: scope.sourceCreated });
+    const base = { original: buildGcpPreparationConfiguration({ gcpProjectId: projectId, deployServiceAccountEmail: 'deploy@demo-project.iam.gserviceaccount.com',
+      runtimeServiceAccountEmail: runtimeEmail, grantRoles: [], enableApis: [], runtimeGrantRoles: ['roles/storage.objectUser'], runtimeServiceAccountGrantRoles: [] }), [migration.id]: migration.configuration };
+    const guard = backupAccessContribution(scope);
+    const before = storageDefinitionCondition(projectStorageDefinition(composeGcpProjectConfiguration(base), runtimeEmail))!;
+    const contributed = composeGcpProjectConfiguration({ ...base, [guard.id]: guard.configuration });
+    const grant = projectStorageDefinition(contributed, runtimeEmail), after = storageDefinitionCondition(grant)!;
+    const address = backupAccessAddress(runtimeEmail), name = address.split('.')[1]!;
+    const configuration = { files: { 'project-setup.tf.json': { provider: { google: [{ project: projectId }] }, resource: { google_project_iam_member: { [name]: grant } } } }, resources: { [address]: contributed.resources[address]! } };
+    const work = materializeWorkingDirectory({ parent: dataDir, configuration, requirements: gcpEngineBackend.providerRequirements });
+    const env: Record<string,string> = {};
+    for (const key of ['TF_CLI_CONFIG_FILE', 'TF_PLUGIN_CACHE_DIR']) if (process.env[key]) env[key] = process.env[key];
+    const init = await runTofu({ kind: 'init' }, { binary, workingDirectory: work, env, redact: [], timeoutMs: 300000 });
+    expect(init.exitCode, init.stderr).toBe(0);
+    const state = path.join(work, 'prior.tfstate'), plan = path.join(work, 'role.tfplan');
+    fs.writeFileSync(state, JSON.stringify({ version: 4, serial: 1, resources: [{ mode: 'managed', type: 'google_project_iam_member', name,
+      provider: 'provider["registry.opentofu.org/hashicorp/google"]', instances: [{ schema_version: 0, attributes: { project: projectId,
+        member: 'serviceAccount:' + runtimeEmail, role: 'roles/storage.objectUser', condition: [before], etag: 'Bw==',
+        id: projectId + '/roles/storage.objectUser/serviceAccount:' + runtimeEmail + '/' + before.title } }] }] }));
+    const offline = engineProcessEnv({ ...env, GOOGLE_OAUTH_ACCESS_TOKEN: 'synthetic', GCE_METADATA_HOST: '127.0.0.1:1', HTTPS_PROXY: 'http://127.0.0.1:1', HTTP_PROXY: 'http://127.0.0.1:1' });
+    await promisify(execFile)(binary, ['plan', '-no-color', '-refresh=false', '-state=' + state, '-out=' + plan], { cwd: work, env: offline, timeout: 300000 });
+    const result = await runTofu({ kind: 'show-plan', planFile: plan }, { binary, workingDirectory: work, env, redact: [], timeoutMs: 300000 });
+    expect(result.exitCode).toBe(0);
+    expect(verifyBackupAccessPlan(JSON.parse(result.stdout), { scope, before, after })).toBe(true);
+  }, 300000);
 
   it('validates bootstrap plus later worker and CI access as one shared resource graph', async () => {
     const projectId = 'demo-project';

@@ -176,7 +176,7 @@ function checkPlacement(input: AzurePlacement): void {
   if (!/^[a-z][a-z0-9-]{2,24}[a-z0-9]$/.test(input.prefix)) throw new Error('Azure name prefix is invalid.');
 }
 
-function providerFile(input: AzurePlacement): unknown {
+export function azureProviderFile(input: AzurePlacement): unknown {
   return { provider: { azurerm: [{
     subscription_id: input.subscriptionId, tenant_id: input.tenantId,
     // Setup registered the resource providers with the subscription Owner; the deploy identity cannot.
@@ -209,7 +209,7 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
   const subnet = (name: string, range: string, extra: Record<string, unknown> = {}) => ({
     name, resource_group_name: input.resourceGroup, virtual_network_name: '${azurerm_virtual_network.main.name}', address_prefixes: [range], ...extra });
   const files: Record<string, unknown> = {
-    'provider.tf.json': providerFile(input),
+    'provider.tf.json': azureProviderFile(input),
     // The database is reachable only inside this network, so the apps must run in it. A Container Apps
     // environment can join a network only when it is created, which is why the group shares one.
     'network.tf.json': {
@@ -387,7 +387,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   const files: Record<string, unknown> = {
     ...(Object.keys(input.adoptRoleAssignments ?? {}).length
       ? { 'imports.tf.json': { import: Object.entries(input.adoptRoleAssignments!).map(([to, id]) => ({ to, id })) } } : {}),
-    'provider.tf.json': providerFile(input),
+    'provider.tf.json': azureProviderFile(input),
     'base.tf.json': {
       resource: {
         azurerm_user_assigned_identity: identities,
@@ -532,7 +532,7 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
 /** The environment's private-package build identity, applied before its first image. */
 export function buildAzureBuildConfiguration(input: AzureEngineInput): EngineConfiguration {
   checkPlacement(input);
-  const files: Record<string, unknown> = { 'provider.tf.json': providerFile(input) };
+  const files: Record<string, unknown> = { 'provider.tf.json': azureProviderFile(input) };
   const resources: Record<string, EngineResourceMapping> = {};
   const registry = azureSelectedBuildRegistry(input);
   const managedRegistry = Boolean(input.ci || input.buildRegistry);

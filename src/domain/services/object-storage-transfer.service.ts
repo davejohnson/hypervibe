@@ -41,6 +41,11 @@ export function createS3ObjectClient(credentials: StorageCredentials, dependenci
       ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
     },
   });
+  return s3BucketObjectClient(client, credentials.bucket);
+}
+
+export function s3BucketObjectClient(client: S3Client, bucket: string, expectedOwner?: string): StorageObjectClient {
+  const scope = { Bucket: bucket, ...(expectedOwner ? { ExpectedBucketOwner: expectedOwner } : {}) };
   return {
     async list(options): Promise<StorageObjectRecord[]> {
       const objects: StorageObjectRecord[] = [];
@@ -48,7 +53,7 @@ export function createS3ObjectClient(credentials: StorageCredentials, dependenci
       let continuationToken: string | undefined;
       do {
         const page = await client.send(new ListObjectsV2Command({
-          Bucket: credentials.bucket,
+          ...scope,
           ...(options?.prefix ? { Prefix: options.prefix } : {}),
           ...(continuationToken ? { ContinuationToken: continuationToken } : {}),
         }));
@@ -73,7 +78,7 @@ export function createS3ObjectClient(credentials: StorageCredentials, dependenci
     },
     async get(key, revision): Promise<StorageObjectPayload> {
       if (revision?.generation || revision?.metageneration) throw new Error('S3 does not accept a different provider revision format.');
-      const object = await client.send(new GetObjectCommand({ Bucket: credentials.bucket, Key: key,
+      const object = await client.send(new GetObjectCommand({ ...scope, Key: key,
         ...(revision?.etag ? { IfMatch: revision.etag } : {}),
         ...(revision?.versionId ? { VersionId: revision.versionId } : {}),
       }));
@@ -93,7 +98,7 @@ export function createS3ObjectClient(credentials: StorageCredentials, dependenci
     async put(key, payload, options): Promise<void> {
       if (!Number.isSafeInteger(payload.size) || payload.size < 0 || payload.size > 5 * 1024 ** 3) throw new Error('The S3 object stream exceeds the supported single-request size.');
       await client.send(new PutObjectCommand({
-        Bucket: credentials.bucket,
+        ...scope,
         Key: key,
         Body: payload.body,
         ContentLength: payload.size,
@@ -107,7 +112,7 @@ export function createS3ObjectClient(credentials: StorageCredentials, dependenci
     },
     async remove(key, revision) {
       if (revision?.generation || revision?.metageneration) throw new Error('S3 does not accept a different provider revision format.');
-      await client.send(new DeleteObjectCommand({ Bucket: credentials.bucket, Key: key,
+      await client.send(new DeleteObjectCommand({ ...scope, Key: key,
         ...(revision?.etag ? { IfMatch: revision.etag } : {}), ...(revision?.versionId ? { VersionId: revision.versionId } : {}) }));
     },
     destroy: () => client.destroy(),

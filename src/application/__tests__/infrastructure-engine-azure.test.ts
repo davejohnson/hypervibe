@@ -266,6 +266,23 @@ describe('Azure apply actions', () => {
     expect(result).toMatchObject({ success: false, message: expect.stringContaining('hv-billforge-test-web') });
     expect(azure.bindings().azure).toBeUndefined();
   });
+
+  it('finishes the last app teardown while keeping the separately tagged backup archive, job and its compute environment', async () => {
+    const retained = ['archive-account', 'backup-job', 'backup-compute'].map(name => ({ name, tags: { 'hv-backup-environment': 'env1' } }));
+    const azure = setup((_method, url) => {
+      if (url.includes('vault.azure.net/secrets?')) return json(200, { value: [] });
+      const filter = new URL(url).searchParams.get('$filter');
+      const tag = /tagName eq '([^']+)'/.exec(filter ?? '')?.[1] ?? '';
+      return json(200, { value: retained.filter(row => Object.hasOwn(row.tags, tag)) });
+    });
+    vi.spyOn(sharedEngine, 'forgetTornDownEnvironment').mockReturnValue('');
+    const result = await runAzureAction(azure.ctx, azure.context, action(AZURE_TEARDOWN_CLEANUP_OPERATION, { sharedRemoved: true }),
+      { project: project as never, spec: spec({ test: testing() }) });
+    expect(result.success).toBe(true);
+    expect(azure.bindings().azure).toMatchObject({ tornDownAt: expect.any(String) });
+    expect(azure.calls.filter(call => call.method === 'DELETE')).toEqual([]);
+    expect(azure.calls.some(call => decodeURIComponent(call.url).includes("tagName eq 'hv-shared'"))).toBe(true);
+  });
 });
 
 describe('saved Azure plans', () => {

@@ -40,6 +40,8 @@ import {
 import { executeBootstrap } from '../domain/services/bootstrap.service.js';
 import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { applyInfrastructureEngine } from './infrastructure-engine.js';
+import { cloudEngineFor } from './cloud-engines.js';
+import { anyBucketBackupDescriptorSchema } from '../domain/plan/bucket-backup-plan.contract.js';
 import { applyDnsPlan } from './dns-hosting.js';
 import { getDnsBindingIdentity, hasOwnedDnsRecords } from './dns-engine.js';
 import { verifyDnsTrafficAbsent } from './dns-absence.js';
@@ -805,6 +807,20 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
+  if (planScope === 'bucket-backups') {
+    if (invalidSpec) return invalidSpec;
+    const engine = cloudEngineFor(spec, envName);
+    const descriptor = anyBucketBackupDescriptorSchema.safeParse((loaded.document.engine as { bucketBackup?: unknown })?.bucketBackup);
+    if (!engine || !descriptor.success || descriptor.data.provider !== engine.id || loaded.run.projectId !== project.id) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
+        reason: 'The saved bucket backup plan belongs to a different project or cloud. Plan the selected environment’s backups again.' }] };
+    }
+    const result = await engine.applyBucketBackups(ctx, { project, spec, specRevision: params.specRevision, planId,
+      confirmActions: params.confirmActions ?? [] });
+    return result.kind === 'blocked'
+      ? { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: engine.id, reason: result.reason }] }
+      : { kind: result.kind, envName: result.envName, result: result.result, actionScopedWarnings: result.warnings ?? [] };
+  }
   if (planScope === 'dns-engine') {
     if (invalidSpec) return invalidSpec;
     const outcome = await applyDnsPlan(ctx, { project, spec, specRevision: params.specRevision,

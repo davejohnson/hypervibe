@@ -153,6 +153,7 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
     ...(source.queues ? { queues: source.queues } : {}),
     ...(source.storage ? { storage: Object.fromEntries(Object.entries(source.storage).filter(([, storage]) => storage.purpose !== 'backup').map(([name, storage]) => [name, {
       provider: 'gcs', type: 'bucket', region: options.region ?? 'us-central1', injectInto: storage.injectInto,
+      ...(source.backups?.mode === 'daily' || storage.automatedBackups ? { automatedBackups: true } : {}),
       // Apps written for S3-style buckets (Railway, AWS) keep working unchanged.
       ...(['railway', 's3'].includes(storage.provider) ? { access: 's3' } : {}),
     }])) } : {}),
@@ -694,7 +695,11 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
       const checked = compareMigrationBucket(bucket.name, result);
       if (checked.blocked !== undefined) return { status: 'blocked', message: checked.blocked };
       if (!checked.match) return { status: 'blocked', message: `The copied files in ${bucket.name} do not match the source.`, details: checked };
-      storage.push({ name: bucket.name, files: checked.files, bytes: checked.bytes, match: true, downloadVerifiedFor: bucket.identity });
+      const earlier = previousCopy?.storage?.find(item => item.name === bucket.name && item.match
+        && item.downloadVerifiedFor === bucket.identity && (item.files > 0 || checked.files === 0));
+      const firstVerifiedAt = (earlier && (earlier.firstVerifiedAt ?? previousCopy?.copiedAt)) ?? new Date().toISOString();
+      storage.push({ name: bucket.name, files: checked.files, bytes: checked.bytes, match: true, downloadVerifiedFor: bucket.identity,
+        ...(targetSpec.storage?.[bucket.name]?.automatedBackups && { firstVerifiedAt }) });
     }
 
     const current = environment();

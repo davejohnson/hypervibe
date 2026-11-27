@@ -22,15 +22,18 @@ requires an infrastructure plan and exact action confirmation. Preserve the
 provider's retention, recovery settings and shared-server ownership. At a
 guided cutover, accepting these backups in place of the source's database-only
 daily program requires fresh evidence for the destination database and a review
-that explains the change in independent copies and restore tests. Keep cutover
-blocked for any additional protected bucket, volume or retained database.
+that explains the change in independent copies and restore tests. Require
+separate recovery coverage for each protected bucket, volume or retained database.
 
-For new cloud document archives, use the environment's hosting provider. Plan a
+Create each bucket's backup archive on the environment's hosting provider. Plan a
 separate Cloud Storage bucket on Google Cloud, an S3 bucket on AWS, or a Blob
 Storage container on Azure. Show the destination and cost in the backup plan.
-Retain the source archive through migration until the replacement covers the
-required history and a restored database can resolve its file references.
-This is the target for [cloud file recovery](https://github.com/davejohnson/hypervibe/issues/253).
+For `storage.<name>.automatedBackups: true`, copy daily and keep the seven most
+recent completed copies of that bucket as history builds. File protection
+requires a completed copy of the correct bucket in the separate archive.
+Database queries and application restore drills belong to the combined
+database/files policy. Retain the source archive through migration so its
+earlier recovery points remain available.
 
 ## DG-076
 
@@ -42,7 +45,7 @@ Before a backup mutation, persist its exact scoped source and unique operation i
 
 ## DG-107
 
-Recurring recovery programs require exact published source/destination identities and a pinned helper artifact. The managed workflow schedules one backup per day and verifies the restore during that backup. Expose the run outcome and operational receipt through GitHub Actions. Health checks between runs are on demand. The workflow must have no recurring health poll, GitHub issue alert or issue-write permission.
+Recurring recovery programs require exact source and destination identities and a pinned helper artifact. The cloud bucket program records the files in each successful daily copy and exposes its latest backup on demand. The managed GitHub workflow for tested restores runs its restore during the daily backup and reports the result in GitHub Actions. Health checks between runs are on demand.
 
 Keep schedule, retained-point and restore evidence separate. Backup setup and health are independent of ordinary rollout admission; report prerequisite-only backup applies as pending and skipped backup work as skipped, never complete. Ordinary repository publication preserves accepted backup programs and never creates, updates or retires them, even if a new program is ready. Explicit `scope="backups"` selects only the requested environment's program independently of the canonical repository environment; it must not publish unrelated repository policy or another environment's backup files. Validate that scope and exact file authority again when loading the persisted plan. Program retirement needs an explicitly disabled declaration and a separate backup-scoped review; it never deletes provider snapshots or retained recovery data. Re-observe native source identity in scheduled consumers as well as local planning. A selected resource ID does not attenuate a credential: require provider-proven credential scope before private-worker handoff. Write completion last, attest provider cleanup separately, and require complete sets for retention and recovery health. A database/files set must verify the restored database's references against retained file bytes; successful independent copies do not establish application consistency.
 

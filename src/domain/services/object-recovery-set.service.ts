@@ -14,6 +14,9 @@ export const objectRecoveryIdentitySchema = z.object({
 }).strict();
 export type ObjectRecoveryIdentity = z.infer<typeof objectRecoveryIdentitySchema>;
 export interface ObjectRecoveryLimits { maxObjects: number; maxObjectBytes: number; maxTotalBytes: number; maxManifestBytes?: number }
+export const RECOVERY_LIMITS: ObjectRecoveryLimits = {
+  maxObjects: 100_000, maxObjectBytes: 5 * 1024 ** 3, maxTotalBytes: 100 * 1024 ** 3, maxManifestBytes: 32 * 1024 ** 2,
+};
 const revisionSchema = z.object({ etag: z.string().min(1).optional(), versionId: z.string().min(1).optional(),
   generation: z.string().min(1).optional(), metageneration: z.string().min(1).optional(), lastModified: z.string().min(1).optional() }).strict()
   .refine(value => Boolean(value.etag || value.versionId || value.generation), 'A native object revision is required.');
@@ -157,9 +160,10 @@ function receipt(manifest: ObjectRecoveryManifest, manifestSha256: string, appli
     totalBytes: manifest.entries.reduce((bytes, entry) => bytes + BigInt(entry.size), 0n).toString(), manifestSha256,
     completedAt: manifest.completedAt, contentVerified: true, applied, skipped };
 }
-async function manifestBytes(client: StorageObjectClient, key: string, maxBytes: number): Promise<Buffer> {
-  const object = await client.get(key); const body = readable(object.body); const chunks: Buffer[] = []; let bytes = 0;
+export async function readRecoveryObject(client: StorageObjectClient, key: string, maxBytes: number, expected?: StoredObjectRevision) {
+  const object = await client.get(key, expected); const body = readable(object.body); const chunks: Buffer[] = []; let bytes = 0;
   try {
+    if (expected && !storedObjectRevisionMatches(expected, object.revision)) throw new Error('The recovery evidence revision changed.');
     if (!Number.isSafeInteger(object.size) || object.size < 0 || object.size > maxBytes) throw new Error('Recovery manifest exceeds its size limit.');
     for await (const chunk of body) {
       const buffer = Buffer.from(chunk); bytes += buffer.length;
@@ -167,30 +171,47 @@ async function manifestBytes(client: StorageObjectClient, key: string, maxBytes:
       chunks.push(buffer);
     }
     if (bytes !== object.size) throw new Error('Recovery manifest stream size differs from metadata.');
-    return Buffer.concat(chunks);
+    return { bytes: Buffer.concat(chunks), revision: object.revision };
   } finally { body.destroy(); }
 }
 
-/** Lightweight observation: validates the committed inventory and presence, not current object bytes. */
-export async function observeObjectRecoverySetInventory(params: { destination: StorageObjectClient; sourceIdentity: ObjectRecoveryIdentity;
-  destinationIdentity: ObjectRecoveryIdentity; setId: string; limits: ObjectRecoveryLimits }): Promise<{ manifest: ObjectRecoveryManifest; manifestSha256: string }> {
-  const limits = bounds(params.limits); const key = objectRecoveryManifestKey(params.sourceIdentity, params.setId);
-  const bytes = await manifestBytes(params.destination, key, limits.maxManifestBytes);
+export async function readRecoveryObjectBytes(client: StorageObjectClient, key: string, maxBytes: number, expected?: StoredObjectRevision): Promise<Buffer> {
+  return (await readRecoveryObject(client, key, maxBytes, expected)).bytes;
+}
+
+interface RecoverySetRead {
+  destination: StorageObjectClient; sourceIdentity: ObjectRecoveryIdentity; destinationIdentity: ObjectRecoveryIdentity;
+  setId: string; limits: ObjectRecoveryLimits; expectedManifestRevision?: StoredObjectRevision;
+}
+
+export async function readObjectRecoveryManifest(params: RecoverySetRead) {
+  const key = objectRecoveryManifestKey(params.sourceIdentity, params.setId);
+  const limits = bounds(params.limits);
+  const bytes = await readRecoveryObjectBytes(params.destination, key, limits.maxManifestBytes, params.expectedManifestRevision);
   const manifest = checkedManifest(JSON.parse(bytes.toString('utf8')), limits);
   if (manifest.setId !== params.setId || canonicalJsonSha256(manifest.sourceIdentity) !== canonicalJsonSha256(params.sourceIdentity)
     || canonicalJsonSha256(manifest.destinationIdentity) !== canonicalJsonSha256(params.destinationIdentity)) throw new Error('Recovery manifest identifies a different source or destination.');
-  const expected = new Set([key, ...manifest.entries.map(entry => entry.backupKey)]);
-  const actual = await params.destination.list({ prefix: objectRecoverySetPrefix(params.sourceIdentity, params.setId), maxObjects: limits.maxObjects + 1 });
-  if (actual.length !== expected.size || new Set(actual.map(object => object.key)).size !== expected.size
-    || actual.some(object => !expected.has(object.key))) throw new Error('Completed recovery set has missing, duplicate or extra objects.');
-  if (actual.some(object => object.key !== key && manifest.entries.find(entry => entry.backupKey === object.key)?.size !== object.size)) {
-    throw new Error('Completed recovery set object size differs from its manifest.');
-  }
-  if (actual.some(object => object.key !== key && !storedObjectRevisionMatches(
-    manifest.entries.find(entry => entry.backupKey === object.key)?.backupRevision, object.revision))) {
-    throw new Error('Completed recovery set object revision changed after verification.');
-  }
   return { manifest, manifestSha256: createHash('sha256').update(bytes).digest('hex') };
+}
+
+/** Lightweight observation: validates the committed inventory and presence, not current object bytes. */
+export async function observeObjectRecoverySetInventory(params: RecoverySetRead): Promise<{ manifest: ObjectRecoveryManifest; manifestSha256: string }> {
+  const observed = await readObjectRecoveryManifest(params);
+  const key = objectRecoveryManifestKey(params.sourceIdentity, params.setId);
+  const entries = new Map(observed.manifest.entries.map(entry => [entry.backupKey, entry]));
+  const actual = await params.destination.list({ prefix: objectRecoverySetPrefix(params.sourceIdentity, params.setId), maxObjects: params.limits.maxObjects + 1 });
+  if (actual.length !== entries.size + 1 || new Set(actual.map(object => object.key)).size !== actual.length
+    || actual.some(object => object.key !== key && !entries.has(object.key))) throw new Error('Completed recovery set has missing, duplicate or extra objects.');
+  for (const object of actual) {
+    if (object.key === key) {
+      if (params.expectedManifestRevision && !storedObjectRevisionMatches(params.expectedManifestRevision, object.revision)) throw new Error('The recovery manifest revision changed.');
+      continue;
+    }
+    const entry = entries.get(object.key)!;
+    if (entry.size !== object.size) throw new Error('Completed recovery set object size differs from its manifest.');
+    if (!storedObjectRevisionMatches(entry.backupRevision, object.revision)) throw new Error('Completed recovery set object revision changed after verification.');
+  }
+  return observed;
 }
 
 export async function verifyObjectRecoverySet(params: { destination: StorageObjectClient; sourceIdentity: ObjectRecoveryIdentity;
@@ -209,7 +230,8 @@ export async function verifyObjectRecoverySet(params: { destination: StorageObje
 }
 
 export async function createObjectRecoverySet(params: { source: StorageObjectClient; destination: StorageObjectClient;
-  sourceIdentity: ObjectRecoveryIdentity; destinationIdentity: ObjectRecoveryIdentity; setId: string; createdAt: string;
+  sourceIdentity: ObjectRecoveryIdentity; destinationIdentity: ObjectRecoveryIdentity; setId: string; createdAt: string; now?: Date;
+  objectVerified?: (entry: ObjectRecoveryManifest['entries'][number]) => Promise<void>;
   limits: ObjectRecoveryLimits }): Promise<VerifiedObjectRecoverySet> {
   const limits = bounds(params.limits); const sourceIdentity = objectRecoveryIdentitySchema.parse(params.sourceIdentity);
   const destinationIdentity = objectRecoveryIdentitySchema.parse(params.destinationIdentity); distinct(sourceIdentity, destinationIdentity);
@@ -221,21 +243,24 @@ export async function createObjectRecoverySet(params: { source: StorageObjectCli
   const before = inventory(await params.source.list({ maxObjects: limits.maxObjects }), limits); const entries: ObjectRecoveryManifest['entries'] = [];
   for (const object of before) {
     const backupKey = objectKey(prefix, object.key);
-    entries.push({ ...object, backupKey, ...await copy(params.source, params.destination, object.key, backupKey, object.size, object.revision) });
+    const entry = { ...object, backupKey, ...await copy(params.source, params.destination, object.key, backupKey, object.size, object.revision) };
+    await params.objectVerified?.(entry);
+    entries.push(entry);
   }
   if (canonicalJsonSha256(inventory(await params.source.list({ maxObjects: limits.maxObjects }), limits)) !== canonicalJsonSha256(before)) throw new Error('Source inventory changed during recovery-set creation.');
   const copied = await params.destination.list({ prefix, maxObjects: limits.maxObjects });
+  const byBackupKey = new Map(entries.map(entry => [entry.backupKey, entry]));
   if (copied.length !== entries.length || new Set(copied.map(object => object.key)).size !== entries.length
-    || copied.some(object => !entries.some(entry => entry.backupKey === object.key && entry.size === object.size))) throw new Error('Recovery destination inventory differs from the copied set.');
-  if (copied.some(object => !storedObjectRevisionMatches(entries.find(entry => entry.backupKey === object.key)?.backupRevision, object.revision))) {
+    || copied.some(object => byBackupKey.get(object.key)?.size !== object.size)) throw new Error('Recovery destination inventory differs from the copied set.');
+  if (copied.some(object => !storedObjectRevisionMatches(byBackupKey.get(object.key)?.backupRevision, object.revision))) {
     throw new Error('Recovery destination revision changed after read-back verification.');
   }
   const manifest = checkedManifest({ version: OBJECT_RECOVERY_FORMAT_VERSION, setId: params.setId, sourceIdentity, destinationIdentity, createdAt,
-    completedAt: new Date().toISOString(), consistency: 'revision-checked-object-copy', sourceInventorySha256: canonicalJsonSha256(before), entries }, limits);
+    completedAt: (params.now ?? new Date()).toISOString(), consistency: 'revision-checked-object-copy', sourceInventorySha256: canonicalJsonSha256(before), entries }, limits);
   const bytes = Buffer.from(JSON.stringify(manifest));
   if (bytes.length > limits.maxManifestBytes) throw new Error('Recovery manifest exceeds its size limit.');
   await params.destination.put(key, { body: Readable.from([bytes]), size: bytes.length, contentType: 'application/json' }, { ifAbsent: true });
-  const observed = await manifestBytes(params.destination, key, limits.maxManifestBytes);
+  const observed = await readRecoveryObjectBytes(params.destination, key, limits.maxManifestBytes);
   if (!observed.equals(bytes)) throw new Error('Recovery completion manifest failed read-back verification.');
   return { manifest, receipt: receipt(manifest, createHash('sha256').update(bytes).digest('hex'), entries.length, 0) };
 }

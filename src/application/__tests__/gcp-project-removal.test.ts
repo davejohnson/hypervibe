@@ -105,6 +105,13 @@ describe('removing a Google project Hypervibe created', () => {
     untouched(cloud);
   });
 
+  it('preserves a retained backup when the Storage API is off after the app was torn down', async () => {
+    environments.push({ name: 'old', platformBindings: { projectId: GCP, engine: {}, gcpBucketBackups: { files: { archive: 'original-archive' } } } });
+    const cloud = google({ lists: { 'storage.googleapis.com': disabled } });
+    expect(await run(cloud)).toMatchObject({ success: false, status: 'blocked', error: expect.stringContaining('retained bucket backups') });
+    untouched(cloud);
+  });
+
   it.each([
     ['a service', 'serving.knative.dev', { items: [{ metadata: { name: 'web-1' } }] }, 'Cloud Run services: web-1'],
     ['a database', 'sqladmin', { items: [{ name: 'hv-db' }] }, 'databases: hv-db'],

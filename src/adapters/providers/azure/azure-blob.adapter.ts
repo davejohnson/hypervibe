@@ -1,10 +1,6 @@
 import { azureEnvironmentResourceGroupScope, legacyAzureEnvironmentResourceGroupScope } from './azure-environment-scope.js';
-import { Readable } from 'node:stream';
-import {
-  BlobServiceClient,
-  StorageSharedKeyCredential,
-  type StoragePipelineOptions,
-} from '@azure/storage-blob';
+import type { StoragePipelineOptions } from '@azure/storage-blob';
+import { AzureSdkBlobDataPlane } from './azure-blob-data-plane.js';
 import { z } from 'zod';
 import type { Environment } from '../../../domain/entities/environment.entity.js';
 import type { ObservedStorage } from '../../../domain/ports/observe.port.js';
@@ -14,9 +10,6 @@ import type {
   StorageContext,
   StorageEnsureResult,
   StorageObjectClient,
-  StorageObjectPayload,
-  StorageObjectRecord,
-  StorageObjectRevision,
   StorageObservationTarget,
 } from '../../../domain/ports/storage.port.js';
 import {
@@ -156,103 +149,6 @@ class ArmStorageControlPlane implements AzureStorageControlPlane {
     return `${account.id}/blobServices/default/containers/${encodeURIComponent(container)}`;
   }
 }
-
-function readable(payload: StorageObjectPayload): Readable {
-  if (payload.body instanceof Readable) return payload.body;
-  if (payload.body instanceof Blob) {
-    return Readable.fromWeb(payload.body.stream() as ReadableStream<Uint8Array>);
-  }
-  return Readable.fromWeb(payload.body as ReadableStream<Uint8Array>);
-}
-
-class AzureSdkBlobDataPlane implements AzureBlobDataPlane {
-  private readonly service: BlobServiceClient;
-
-  constructor(account: string, key: string, private readonly container: string, httpClient?: StoragePipelineOptions['httpClient']) {
-    const credential = new StorageSharedKeyCredential(account, key);
-    this.service = new BlobServiceClient(`https://${account}.blob.core.windows.net`, credential, { ...(httpClient ? { httpClient } : {}) });
-  }
-
-  async list(options?: { prefix?: string; maxObjects?: number }): Promise<StorageObjectRecord[]> {
-    const output: StorageObjectRecord[] = [];
-    const tokens = new Set<string>();
-    for await (const page of this.containerClient().listBlobsFlat(options).byPage()) {
-      for (const blob of page.segment.blobItems) {
-        if (typeof blob.name !== 'string' || !blob.name || !Number.isSafeInteger(blob.properties.contentLength)
-          || blob.properties.contentLength! < 0) throw new Error('Azure object listing contains an incomplete object identity or size.');
-        output.push({ key: blob.name, size: blob.properties.contentLength!, revision: {
-          ...(blob.properties.etag ? { etag: blob.properties.etag } : {}),
-          ...(blob.properties.lastModified ? { lastModified: blob.properties.lastModified.toISOString() } : {}),
-        } });
-        if (options?.maxObjects !== undefined && output.length > options.maxObjects) throw new Error('Azure object listing exceeds its count limit.');
-      }
-      if (page.continuationToken) {
-        if (tokens.has(page.continuationToken)) throw new Error('Azure object listing pagination did not advance.');
-        tokens.add(page.continuationToken);
-      }
-    }
-    return output;
-  }
-
-  async get(key: string, revision?: StorageObjectRevision): Promise<StorageObjectPayload> {
-    if (revision?.generation || revision?.metageneration) throw new Error('Azure Blob reads require a native ETag or version.');
-    const client = this.containerClient().getBlobClient(key);
-    const response = await (revision?.versionId ? client.withVersion(revision.versionId) : client).download(0, undefined,
-      { ...(revision?.etag ? { conditions: { ifMatch: revision.etag } } : {}) });
-    if (!response.readableStreamBody) throw new Error(`Azure Blob object ${key} returned no body.`);
-    return {
-      body: response.readableStreamBody as Readable,
-      size: response.contentLength ?? 0,
-      revision: { ...(response.etag ? { etag: response.etag } : {}), ...(response.versionId ? { versionId: response.versionId } : {}),
-        ...(response.lastModified ? { lastModified: response.lastModified.toISOString() } : {}) },
-      contentType: response.contentType,
-      contentEncoding: response.contentEncoding,
-      cacheControl: response.cacheControl,
-      contentDisposition: response.contentDisposition,
-      metadata: response.metadata,
-    };
-  }
-
-  async put(key: string, payload: StorageObjectPayload, options?: { ifAbsent?: boolean }): Promise<void> {
-    await this.containerClient().getBlockBlobClient(key).uploadStream(
-      readable(payload),
-      4 * 1024 * 1024,
-      2,
-      {
-        blobHTTPHeaders: {
-          blobContentType: payload.contentType,
-          blobContentEncoding: payload.contentEncoding,
-          blobCacheControl: payload.cacheControl,
-          blobContentDisposition: payload.contentDisposition,
-        },
-        metadata: payload.metadata,
-        ...(options?.ifAbsent ? { conditions: { ifNoneMatch: '*' } } : {}),
-      }
-    );
-  }
-
-  async remove(key: string, revision?: StorageObjectRevision): Promise<void> {
-    if (revision?.generation || revision?.metageneration) throw new Error('Azure Blob deletion requires a native ETag or version.');
-    const client = this.containerClient().getBlobClient(key);
-    await (revision?.versionId ? client.withVersion(revision.versionId) : client).delete({
-      ...(revision?.etag ? { conditions: { ifMatch: revision.etag } } : {}),
-    });
-  }
-
-  async deleteAll(): Promise<void> {
-    for await (const blob of this.containerClient().listBlobsFlat()) {
-      await this.containerClient().deleteBlob(blob.name, { deleteSnapshots: 'include' });
-    }
-  }
-
-  destroy(): void {}
-
-  private containerClient() {
-    return this.service.getContainerClient(this.container);
-  }
-}
-
-
 
 function parseExternalId(externalId: string, context: StorageContext): { account: string; container: string } {
   const identity = parseStorageResourceIdentity(externalId);

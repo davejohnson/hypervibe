@@ -25,6 +25,8 @@ import { matchesBucketCopyActions, reviewedBucketJob, type TransferBucketJobRevi
 import { matchesTransferBucketJobState, verifyTransferBucketJobPlan, type TransferBucketJobEvidence } from './transfer-bucket-job.js';
 import type { TransferSlotEvidence } from '../gcp-transfer-slot-evidence.js';
 import { transferSlot, verifyTransferSlotPlan, matchesTransferState, type TransferSlotReview } from './transfer-slot.js';
+import { backupAccessAddress, backupAccessContribution, backupAccessScopes, composeBackupArchiveAccess, isBackupAccessContribution,
+  googleBackupPlanMismatch, matchesBackupAccessState, preservesBackupAccess, projectStorageDefinition, storageDefinitionCondition, verifyBackupAccessPlan, type BackupAccessReview } from './backup-archive-access.js';
 
 export interface GcpProjectSetupContribution { id: string; configuration: EngineConfiguration }
 export interface GcpProjectSetupParams {
@@ -44,6 +46,8 @@ export interface GcpProjectSetupParams {
   observeBucketJobAfterApply?: () => Promise<TransferBucketJobEvidence>;
   transferIsolationReview?: TransferIsolationEvidence;
   observeIsolationAfterApply?: () => Promise<TransferIsolationEvidence>;
+  backupAccessReview?: BackupAccessReview;
+  observeBackupAccessAfterApply?: () => Promise<boolean>;
   dataDir?: string;
   /** Explicitly reviewed removals/imports; never inferred from engine output. */
   allowDestroyAddresses?: string[];
@@ -248,6 +252,7 @@ export function composeGcpProjectConfiguration(contributions: Record<string, Eng
   if (Object.keys(merged.imports!).length) merged.files['setup-imports.tf.json'] = {
     import: Object.entries(merged.imports!).map(([to, id]) => ({ to, id })),
   };
+  composeBackupArchiveAccess(merged, backupAccessScopes(contributions));
   return merged;
 }
 
@@ -298,9 +303,16 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
   try {
     const manifestFile = path.join(paths.root, 'setup-manifest.json');
     const existing = readJson<SetupManifest>(manifestFile, { contributions: {} });
+    const originalAddresses = new Set(Object.values(existing.contributions).flatMap(configuration => Object.keys(configuration.resources)));
     const bucketReview = params.transferBucketJobReview;
     const bucketJob = reviewedBucketJob(params, existing.contributions);
     const isolation = params.transferIsolationReview;
+    const backupAccess = params.backupAccessReview;
+    if (!!backupAccess !== isBackupAccessContribution(params.contribution.id)) return fail('Use the daily file backup plan to review this application storage restriction.');
+    if (backupAccess && (isolation || bucketReview || params.transferSlotReview || params.allowDestroyAddresses?.length || params.allowReplaceAddresses?.length ||
+        params.allowImportAddresses?.length || params.existingResourceAddresses?.length || recoveryRequested || params.observedUnlinkedProject || params.observedLinkedProject ||
+        params.gcpProjectId !== backupAccess.scope.projectId || digest(params.contribution) !== digest(backupAccessContribution(backupAccess.scope)) ||
+        params.confirm && (!params.gcpSetupPlanId || !params.observeBackupAccessAfterApply))) return fail('Review only the exact original application storage grant for this backup.');
     if (!!isolation !== isIsolationContribution(params.contribution.id)) return fail('Use a dedicated transfer isolation review for these runtime grants.');
     if (isolation) {
       if (params.transferSlotReview || params.allowDestroyAddresses?.length || params.allowReplaceAddresses?.length || params.allowImportAddresses?.length ||
@@ -331,7 +343,22 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
     const scopes = retainedIsolations(manifest.contributions, params.gcpProjectId);
     for (const scope of scopes) assertOriginalIsolationOwners(manifest.contributions, scope);
     const protectedAddresses = new Set(scopes.flatMap(scope => isolationGrants(scope).map(grant => grant.address)));
+    const archiveGuards = backupAccessScopes(manifest.contributions);
+    for (const guard of archiveGuards) protectedAddresses.add(backupAccessAddress(guard.runtimeEmail));
     const configuration = composeGcpProjectConfiguration(manifest.contributions);
+    if (backupAccess) {
+      const runtime = backupAccess.scope.runtimeEmail;
+      const beforeContributions = { ...existing.contributions };
+      const previousAttempt = beforeContributions[params.contribution.id];
+      delete beforeContributions[params.contribution.id];
+      const before = storageDefinitionCondition(projectStorageDefinition(composeGcpProjectConfiguration(beforeContributions), runtime));
+      const after = storageDefinitionCondition(projectStorageDefinition(configuration, runtime));
+      if (digest([before,after]) !== digest([backupAccess.before,backupAccess.after]) || previousAttempt && digest(previousAttempt) !== digest(params.contribution.configuration)) {
+        return fail('The previously managed application storage grant changed. Review the daily file backup access again.');
+      }
+      const address = backupAccessAddress(runtime);
+      configuration.resources[address] = { ...configuration.resources[address]!, name: 'Exclude gs://' + backupAccess.scope.archive + ' from ' + runtime + ' project storage access', requiresConfirm: true };
+    }
     // Retain deleted address mappings, so a specifically approved removal is representable.
     const previous = existing.contributions[params.contribution.id];
     Object.assign(configuration.resources, previous?.resources, params.contribution.configuration.resources);
@@ -344,6 +371,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       ...(review ? { transferSlotReview: review } : {}),
       ...(jobReview ? { transferBucketJobReview: jobReview } : {}),
       ...(isolation ? { transferIsolationReview: isolation } : {}),
+      ...(backupAccess ? { backupAccess } : {}),
       authenticationScope: params.authenticationScope ?? 'google-project-admin',
       destroy: params.allowDestroyAddresses ?? [], imports: params.allowImportAddresses ?? [], existing: params.existingResourceAddresses ?? [],
       ...(params.allowReplaceAddresses?.length ? { replace: params.allowReplaceAddresses } : {}) });
@@ -434,6 +462,12 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       return observed?.ok === true && observed.present && observed.value === true;
     };
     if (verification) return await verification.verify(inspectBucketJob);
+    const inspectBackupAccess = async (when: 'before' | 'after') => {
+      const checked = await engine.inspectState?.({ backend, configuration, state, auth: params.auth,
+        project: raw => matchesBackupAccessState(raw, backupAccess!, when) });
+      return checked?.ok && checked.present && checked.value === true;
+    };
+    if (backupAccess && !await inspectBackupAccess('before')) return fail('The original application storage grant differs from its private Google Cloud project state.');
     if (bucketReview && !await inspectBucketJob(bucketReview.evidence)) {
       return fail('The observed copy job and bucket permissions do not match the original private project state.');
     }
@@ -452,9 +486,12 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       let verifiedTransfer = false;
       let verifiedBucketJob = false;
       let verifiedIsolation = false;
+      let verifiedBackupAccess = false;
+      let backupMismatch: string | undefined;
       let interruptedIsolation = false;
       let verifiedBilling = false;
       const planInput = { backend, configuration, auth: params.auth, state, planId: saved.planId,
+        ...(backupAccess ? { verifyPlannedChanges: (raw: unknown) => verifiedBackupAccess = verifyBackupAccessPlan(raw, backupAccess, originalAddresses) } : {}),
         ...(isolation ? { verifyPlannedChanges: (document: unknown) => {
           interruptedIsolation = hasDeposedIsolationGrant(document, isolation.scope);
           if (interruptedIsolation) return false;
@@ -475,9 +512,18 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
           verifiedBilling = valid && !!(observed ?? linked);
           return valid;
         } } : {}) };
+      if (archiveGuards.length) {
+        const reviewOriginalPurpose = planInput.verifyPlannedChanges;
+        planInput.verifyPlannedChanges = raw => {
+          const allowed = (!reviewOriginalPurpose || reviewOriginalPurpose(raw)) && preservesBackupAccess(raw, configuration, archiveGuards);
+          if (!allowed && backupAccess) backupMismatch = googleBackupPlanMismatch(raw, 'application storage permission');
+          return allowed;
+        };
+      }
       let planned = await engine.plan(planInput);
       if (interruptedIsolation) return fail(interruptedGrant);
       if (!planned.ok) {
+        if (backupMismatch && planned.stage === 'plan review') return fail(backupMismatch);
         const review = await reviewFailedProjectPreview(planned, engine, params, planInput, paths, intent, existing);
         if (!review) return fail(recoveryRequested ? staleRecovery : planned.error);
         if (!recoveryRequested) return { ...fail('The existing Google project can be retained. Review the local state recovery before previewing billing setup.'),
@@ -503,6 +549,13 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       }
       if (slot && (!verifiedTransfer || planned.unmanagedDeletes.length)) return fail('The native plan did not match the empty transfer resources reviewed.');
       if (isolation && (!verifiedIsolation || planned.unmanagedDeletes.length)) return fail('The native plan must contain only the two reviewed application grant conditions or their verified no-ops.');
+      if (backupAccess) {
+        const changing = planned.actions.filter(action => action.type !== 'noop');
+        if (!verifiedBackupAccess || planned.unmanagedDeletes.length || changing.length !== 1 || changing[0]!.type !== 'replace' ||
+            digest(engineSegmentOf(changing[0]!)?.addresses) !== digest([backupAccessAddress(backupAccess.scope.runtimeEmail)])) {
+          return fail('The Google project plan must change only the reviewed condition on the original application storage grant.');
+        }
+      }
       if (bucketJob && bucketReview && (!verifiedBucketJob || planned.unmanagedDeletes.length ||
           !matchesBucketCopyActions(planned.actions, bucketJob, bucketReview.evidence))) {
         return fail('The plan must contain only the reviewed copy job and its two bucket permissions, or their verified no-ops.');
@@ -515,11 +568,12 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       const unexpected = planned.actions.filter((action) => action.type !== 'noop').find((action) => {
         const addresses = engineSegmentOf(action)?.addresses ?? [];
         if (addresses.some(address => protectedAddresses.has(address))) {
+          if (backupAccess) return action.type !== 'replace' || addresses.length !== 1 || addresses[0] !== backupAccessAddress(backupAccess.scope.runtimeEmail);
           if (!isolation || action.type !== 'replace' || addresses.length !== 1 ||
               !isolationGrants(isolation.scope).some(grant => grant.address === addresses[0] && isolation.grants[grant.role] === 'broad')) return true;
           return false;
         }
-        return !!isolation || addresses.some((address) => !allowed.has(address))
+        return !!isolation || !!backupAccess || addresses.some((address) => !allowed.has(address))
           || (action.type === 'replace' && addresses.some((address) => !replace.has(address)))
           || (action.type === 'create' && addresses.some((address) => observedPresent.has(address)))
           || (action.type === 'destroy' && addresses.some((address) => !destroy.has(address)))
@@ -555,11 +609,15 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       // Keep approved intent after a partial apply so retry cannot orphan completed resources.
       writeJson(manifestFile, saved.manifest);
       const applied = await engine.apply({ backend, auth: params.auth, state, planId: saved.planId,
-        segment: { ...saved.planned.segment, addresses }, approvedAddresses: addresses });
+        segment: { ...saved.planned.segment, addresses }, approvedAddresses: addresses,
+        ...(archiveGuards.length && { verifySavedPlan: (raw: unknown) => (!backupAccess || verifyBackupAccessPlan(raw, backupAccess, originalAddresses)) && preservesBackupAccess(raw, configuration, archiveGuards) }) });
       if (addresses.some((address) => applied.outcomes[address] !== 'succeeded')) {
         return fail(applied.diagnostics.join(' ') || 'Project setup has not converged. Preview again to inspect the remaining work.');
       }
     } else writeJson(manifestFile, saved.manifest);
+    if (backupAccess && (!await params.observeBackupAccessAfterApply!() || !await inspectBackupAccess('after'))) {
+      return fail('The Google project did not confirm the original app account is excluded from the archive. Run the daily backup plan again.');
+    }
     if (isolation) {
       const unverified = 'The two narrowed application grants and original transfer resources could not be verified after apply. Keep the transfer secret empty and preview again.';
       try {

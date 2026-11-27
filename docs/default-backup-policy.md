@@ -158,20 +158,46 @@ runtime below supplies separate completed-point and restore evidence. Status
 reports policy, available recovery points and restores independently. Unsupported
 adapters, missing prerequisites and unknown reads remain explicit gaps.
 
-Independent daily database and file backups are resource-level protection.
-They do not establish an atomic application recovery point. An application
-whose database refers to files needs a compatible database/file recovery set,
-with coordinated writes or another verified consistency mechanism where needed.
+Independent daily database and bucket backups let an operator recover each
+resource separately. An application that needs a single recovery point across
+both can request a compatible database/file recovery set, with coordinated
+writes or another verified consistency mechanism where needed.
 See the [shared recovery contract](recovery-contract.md) for the separate
 verification checks and the distinction between code rollback and data restore.
 
-## Managed retained recovery sets
+## Back up a storage bucket
 
-For the planned cloud document-backup feature, the archive belongs on the
-hosting provider. A Google Cloud app gets a separate Cloud Storage bucket, an
-AWS app an S3 bucket, and an Azure app a Blob Storage container. The backup
-plan must identify the exact destination and its cost. The managed cloud
-engines currently block this program. [Cloud backup and recovery work](https://github.com/davejohnson/hypervibe/issues/253)
+Set `storage.<name>.automatedBackups: true` on the environment that hosts
+the files, using the bucket name from the project spec. Run `hv_plan` for
+that environment with `scope="backups"`. Review the source, separate archive,
+daily job, access and charges before applying the plan.
+
+On Google Cloud, an app's service account can have permission to change or
+delete files in every bucket in its project. When the app has that grant,
+the first plan excludes the proposed archive from it. The app can still
+manage uploads in its own bucket. After applying that change, plan backups
+again to review the archive and daily job.
+
+The job copies the files once a day and keeps the last seven successful daily
+copies as history builds. Each completed copy has its own manifest listing
+the original file names and where their bytes live in the archive. Once setup
+is complete, `hv_plan scope="backups"` lists the retained dates and manifest
+paths. To recover a file, choose the day, find the original key and download
+the corresponding backup object.
+
+During a migration, each backup covers the files in its own source bucket.
+Keep backing up the live environment for as long as it receives uploads. A
+backup on the destination covers files that have reached that bucket. Keep
+the old archive available for recovery dates that precede the move.
+
+One daily copy supports up to 100,000 objects, 5 GiB per object, 100 GiB of
+files in total and a 32 MiB manifest. Allow for storage and requests for the
+manifest and one small tracking object per file. An interrupted run
+keeps earlier completed days available. Later runs reclaim partial copies
+they can identify. If unresolved files reach the size or count limit, the
+job stops writing new copies until the archive can be checked.
+
+## Managed retained recovery sets
 
 The baseline is daily execution, retaining seven completed sets as history
 builds, and restore evidence no older than seven days. The first verified set

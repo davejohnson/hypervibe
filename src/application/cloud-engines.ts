@@ -2,8 +2,9 @@ import type { EngineCiBinding } from '../domain/spec/engine-ci-binding.js';
 import type { EngineCiReleaseTarget, GitHubOidcContext } from '../domain/ports/engine-ci.port.js';
 import type { ConvergeResult } from '../domain/plan/converge.executor.js';
 import type { Project } from '../domain/entities/project.entity.js';
+import type { Environment } from '../domain/entities/environment.entity.js';
 import { isEngineManaged } from '../domain/services/infrastructure-engine-selection.js';
-import type { ProjectSpec } from '../domain/spec/spec.schema.js';
+import type { EnvironmentSpec, ProjectSpec } from '../domain/spec/spec.schema.js';
 import type { CommandContext } from './context.js';
 import type { EngineSecretStore } from './engine-secrets.js';
 import type { EngineReleaseResult, InfrastructurePlanResult } from './infrastructure-engine.js';
@@ -69,6 +70,10 @@ export interface CloudEngine {
    */
   connect?(params: { project: Project; spec?: ProjectSpec; input: Record<string, unknown> }): Promise<EngineConnectStep>;
   plan(ctx: CommandContext, params: EnginePlanParams): Promise<EnginePlanOutcome>;
+  planBucketBackups(ctx: CommandContext, params: EnginePlanParams): Promise<EnginePlanOutcome>;
+  applyBucketBackups(ctx: CommandContext, params: EngineApplyParams): Promise<EngineApplyOutcome>;
+  observeBucketBackup?(project: Project, environment: Environment, spec: EnvironmentSpec, storageName: string): Promise<
+    { source: string; archive: string; latestAt: string; startedAt?: string; archiveLocation?: string; recoveryPoints?: Array<{ date: string; manifestKey: string }> } | undefined>;
   /** Removes the app's shared database server, which belongs to no single environment, as a reviewed plan of its own. */
   planSharedDatabaseRemoval?(ctx: CommandContext, params: { project: Project; specRevision: number; environmentName?: string }): Promise<InfrastructurePlanResult | { blocked: string[] }>;
   /** Removes a whole environment as one reviewed plan. */
@@ -106,6 +111,9 @@ export interface CloudEngine {
 // neighbours, and most commands touch one cloud.
 const gcp: CloudEngine = {
   id: 'gcp', hostingProvider: 'cloudrun', migration: 'full',
+  planBucketBackups: async (ctx, params) => (await import('./gcp-bucket-backups.js')).planGcpBucketBackups(ctx, params),
+  applyBucketBackups: async (ctx, params) => (await import('./gcp-bucket-backups.js')).applyGcpBucketBackups(ctx, params),
+  observeBucketBackup: async (...params) => (await import('./gcp-bucket-backups.js')).observeGcpBucketBackups(...params),
   plan: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpInfrastructureEngine(ctx, params),
   planTeardown: async (ctx, params) => (await import('./infrastructure-engine.js')).planGcpTeardown(ctx, params),
   planSharedDatabaseRemoval: async (ctx, params) => (await import('./gcp-shared-database-removal.js')).planGcpSharedDatabaseRemoval(ctx, params),
@@ -123,6 +131,9 @@ const gcp: CloudEngine = {
 
 const aws: CloudEngine = {
   id: 'aws', hostingProvider: 'aws', migration: 'settings',
+  planBucketBackups: async (ctx, params) => (await import('./aws-azure-bucket-backups.js')).planAwsBucketBackups(ctx, params),
+  applyBucketBackups: async (ctx, params) => (await import('./aws-azure-bucket-backups.js')).applyAwsBucketBackups(ctx, params),
+  observeBucketBackup: async (...params) => (await import('./aws-azure-bucket-backups.js')).observeAwsAzureBucketBackups(...params),
   ciWorkflow: async (root, binding) => (await import('./engine-ci-workflow.js')).writeEngineCiWorkflow(root, binding),
   ciRelease: async (binding, context, spec) => (await import('../adapters/providers/aws/aws-ci-release.js')).createAwsCiReleaseTarget(binding, context, spec),
   plan: async (ctx, params) => (await import('./infrastructure-engine-aws.js')).planAwsInfrastructureEngine(ctx, params),
@@ -142,6 +153,9 @@ const aws: CloudEngine = {
 
 const azure: CloudEngine = {
   id: 'azure', hostingProvider: 'azure',
+  planBucketBackups: async (ctx, params) => (await import('./aws-azure-bucket-backups.js')).planAzureBucketBackups(ctx, params),
+  applyBucketBackups: async (ctx, params) => (await import('./aws-azure-bucket-backups.js')).applyAzureBucketBackups(ctx, params),
+  observeBucketBackup: async (...params) => (await import('./aws-azure-bucket-backups.js')).observeAwsAzureBucketBackups(...params),
   ciWorkflow: async (root, binding) => (await import('./engine-ci-workflow.js')).writeEngineCiWorkflow(root, binding),
   ciRelease: async (binding, context, spec) => (await import('../adapters/providers/azure/azure-ci-release.js')).createAzureCiReleaseTarget(binding, context, spec),
   plan: async (ctx, params) => (await import('./infrastructure-engine-azure.js')).planAzureInfrastructureEngine(ctx, params),

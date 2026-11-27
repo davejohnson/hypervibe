@@ -5,6 +5,7 @@ import type { EngineConfiguration } from '../../../../domain/ports/infrastructur
 import { railwayExportPrefix } from '../../../../domain/services/railway-export-prefix.js';
 import type { TransferSlotEvidence } from '../gcp-transfer-slot-evidence.js';
 import { projectIamAddress } from './gcp-setup.backend.js';
+import { backupStorageRole, unpackBackupCondition } from './backup-archive-access.js';
 import { matchesExistingTransferSecret, matchesTransferState, transferSlot } from './transfer-slot.js';
 
 const identifier = z.string().min(1).max(256);
@@ -249,12 +250,16 @@ export function hasDeposedIsolationGrant(document: unknown, scope: TransferIsola
 type Grant = ReturnType<typeof isolationGrants>[number];
 function validMember(raw: unknown, grant: Grant, scope: TransferIsolationScope, status: 'broad' | 'restricted') {
   const value = record(raw);
+  const actual = value?.condition;
+  // An enrolled archive adds only exact conjunctive exclusions to the original transfer grant.
+  const base = grant.role === backupStorageRole && Array.isArray(actual) && actual.length === 1 ? unpackBackupCondition(actual[0]).base : undefined;
+  const effective = grant.role === backupStorageRole && Array.isArray(actual) && actual.length === 1 ? (base ? [base] : []) : actual;
   return (
     !!value &&
     value.project === scope.target.projectId &&
     value.member === grant.member &&
     value.role === grant.role &&
-    equal(value.condition, status === 'restricted' ? [grant.condition] : []) &&
+    equal(effective, status === 'restricted' ? [grant.condition] : []) &&
     Object.keys(value).every((key) => ['project', 'member', 'role', 'condition', 'etag', 'id'].includes(key))
   );
 }

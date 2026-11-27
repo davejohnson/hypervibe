@@ -13,6 +13,8 @@ import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.serv
 import { dnsHostnameSchema } from '../domain/spec/dns.schema.js';
 import { environmentSpecSchema, type EnvironmentSpec, type ProjectSpec } from '../domain/spec/spec.schema.js';
 import { observeMigrationDatabaseBackups } from './migration-database-backups.js';
+import { observeCloudBucketBackup } from './cloud-bucket-backups.js';
+import type { BackupResource } from '../domain/services/backup-policy.service.js';
 import { gcpDatabaseLocation } from './gcp-database-location.js';
 
 export interface CutoverBackupReview { id: string; notice: string }
@@ -23,6 +25,22 @@ interface CutoverReadiness {
   alreadyForwarding: boolean;
   pauseFingerprint?: string;
   backupReview?: CutoverBackupReview;
+}
+
+async function coveredBuckets(project: Project, destination: Environment, target: EnvironmentSpec, resources: BackupResource[]) {
+  const covered = new Map<string, { name: string; source: string; archive: string }>();
+  const migration = (destination.platformBindings.engine as EngineBinding | undefined)?.migration;
+  for (const resource of resources) {
+    if (resource.kind !== 'storage' || resource.retained || resource.bindingState !== 'bound'
+      || !target.storage?.[resource.name]?.automatedBackups) continue;
+    const proof = await observeCloudBucketBackup(project, destination, target, resource.name);
+    const receipt = migration?.storage?.find(item => item.name === resource.name && item.match && item.downloadVerifiedFor);
+    const since = receipt?.firstVerifiedAt ?? migration?.copiedAt;
+    if (proof && receipt && since && Date.parse(proof.startedAt ?? proof.latestAt) >= Date.parse(since)) {
+      covered.set(resource.name, { name: resource.name, source: proof.source, archive: proof.archive });
+    }
+  }
+  return covered;
 }
 
 async function cutoverProtection(project: Project, origin: Environment, source: EnvironmentSpec, destination: Environment,
@@ -46,21 +64,29 @@ async function cutoverProtection(project: Project, origin: Environment, source: 
     if (unsupported({ backups: source.backups })) {
       const components = new ComponentRepository().findByEnvironmentId(origin.id);
       const policy = resolveEnvironmentBackupPolicy(source, origin, components);
-      const uncovered = policy.resources.filter(resource => resource.kind !== 'database' || resource.retained);
+      const buckets = await coveredBuckets(project, destination, target, policy.resources);
+      const uncovered = policy.resources.filter(resource => resource.retained || (resource.kind !== 'database'
+        && (resource.kind !== 'storage' || !buckets.has(resource.name))));
       if (uncovered.length) {
         const names = uncovered.map(resource => resource.kind === 'database' ? 'a retained database'
           : `${resource.kind === 'storage' ? 'bucket' : 'volume'} ${resource.name}`);
-        problems.push(`The daily backup policy on ${origin.name} also covers ${[...new Set(names)].join(', ')}. PostgreSQL backups alone cannot recover those resources. ${targetName} needs verified recovery coverage for them before cutover.`);
-      } else if (!nativeDatabaseBackups || target.backups?.mode === 'daily') {
+        const files = uncovered.some(resource => resource.kind === 'storage' && !resource.retained);
+        problems.push(`The daily backup policy on ${origin.name} also covers ${[...new Set(names)].join(', ')}. ${targetName} needs verified recovery coverage for them before cutover.`
+          + (files ? ' For each application bucket, set automatedBackups to true on the target and review hv_plan scope="backups". A daily backup must complete after the files are copied to the target.' : ''));
+      } else if ((source.database ? !nativeDatabaseBackups : !buckets.size) || target.backups?.mode === 'daily') {
         const next = source.database && target.database && target.backups?.mode !== 'daily'
           ? ` To use the cloud's own PostgreSQL backups, set database.automatedBackups to true on ${targetName} and review its infrastructure plan.` : '';
         problems.push(`The engine for ${targetName} cannot provide the source's managed daily backups and restore checks.${next}`);
-      } else if (verifiedNativeBackups) {
-        const notice = `Google Cloud backs up PostgreSQL in ${targetName}. Moving traffic there gives up Hypervibe's independent database copies and restore tests.`;
+      } else if (!source.database || verifiedNativeBackups) {
+        const notice = [
+          verifiedNativeBackups && `Google Cloud backs up PostgreSQL in ${targetName}. Moving traffic there gives up Hypervibe's independent database copies and restore tests.`,
+          buckets.size && `Daily backups cover ${[...buckets.keys()].join(', ')} in separate Google Cloud storage. Each copy can be recovered on its own. Keep the Railway archive for its earlier recovery points.`,
+        ].filter(Boolean).join(' ');
         const bindings = destination.platformBindings;
         const database = gcpDatabaseLocation(typeof bindings.projectId === 'string' ? bindings.projectId : '', bindings.engine as EngineBinding | undefined);
         backupReview = { notice, id: canonicalJsonSha256({ notice, source: origin.id, destination: destination.id, domain: source.domain,
-          service: web, policy: source.backups, resources: policy.resources, database, region: bindings.environmentId }) };
+          service: web, policy: source.backups, resources: policy.resources, database, region: bindings.environmentId,
+          ...(buckets.size && { buckets: [...buckets.values()] }) }) };
       }
     } else if (target.backups?.mode !== 'daily') {
       problems.push(`${targetName} needs the source's managed daily backup policy.`);

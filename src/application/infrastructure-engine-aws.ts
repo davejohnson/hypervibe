@@ -4,7 +4,7 @@ import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { secretServiceScopeProblems } from '../domain/services/secret-service-scope.js';
-import { describeFixedWorkerCountChanges, describeStorageAutoTieringChanges, forgetTornDownEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
+import { describeFixedWorkerCountChanges, describeStorageAutoTieringChanges, forgetTornDownEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan, retainedFileBackupWarning } from './engine-shared.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
@@ -347,7 +347,7 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
   if (!spec.environments[environmentName]) {
     // Already torn down: only its final snapshot can remain.
     if (!tornDown.tornDownAt) return { blocked: [`${environmentName} is not an environment in the spec.`] };
-    if (!tornDown.finalSnapshot) return { blocked: [`${environmentName} was torn down and nothing of it remains on AWS.`] };
+    if (!tornDown.finalSnapshot) return { blocked: [`${environmentName} was torn down and has no final database snapshot to remove.`] };
     if (!params.deleteFinalSnapshot) return { blocked: [`${environmentName} was torn down; only its final database snapshot (${tornDown.finalSnapshot.identifier}) remains. Plan again with deleteFinalSnapshot=true to delete it.`] };
   }
   const context = await resolveAwsEngineContext(ctx, project, environmentName, spec);
@@ -449,6 +449,7 @@ export async function planAwsTeardown(ctx: CommandContext, params: {
   const actions = [...emptyActions, ...previousSnapshot, ...engineActions, ...snapshot, cleanup];
   const warnings = [
     `Removes AWS environment ${environmentName} in ${context.connection.region} (account ${accountId}). This cannot be undone.`,
+    ...retainedFileBackupWarning(context.state, spec.environments[environmentName]!),
     ...(destroysDatabase ? [snapshot.length
       ? 'The database\'s final snapshot is deleted too, so its data cannot be restored.'
       : `This is the last testing environment on the shared database cluster, so the cluster is removed too. It keeps a final snapshot (${context.shared.prefix}-postgres-final) so its data can be restored; it costs a few cents per GB each month. Plan with deleteFinalSnapshot=true to remove it as well.`] : []),
