@@ -178,8 +178,10 @@ For cloud-managed PostgreSQL backups on Google Cloud, AWS or Azure, set
 plan. If only the database needs protection, a Railway-to-Google cutover can
 accept this setting after checking the actual Cloud SQL database. Explain that
 the destination gets native backups without an independent database copy or
-Hypervibe restore tests. Keep cutover blocked for protected buckets, volumes or
-other databases until their recovery is covered. Preserve required staging
+Hypervibe restore tests. For uploaded files, set `automatedBackups: true` on
+each application storage entry and review `hv_plan scope="backups"`. A
+completed daily copy protects that bucket. Keep the old archive for its
+earlier dates. Volumes and retained databases still need coverage. Preserve required staging
 promotion. When `needs_cutover_approval` returns a `backupReviewId`, pass it
 with `confirmCutover: true` after the user approves those steps.
 

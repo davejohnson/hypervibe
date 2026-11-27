@@ -27,6 +27,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     setupFiles: ['src/test/setup.ts'],
+    globalSetup: ['scripts/build-bucket-workers.mjs'],
     include: group === 'heavy' ? heavyTests : ['src/**/*.test.ts', 'test/**/*.test.ts'],
     exclude: group === 'fast' ? [...configDefaults.exclude, ...heavyTests] : configDefaults.exclude,
     // Keep passing tests quiet while retaining failures, logs, and CI annotations.

@@ -13,6 +13,7 @@ import { RunRepository } from '../../adapters/db/repositories/run.repository.js'
 import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import { engineSegmentOf, type EngineActionSegment, type EngineSegmentResult } from '../ports/infrastructure-engine.port.js';
+import { validBucketBackupActions } from './bucket-backup-plan.contract.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import { migrationVersionActionSchema } from './migration-version.contract.js';
 import { requiresActionConfirmation, type PlanAction } from './plan.types.js';
@@ -259,6 +260,7 @@ export const planRunDocumentSchema = z.object({
     'backup-provisioning',
     'backup-readiness',
     'backup-program-publication',
+    'bucket-backups',
     'managed-ci-publication',
     'managed-ci-credentials',
     'infrastructure-engine',
@@ -294,6 +296,17 @@ export const planRunDocumentSchema = z.object({
     delegatedSecretVarsEncrypted: z.string().optional(),
   }).passthrough().optional(),
 }).passthrough().superRefine((document, ctx) => {
+  const bucketBackup = (document.engine as { bucketBackup?: unknown } | undefined)?.bucketBackup;
+  if (document.scope === 'bucket-backups') {
+    if (!validBucketBackupActions(bucketBackup, document.actions) || document.dns || document.overrides || document.inputRequired?.length
+      || document.sourceCommitSha || document.integrationFingerprints || document.lockEnvironmentIds?.length || document.observedFingerprint !== null) {
+      ctx.addIssue({ code: 'custom', message: 'A bucket backup plan must contain only the reviewed archive and daily backup setup for its selected storage.' });
+    }
+    return;
+  }
+  if (bucketBackup !== undefined || document.actions.some(action => action.id.startsWith('bucket-backup:'))) {
+    ctx.addIssue({ code: 'custom', message: 'Bucket backups require a separate backup plan.' });
+  }
   if (document.scope === 'migration-source-version') {
     const fields = ['kind', 'scope', 'environmentName', 'specRevision', 'observedFingerprint', 'actions', 'reviewBlockers'];
     if (Object.keys(document).some(key => !fields.includes(key)) || document.observedFingerprint !== null

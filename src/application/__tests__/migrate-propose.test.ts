@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { pointsAtSourceData, proposeTargetEnvironment, scopedToEnvironment } from '../migrate.js';
-import type { EnvironmentSpec } from '../../domain/spec/spec.schema.js';
+import { environmentSpecSchema, type EnvironmentSpec } from '../../domain/spec/spec.schema.js';
 
 describe('proposed migration target', () => {
   it('preserves the database variable names each workload reads', () => {
@@ -45,11 +45,15 @@ describe('proposed migration target', () => {
     expect(Object.keys(target.services)).toEqual(['staging-web', 'staging-worker']);
   });
 
-  it('requests native database backups when moving a database with a daily backup policy', () => {
-    const source = { hosting: { provider: 'railway' }, services: {}, envVars: {},
-      database: { provider: 'railway', engine: 'postgres' }, backups: { mode: 'daily' } } as EnvironmentSpec;
+  it('requests backups for the database and application buckets in a daily backup policy', () => {
+    const bucket = { provider: 'railway', type: 'bucket' as const, region: 'sjc', injectInto: [] };
+    const source = environmentSpecSchema.parse({ hosting: { provider: 'railway' }, services: {}, envVars: {},
+      storage: { documents: { ...bucket }, archive: { ...bucket, purpose: 'backup' } },
+      database: { provider: 'railway', engine: 'postgres' }, backups: { mode: 'daily' } });
     const proposal = proposeTargetEnvironment(source, {});
     expect(proposal.database).toEqual({ provider: 'cloudsql', automatedBackups: true });
+    expect(proposal.storage?.documents?.automatedBackups).toBe(true);
+    expect(proposal.storage?.archive).toBeUndefined();
     expect(proposal.backups).toBeUndefined();
     expect(proposeTargetEnvironment({ ...source, database: undefined }, {}).database).toBeUndefined();
   });

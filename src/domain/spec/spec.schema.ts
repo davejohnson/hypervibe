@@ -1209,6 +1209,8 @@ export const storageSpecSchema = z.object({
   access: z.enum(['native', 's3']).optional(),
   /** Keep replaced and deleted files recoverable for 30 days. */
   versioning: z.boolean().optional(),
+  /** Copy this bucket to a separate archive on its hosting cloud each day. */
+  automatedBackups: z.literal(true).optional(),
   /**
    * Let browsers send files straight to the bucket with a one-time upload address
    * the app hands out, instead of through the app (which caps request size).
@@ -2118,6 +2120,13 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   }
   const storageByService = new Map<string, string>();
   for (const [storageName, storage] of Object.entries(environment.storage ?? {})) {
+    if (storage.automatedBackups) {
+      const nativeStorage: Record<string, string> = { cloudrun: 'gcs', aws: 's3', azure: 'azureblob' };
+      if (storage.purpose === 'backup' || nativeStorage[environment.hosting.provider] !== storage.provider) {
+        ctx.addIssue({ code: 'custom', path: ['storage', storageName, 'automatedBackups'],
+          message: 'Daily bucket backups require an application bucket on the environment’s hosting cloud.' });
+      }
+    }
     const tieringProblem = storage.autoTiering ? autoTieringProblem(storage.provider, environment.hosting.provider) : undefined;
     if (tieringProblem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Storage ${storageName}: ${tieringProblem}`, path: ['storage', storageName, 'autoTiering'] });
     for (const serviceName of storage.injectInto) {

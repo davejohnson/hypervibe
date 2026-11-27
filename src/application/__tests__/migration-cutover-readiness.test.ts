@@ -12,6 +12,7 @@ import * as engine from '../infrastructure-engine.js';
 import * as launch from '../launch.js';
 import { migrateEnvironment } from '../migrate.js';
 import * as backupEvidence from '../migration-database-backups.js';
+import * as bucketEvidence from '../cloud-bucket-backups.js';
 import { selectMigrationBuckets } from '../migration-storage.js';
 
 let directory: string;
@@ -153,6 +154,35 @@ it('keeps covered service volumes and retained databases in the cutover review',
   const review = await f.migrate({ cutover: true });
   expect(review).toMatchObject({ status: 'blocked', message: expect.stringContaining('volume web') });
   expect(review).toMatchObject({ message: expect.stringContaining('retained database') });
+});
+
+it.each([true, false])('accepts a daily bucket copy in the cutover review, with a database: %s', async database => {
+  const storage = (provider: string) => ({ documents: { provider, type: 'bucket',
+    region: provider === 'railway' ? 'sjc' : 'us-central1', injectInto: [], ...(provider === 'gcs' && { automatedBackups: true }) } });
+  const f = fixture({ backups: { mode: 'daily' }, ...(database ? dailyDatabase : {}), storage: storage('railway') },
+    { ...(database ? nativeDatabase : {}), storage: storage('gcs') });
+  const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'production')!;
+  const boundSource = f.ctx.repos.environments.updatePlatformBindings(source.id, { storage: {
+    documents: { provider: 'railway', externalId: 'documents-id', instanceScope: { projectId: 'railway-project' } },
+  } })!;
+  const spec = f.spec().environments;
+  const { buckets } = selectMigrationBuckets(spec.production!, spec.gcp!, boundSource, 'fixture', 'gcp');
+  const binding = f.target.platformBindings.engine as engine.EngineBinding;
+  f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: { ...binding, storage: ['documents'],
+    migration: { ...binding.migration, storage: [{ name: 'documents', files: 1, bytes: 10, match: true, downloadVerifiedFor: buckets![0]!.identity }] } } });
+  vi.spyOn(backupEvidence, 'observeMigrationDatabaseBackups').mockResolvedValue(database);
+  const read = vi.spyOn(bucketEvidence, 'observeCloudBucketBackup').mockResolvedValue(undefined);
+  f.actions(domainProof);
+  expect(await f.migrate({ cutover: true })).toMatchObject({ status: 'blocked', message: expect.stringMatching(/bucket documents/i) });
+  read.mockResolvedValue({ source: 'documents-identity', archive: 'archive-identity', latestAt: '2026-10-31T23:59:59.000Z' });
+  expect(await f.migrate({ cutover: true })).toMatchObject({ status: 'blocked', message: expect.stringMatching(/bucket documents/i) });
+  read.mockResolvedValue({ source: 'documents-identity', archive: 'archive-identity', latestAt: new Date().toISOString() });
+  const review = await f.migrate({ cutover: true });
+  expect(review).toMatchObject({ status: 'needs_cutover_approval', steps: expect.arrayContaining([expect.stringMatching(/documents.*daily|daily.*documents/i)]) });
+  expect(read).toHaveBeenCalledWith(f.project, expect.objectContaining({ id: f.target.id }), spec.gcp, 'documents');
+  read.mockResolvedValue({ source: 'documents-identity', archive: 'new-archive-identity', latestAt: new Date().toISOString() });
+  expect((await f.migrate({ cutover: true }) as { backupReviewId?: string }).backupReviewId).not.toBe((review as { backupReviewId?: string }).backupReviewId);
+  expect(f.apply).not.toHaveBeenCalled();
 });
 
 it.each([{}, { maintenance: { enabled: true, mode: 'application', page: 'active' } }, desiredRoute])(

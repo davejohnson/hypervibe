@@ -22,7 +22,7 @@ const setup = vi.hoisted(() => vi.fn(async (_params: unknown) => ({ success: tru
 const savedIsolation = vi.hoisted(() => vi.fn());
 const contribution = vi.hoisted(() => vi.fn());
 vi.mock('../gcp-project-setup.service.js', () => ({ runGcpProjectSetup: setup, getGcpProjectSetupContribution: contribution,
-  hasGcpProjectSetup: () => true, getGcpRuntimeIsolation: savedIsolation }));
+  getGcpProjectSetupContributions: () => ({}), hasGcpProjectSetup: () => true, getGcpRuntimeIsolation: savedIsolation }));
 vi.mock('google-auth-library', () => ({ GoogleAuth: class {
   async getClient() { return { getAccessToken: async () => ({ token: 'private-admin-token' }) }; }
 } }));

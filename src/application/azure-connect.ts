@@ -72,7 +72,9 @@ export async function connectAzure(params: {
     return { status: 'needs_subscription', subscriptions, message: `${session.username} has ${subscriptions.length} Azure subscriptions. Which one should ${params.project.name} run in (and be billed to)?` };
   };
   const planFor = (session: AzureSignInSession, subscription: AzureSubscription) =>
-    planAzureSetup(session, { subscription, project: params.project.name, location, environments, ...(repository ? { repository } : {}) });
+    planAzureSetup(session, { subscription, project: params.project.name, location, environments, ...(repository ? { repository } : {}),
+      ...(Object.values(params.spec?.environments ?? {}).some(env => env.hosting.provider === 'azure' &&
+        Object.values(env.storage ?? {}).some(storage => storage.automatedBackups)) ? { bucketBackupReader: true } : {}) });
 
   let finished: AzureConnectResult | undefined;
   let early: AzureConnectResult | undefined;

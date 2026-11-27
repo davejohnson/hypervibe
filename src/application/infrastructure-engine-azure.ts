@@ -4,7 +4,7 @@ import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
 import { commonEngineProblems, environmentProfile, type EnvironmentProfile } from '../domain/services/infrastructure-engine-selection.js';
 import { secretServiceScopeProblems, secretServicesFor } from '../domain/services/secret-service-scope.js';
-import { forgetTornDownEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan } from './engine-shared.js';
+import { forgetTornDownEnvironment, openTofuEngine, planEngineSecrets, recordEnginePlan, retainedFileBackupWarning } from './engine-shared.js';
 import crypto from 'crypto';
 import { ARM, AZURE_SCOPES, azureRest, azureVaultUri } from '../adapters/providers/azure/azure-ops.client.js';
 import { azureSelectedBuildRegistry, projectAzureCiRegistry, type AzureBuildRegistry } from '../adapters/providers/azure/azure-ci-registry.js';
@@ -673,6 +673,7 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   const actions = [...emptyActions, ...environmentActions, ...buildActions, ...dropActions, ...sharedActions, cleanup];
   const warnings = [
     `Removes Azure environment ${environmentName} (${azureLocationFor(spec, environmentName, context.connection)}, resource group ${context.connection.resourceGroup}). This cannot be undone.`,
+    ...retainedFileBackupWarning(context.state, environmentSpec),
     ...(environmentSpec.database ? ['Azure keeps no final snapshot of a deleted database; export it first if you need the data.'] : []),
     !remaining.length ? 'No other testing environment uses the shared network, app environment, server and registry, so they are removed too.' : `The shared network, app environment, server and registry stay for ${remaining.join(', ')}.`,
     `Hypervibe's access (resource group, Key Vault, deploy identity) stays, for other environments of ${project.name}.`,
@@ -777,7 +778,7 @@ export async function runAzureAction(ctx: CommandContext, context: AzureEngineCo
       ctx.repos.environments.updatePlatformBindings(current.id, { ...rest, engine: {}, azure: { tornDownAt: new Date().toISOString() } });
       // The environment is gone; removing it from the spec keeps the next plan from recreating it.
       const workflow = forgetTornDownEnvironment(params.project, params.spec, context.environmentName);
-      return { success: true, message: `Purged ${purged.removed} secret(s) from Key Vault and confirmed nothing of ${context.environmentName} remains.${workflow}` };
+      return { success: true, message: `Purged ${purged.removed} secret(s) from Key Vault and confirmed that the app resources tagged for ${context.environmentName} are gone.${workflow}` };
     }
     default:
       return { success: false, status: 'blocked', message: `No engine-stage authority exists for ${action.id}.` };

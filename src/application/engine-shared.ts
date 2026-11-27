@@ -1,4 +1,8 @@
 import { RunRepository } from '../adapters/db/repositories/run.repository.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { engineStatePaths } from '../adapters/engine/opentofu/workspace.js';
+import type { EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
 import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { ensureEngineBinary, enginePluginCacheDir } from '../adapters/engine/opentofu/install.js';
 import { getSecretStore } from '../adapters/secrets/secret-store.js';
@@ -13,6 +17,15 @@ import { localRepositoryFor } from './local-repository.js';
 import type { InfrastructurePlanResult } from './infrastructure-engine.js';
 
 /** Helpers every cloud engine uses. Add shared engine behavior here, not to one cloud's module. */
+
+export function retainedFileBackupWarning(state: EngineStateIdentity, spec: EnvironmentSpec): string[] {
+  const projectRoot = path.dirname(path.dirname(engineStatePaths(state).root));
+  const statePrefix = state.environmentId + '-bk-';
+  const retained = fs.existsSync(projectRoot) && fs.readdirSync(projectRoot, { withFileTypes: true }).some(entry =>
+    entry.isDirectory() && entry.name.startsWith(statePrefix) && fs.existsSync(path.join(projectRoot, entry.name, 'environment', 'terraform.tfstate')));
+  if (!retained && !Object.values(spec.storage ?? {}).some(bucket => bucket.automatedBackups)) return [];
+  return ['This teardown keeps any daily file backup archive and its separate scheduled job. Archive storage and daily job attempts can continue to incur charges after the source is removed.'];
+}
 
 /** A spec patch removing an environment, including from the secrets that target it (a secret targeting only it goes too). */
 export function specWithoutEnvironment(spec: ProjectSpec, environmentName: string): Record<string, unknown> {
@@ -171,13 +184,14 @@ export function recordEnginePlan(params: {
   actions: PlanAction[]; warnings: string[];
   /** Engine-specific plan identity: plan id, state, and the cloud's own target. */
   engine: Record<string, unknown>;
+  scope?: 'bucket-backups';
   confirm?: 'consequential' | 'all';
 }): InfrastructurePlanResult {
   const { environmentName, specRevision, actions, warnings } = params;
   const confirmActions = (params.confirm === 'all' ? actions : actions.filter(requiresActionConfirmation)).map(action => action.id);
   const runRepo = new RunRepository();
   const run = runRepo.create({ projectId: params.projectId, environmentId: params.environmentId, type: 'plan', plan: {
-    kind: 'hv_plan', scope: ENGINE_PLAN_SCOPE, environmentName, specRevision,
+    kind: 'hv_plan', scope: params.scope ?? ENGINE_PLAN_SCOPE, environmentName, specRevision,
     observedFingerprint: null, actions, unmanaged: [], warnings, engine: params.engine, reviewConfirmActions: confirmActions,
   } as unknown as Record<string, unknown> });
   runRepo.updateStatus(run.id, 'succeeded');

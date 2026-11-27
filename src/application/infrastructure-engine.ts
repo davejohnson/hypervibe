@@ -25,6 +25,7 @@ import {
 import { createStorageHmacKey, deleteBucketObject, listBucketObjects, readBucket, readPubsubTopic, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, describeStorageAutoTieringChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan, forgetTornDownEnvironment } from './engine-shared.js';
+import { googleBackupTeardownWarnings } from './gcp-bucket-backup-records.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
@@ -145,7 +146,7 @@ function labelValue(value: string): string {
 export interface MigrationCopyEvidence {
   copiedAt?: string;
   database?: { tables: number; rows: string; match: boolean; differences: string[]; restoreWarnings: number };
-  storage?: Array<{ name: string; files: number; bytes: number; match: boolean; downloadVerifiedFor?: string }>;
+  storage?: Array<{ name: string; files: number; bytes: number; match: boolean; downloadVerifiedFor?: string; firstVerifiedAt?: string }>;
 }
 
 export interface EngineBinding {
@@ -1583,6 +1584,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   if (options.teardown) {
     warnings.splice(0, warnings.length,
       `Removes Google Cloud environment ${environmentName} (project ${context.gcpProjectId}, ${context.region}). This cannot be undone.`,
+      ...googleBackupTeardownWarnings(context.environment),
       ...(placed ? placed.warnings : engineBinding.database ? ['The database is deleted with its backups; export it first if you need the data.'] : []),
       `The project's own setup (enabled services, permissions, image repository and build storage) stays, for ${project.name}'s other environments.`);
   }

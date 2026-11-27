@@ -6,7 +6,7 @@ import { AzureBlobStorageAdapter } from '../azure-blob.adapter.js';
 // Official REST contracts: /rest/api/storageservices/list-blobs,
 // /get-blob, /put-block-list, /delete-blob and /specifying-conditional-headers-for-blob-service-operations.
 describe('Azure recovery stream SDK HTTP boundary', () => {
-  it('pins blob revisions and applies conditional commit/deletion through the real SDK', async () => {
+  it.each(['0x8D8A20E2374ECB1', '"0x8D8A20E2374ECB1"'])('pins listing ETag %s and sends conditional headers through the real SDK', async listedEtag => {
     const requests: Array<{ method: string; url: string; headers: Record<string, string> }> = [];
     const transport: IHttpClient = { async sendRequest(request) {
       requests.push({ method: request.method, url: request.url,
@@ -15,11 +15,11 @@ describe('Azure recovery stream SDK HTTP boundary', () => {
       const url = new URL(request.url);
       if (url.searchParams.get('comp') === 'list') {
         headers.set('content-type', 'application/xml');
-        return { request, status: 200, headers, bodyAsText: '<EnumerationResults ServiceEndpoint="https://testaccount.blob.core.windows.net" ContainerName="documents"><Blobs><Blob><Name>file.txt</Name><Properties><Content-Length>3</Content-Length><BlobType>BlockBlob</BlobType><Etag>"revision-1"</Etag><Last-Modified>Wed, 30 Sep 2026 00:00:00 GMT</Last-Modified></Properties></Blob></Blobs><NextMarker /></EnumerationResults>' };
+        return { request, status: 200, headers, bodyAsText: `<EnumerationResults ServiceEndpoint="https://testaccount.blob.core.windows.net" ContainerName="documents"><Blobs><Blob><Name>file.txt</Name><Properties><Content-Length>3</Content-Length><BlobType>BlockBlob</BlobType><Etag>${listedEtag}</Etag><Last-Modified>Wed, 30 Sep 2026 00:00:00 GMT</Last-Modified></Properties></Blob></Blobs><NextMarker /></EnumerationResults>` };
       }
       if (request.method === 'GET') {
         if (request.headers.get('if-match') === '"stale"') { headers.set('content-type', 'application/xml'); return { request, status: 412, headers, bodyAsText: '<Error><Code>ConditionNotMet</Code><Message>Condition not met</Message></Error>' }; }
-        headers.set('etag', '"revision-1"'); headers.set('content-length', '3'); headers.set('x-ms-version-id', 'version-1');
+        headers.set('etag', '"0x8D8A20E2374ECB1"'); headers.set('content-length', '3'); headers.set('x-ms-version-id', 'version-1');
         headers.set('last-modified', 'Wed, 30 Sep 2026 00:00:00 GMT');
         return { request, status: 200, headers, readableStreamBody: Readable.from(['abc']) };
       }
@@ -38,12 +38,12 @@ describe('Azure recovery stream SDK HTTP boundary', () => {
     const client = await adapter.openObjectTransfer({ id: 'env', projectId: 'project', name: 'production', platformBindings: {}, createdAt: new Date(), updatedAt: new Date() },
       { subscriptionId, resourceGroup: 'group' }, `${account.id}/blobServices/default/containers/documents`);
     const listed = await client.list({ prefix: 'file' });
-    expect(listed).toEqual([{ key: 'file.txt', size: 3, revision: { etag: '"revision-1"', lastModified: '2026-09-30T00:00:00.000Z' } }]);
+    expect(listed).toEqual([{ key: 'file.txt', size: 3, revision: { etag: '"0x8D8A20E2374ECB1"', lastModified: '2026-09-30T00:00:00.000Z' } }]);
     expect(requests[0].url).toContain('prefix=file');
-    const object = await client.get('file.txt', { etag: '"revision-1"', versionId: 'version-1' });
+    const object = await client.get('file.txt', { ...listed[0]!.revision, versionId: 'version-1' });
     for await (const _chunk of object.body as Readable) { /* Drain. */ }
-    expect(object.revision).toMatchObject({ etag: '"revision-1"', versionId: 'version-1' });
-    expect(requests[1].headers['if-match']).toBe('"revision-1"'); expect(requests[1].url).toContain('versionid=version-1');
+    expect(object.revision).toMatchObject({ etag: listed[0]!.revision!.etag, versionId: 'version-1' });
+    expect(requests[1].headers['if-match']).toBe('"0x8D8A20E2374ECB1"'); expect(requests[1].url).toContain('versionid=version-1');
     await expect(client.get('file.txt', { etag: '"stale"' })).rejects.toThrow();
     await client.put('recovery/object', { body: Readable.from(['abc']), size: 3 }, { ifAbsent: true });
     expect(requests.find(request => request.url.includes('comp=blocklist'))?.headers['if-none-match']).toBe('*');

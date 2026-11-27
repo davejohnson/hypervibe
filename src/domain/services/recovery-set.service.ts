@@ -7,10 +7,10 @@ import { createLocalRecoveryStore } from './local-recovery-store.js';
 import { backupAndVerifyPostgres, postgresBackupEvidenceSchema, type PostgresBackupInput, type PostgresBackupResult } from './postgres-backup.service.js';
 import { RecoveryDiagnosticError, recoveryFailure, type RecoveryDiagnostic } from '../ports/recovery-diagnostics.port.js';
 import { createObjectRecoverySet, objectRecoveryIdentitySchema, objectRecoveryManifestKey, restoreObjectRecoverySet,
-  storedObjectRevisionSchema, type ObjectRecoveryIdentity, type ObjectRecoveryLimits } from './object-recovery-set.service.js';
+  RECOVERY_LIMITS, storedObjectRevisionSchema, type ObjectRecoveryIdentity } from './object-recovery-set.service.js';
 import { recoverySourceIdentityMatches, recoverySourceIdentitySchema } from './recovery-source.js';
 
-export const RECOVERY_LIMITS: ObjectRecoveryLimits = { maxObjects: 100_000, maxObjectBytes: 5 * 1024 ** 3, maxTotalBytes: 100 * 1024 ** 3, maxManifestBytes: 32 * 1024 ** 2 };
+export { RECOVERY_LIMITS } from './object-recovery-set.service.js';
 const timestamp = z.string().datetime();
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/);
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}$/);

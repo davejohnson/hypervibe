@@ -6,6 +6,7 @@ import { GcpBootstrapClient } from './gcp-bootstrap.client.js';
 import { TransferEvidenceError, type TransferSlotEvidence } from './gcp-transfer-slot-evidence.js';
 import { transferSlot, type TransferSlotTarget } from './tofu/transfer-slot.js';
 import { isolationGrants, isolationRecoveryRequired, type TransferIsolationEvidence, type TransferIsolationScope } from './tofu/transfer-isolation.js';
+import { backupStorageRole, unpackBackupCondition } from './tofu/backup-archive-access.js';
 
 function reject(reason: string): never { throw new TransferEvidenceError(reason); }
 
@@ -122,9 +123,10 @@ async function inspectProjectBindings(bindings: Binding[], scope: TransferIsolat
       otherRoles.add(b.role);
       continue;
     }
-    const state = b.condition ? 'restricted' : 'broad';
+    const baseCondition = b.role === backupStorageRole ? unpackBackupCondition(b.condition).base : b.condition;
+    const state = baseCondition ? 'restricted' : 'broad';
     const previous = states[b.role];
-    if (relevant.length !== 1 || relevant[0] !== grant.member || previous === state || (b.condition && !isDeepStrictEqual(b.condition, grant.condition))) {
+    if (relevant.length !== 1 || relevant[0] !== grant.member || previous === state || (baseCondition && !isDeepStrictEqual(baseCondition, grant.condition))) {
       reject('The runtime has an additional or unrecognized project grant for the transfer secret or dump objects. Review the direct policy before changing it.');
     }
     if (previous) reject('Google still lists both the broad and restricted versions of the same app grant. ' + isolationRecoveryRequired);

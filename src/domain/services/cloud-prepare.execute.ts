@@ -9,7 +9,8 @@ import { configuredGoogleOAuthClient, signInWithGoogle } from '../../adapters/pr
 import { isMigrationAccessCheck, migrationAccessModes, providerRegistry, type MigrationAccess } from '../registry/provider.registry.js';
 import { GoogleAuth } from 'google-auth-library';
 import { defaultGcpPreparationInput, buildGcpPreparationConfiguration, projectIamAddress, isolationGrants, readSecretScopeInput, secretScopePolicyProblems, SECRET_ACCESSOR_ROLE, type TransferIsolationScope } from '../../adapters/providers/gcp/tofu/gcp-setup.backend.js';
-import { getGcpProjectSetupContribution, getGcpRuntimeIsolation, runGcpProjectSetup } from './gcp-project-setup.service.js';
+import { composeGcpProjectConfiguration, getGcpProjectSetupContribution, getGcpProjectSetupContributions, getGcpRuntimeIsolation, runGcpProjectSetup } from './gcp-project-setup.service.js';
+import { backupAccessScopes, backupStorageRole, projectStorageDefinition, storageDefinitionCondition, unpackBackupCondition } from '../../adapters/providers/gcp/tofu/backup-archive-access.js';
 import { GCP_SECRET_SCOPE_CONTRIBUTION } from './gcp-secret-scope.js';
 import type { Project } from '../entities/project.entity.js';
 import { parseGitHubRepoFromRemote } from '../../lib/git-remote.js';
@@ -862,6 +863,18 @@ async function verifyPreparedInfrastructure(token: string, plan: CloudPreparePla
   }
   const policy = await getProjectIamPolicy(token, plan.gcpProjectId);
   const restricted = isolation ? verifyRuntimeRestrictions(policy, isolation) : new Set<string>();
+  if (plan.runtimeServiceAccountEmail) {
+    const contributions = getGcpProjectSetupContributions(localProjectId, plan.gcpProjectId);
+    const scopes = backupAccessScopes(contributions).filter(scope => scope.runtimeEmail === plan.runtimeServiceAccountEmail);
+    if (scopes.length) {
+      const expected = storageDefinitionCondition(projectStorageDefinition(composeGcpProjectConfiguration(contributions), plan.runtimeServiceAccountEmail));
+      const bindings = (policy.bindings ?? []).filter(b => b.role === backupStorageRole && b.members?.includes(plan.runtimeMember!));
+      if (policy.version !== 3 || bindings.length !== 1 || !isDeepStrictEqual(bindings[0]?.condition, expected)) {
+        throw new Error('The Google application storage permission no longer excludes its saved daily backup archives. Review the daily backup plan.');
+      }
+      restricted.add(backupStorageRole);
+    }
+  }
   // Secrets limited to named services narrow the same grant with their own reviewed condition.
   if (verifySecretScopeRestriction(policy, getGcpProjectSetupContribution(localProjectId, plan.gcpProjectId, GCP_SECRET_SCOPE_CONTRIBUTION), plan.runtimeMember)) {
     restricted.add(SECRET_ACCESSOR_ROLE);
@@ -943,7 +956,8 @@ function verifyRuntimeRestrictions(policy: IamPolicy, isolation: TransferIsolati
   const restricted = new Set<string>();
   for (const grant of isolationGrants(isolation)) {
     const bindings = (policy.bindings ?? []).filter(binding => binding.role === grant.role && binding.members?.includes(grant.member));
-    if (policy.version !== 3 || bindings.length !== 1 || !isDeepStrictEqual(bindings[0]?.condition, grant.condition)) {
+    const base = grant.role === backupStorageRole ? unpackBackupCondition(bindings[0]?.condition).base : bindings[0]?.condition;
+    if (policy.version !== 3 || bindings.length !== 1 || !isDeepStrictEqual(base, grant.condition)) {
       throw new Error(`The app's ${grant.role} migration access restriction does not match the saved project setup.`);
     }
     restricted.add(grant.role);

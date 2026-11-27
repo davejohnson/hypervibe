@@ -2,6 +2,24 @@ import { describe, expect, it } from 'vitest';
 import { environmentSpecSchema, storageSpecSchema } from '../spec.schema.js';
 
 describe('storage spec', () => {
+  it('accepts opt-in daily backups only for application buckets on their hosting cloud', () => {
+    function environment(hosting: string, provider: string, extra: Record<string, unknown> = {}) {
+      return environmentSpecSchema.safeParse({ hosting: { provider: hosting }, storage: {
+        documents: { provider, type: 'bucket', region: provider === 'railway' ? 'sjc' : 'us-central1', injectInto: [], ...extra },
+      } });
+    }
+    for (const [hosting, provider] of [['cloudrun', 'gcs'], ['aws', 's3'], ['azure', 'azureblob']] as const) {
+      const requested = environment(hosting, provider, { automatedBackups: true });
+      expect(requested.success && requested.data.storage?.documents?.automatedBackups).toBe(true);
+      const legacy = environment(hosting, provider);
+      expect(legacy.success && legacy.data.storage?.documents).not.toHaveProperty('automatedBackups');
+      expect(environment(hosting, provider, { automatedBackups: true, purpose: 'backup' }).success).toBe(false);
+      expect(environment(hosting, provider, { automatedBackups: false }).success).toBe(false);
+    }
+    expect(environment('cloudrun', 's3', { automatedBackups: true }).success).toBe(false);
+    expect(environment('railway', 'railway', { automatedBackups: true }).success).toBe(false);
+  });
+
   it('accepts Railway storage targeting declared services across hosting providers', () => {
     expect(environmentSpecSchema.safeParse({
       hosting: { provider: 'cloudrun' },

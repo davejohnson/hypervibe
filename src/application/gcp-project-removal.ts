@@ -168,6 +168,10 @@ export async function runGcpProjectRemoval(
   if (environments.length) return blocked(`These environments still run in ${gcpProjectId}: ${environments.join(', ')}. Tear each one down first (hv_plan scope="teardown").`, { found: environments.map((name) => `environment ${name}`) });
   const contents = await readGcpProjectContents(deps.fetch, token, gcpProjectId, buildSourceBucketName(gcpProjectId));
   if (contents.state === 'unknown') return blocked(`${contents.reason} Whether the project is empty is unknown, so nothing was deleted.`);
+  if (contents.notChecked.includes('storage buckets') && projectRepo.findAll().some(project => environmentRepo.findByProjectId(project.id)
+    .some(env => env.platformBindings.projectId === gcpProjectId && env.platformBindings.gcpBucketBackups))) {
+    return blocked(`Hypervibe recorded retained bucket backups in ${gcpProjectId}. Google could not list the project's storage buckets to verify whether the archives still exist.`);
+  }
   if (contents.found.length) {
     // A database left behind after every environment is torn down is usually the app's shared database server, which has its own removal.
     const serverHint = contents.found.some((entry) => entry.startsWith('databases:'))

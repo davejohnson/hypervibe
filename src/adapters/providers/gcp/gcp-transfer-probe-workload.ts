@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { railwayExportPrefix } from '../../../domain/services/railway-export-prefix.js';
+import { GCP_JOB_NODE_IMAGE } from './gcp-node-image.js';
 
 interface ProbeObjectScope {
   expectedEmail: string;
@@ -42,9 +43,7 @@ export function parseAccessProbeFileEvidence(value: unknown): AccessProbeFileEvi
   return fileEvidence.safeParse(value).data;
 }
 
-// Official Docker Hub library/node:24-bookworm-slim, Linux AMD64 manifest (2026-11-11).
-export const PROBE_IMAGE =
-  'docker.io/library/node@sha256:0e2646ab57e77b7a384a0cb59b6815b182c77e1f9c3ba36bd8435bd9c4e6680e';
+export const PROBE_IMAGE = GCP_JOB_NODE_IMAGE;
 
 export function probeEnvironment(
   input: AccessProbeJobInput,
