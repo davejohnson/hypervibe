@@ -34,9 +34,13 @@ const aws = buildAwsConfiguration({ ...awsBase,
 const awsShared = buildAwsSharedConfiguration({ ...awsBase, database: { engineVersion: '18.6', minCapacity: 0, maxCapacity: 2 } });
 const azure = buildAzureConfiguration(fullEnvironmentInput);
 const azureShared = buildAzureConfiguration(fullSharedInput);
+const backupOptIn = buildCloudRunConfiguration({ projectId: 'demo-project', region: 'us-central1', services: [],
+  database: { instanceName: 'app-db', databaseName: 'app', wireServices: false, automatedBackups: true } });
 const segment = { id: 'opentofu:cost-plan', engine: 'opentofu' as const, planDigest: 'p', configurationDigest: 'c', engineVersion: '1.13.9', providerVersions: {} };
 
 interface CostCase { name: string; provider: string; config: EngineConfiguration; address: string; before: unknown; after: unknown; unknown?: unknown }
+const enableBackups: CostCase = { name: 'Cloud SQL automated backups', provider: 'gcp', config: backupOptIn, address: 'google_sql_database_instance.db',
+  before: { settings: [{ backup_configuration: [{ enabled: false }] }] }, after: { settings: [{ backup_configuration: [{ enabled: true }] }] } };
 const cloudRun = (cpu = '1', memory = '512Mi', idle = true, min = 0, max = 3, extra = {}) => ({ template: [{ scaling: [{ min_instance_count: min, max_instance_count: max }], containers: [{ image, resources: [{ limits: { cpu, memory }, cpu_idle: idle }], ...extra }] }] });
 const containerApp = (cpu = 0.25, memory = '0.5Gi', min = 0, max = 2, extra = {}) => ({ template: [{ min_replicas: min, max_replicas: max, container: [{ name: 'app', image, cpu, memory, ...extra }] }] });
 const cases: CostCase[] = [
@@ -75,7 +79,7 @@ function actionsFor(entry: CostCase, actions = ['update']): PlanAction[] {
 }
 
 describe('billable in-place changes across providers', () => {
-  it.each(cases)('$name needs exact confirmation', entry => {
+  it.each([...cases, enableBackups])('$name needs exact confirmation', entry => {
     expect(actionsFor(entry)).toEqual([expect.objectContaining({ type: 'update', billable: true, requiresConfirm: true })]);
   });
 
@@ -130,7 +134,7 @@ describe('persisted plan apply confirmation boundary', () => {
     return new RunRepository().create({ projectId, environmentId, type: 'plan', plan: document as unknown as Record<string, unknown> }).id;
   };
 
-  it.each([cases[0]!, cases[2]!, cases[10]!, cases[12]!, cases[19]!, cases[21]!])('rejects missing/wrong approval and executes exactly approved $name', async entry => {
+  it.each([cases[0]!, cases[2]!, cases[10]!, cases[12]!, cases[19]!, cases[21]!, enableBackups])('rejects missing/wrong approval and executes exactly approved $name', async entry => {
     const actions = actionsFor(entry);
     const planRunId = store(actions);
     const segmentHandler = vi.fn(async () => ({ outcomes: { [entry.address]: 'succeeded' as const }, diagnostics: [] }));

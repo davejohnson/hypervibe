@@ -59,10 +59,11 @@ Ordinary deployment does not require backup setup, an archive bucket or fresh
 recovery evidence. Read backup coverage through `hv_status` or an explicit backup
 plan; ordinary plans do not run recurring-backup health checks or read recovery
 archives. Keep backup gaps visible without presenting them as release
-prerequisites. Requested backup work uses `hv_plan scope="backups"` and its exact
-confirmations; preserving native snapshots and accepted backup programs does not
-authorize new resources. Explicit destructive-operation checkpoints retain their
-separate prerequisite and confirmation rules.
+prerequisites. To request the cloud's built-in PostgreSQL backups, set
+`database.automatedBackups: true` and review the infrastructure plan.
+Independent daily backup programs use `hv_plan scope="backups"` and their own
+confirmations. Explicit destructive-operation checkpoints retain their separate
+prerequisite and confirmation rules.
 
 Ordinary repository changes preserve existing backup programs and never publish
 a new one. Plan backup publication for the environment whose backups are

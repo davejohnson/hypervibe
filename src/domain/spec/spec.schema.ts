@@ -6,7 +6,7 @@ import { parse as parseDomain } from 'tldts';
 import { isReservedRuntimeEnvKey, RESERVED_RUNTIME_ENV_ERROR } from '../services/runtime-env-policy.js';
 import { SECRET_SERVICE_SCOPE_PROVIDERS } from '../services/secret-service-scope.js';
 import { canonicalizeJson } from '../../lib/canonical-json.js';
-import { withDefaultDatabaseProvider, withoutEngineFlag } from './database-defaults.js';
+import { nativeDatabaseProvider, withDefaultDatabaseProvider, withoutEngineFlag } from './database-defaults.js';
 import { dnsHostnameBelongsToZone, dnsHostnameSchema, dnsSpecSchema } from './dns.schema.js';
 import { HEALTH_CHECK_PATH_ERROR, HEALTH_CHECK_PATH_PATTERN } from './health-check-path.js';
 export { dnsSpecSchema, dnsSecurityPolicySchema } from './dns.schema.js';
@@ -271,6 +271,8 @@ const databaseResilienceSchema = z.object({
 export const databaseSpecSchema = z.object({
   provider: providerIdSchema,
   engine: z.literal('postgres').default('postgres'),
+  /** Request the cloud's own automated PostgreSQL backups. Omit to preserve the provider's policy. */
+  automatedBackups: z.literal(true).optional(),
   /**
    * Optional one-shot bootstrap/seed command. hv_plan emits a visible database
    * seed action. hv_apply runs it inside the deployed service environment and
@@ -1730,6 +1732,11 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   /** Kept only to produce an actionable migration error for old specs. */
   autofix: z.unknown().optional(),
 }).strict().superRefine((environment, ctx) => {
+  if (environment.database?.automatedBackups && (environment.hosting.provider === 'railway'
+    || environment.database.provider !== nativeDatabaseProvider(environment.hosting.provider))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['database', 'automatedBackups'],
+      message: 'Automated database backups require the native PostgreSQL database on Google Cloud, AWS or Azure.' });
+  }
   if (environment.domains?.length) {
     if (environment.hosting.provider !== 'cloudrun') ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['domains'],
       message: 'Multiple custom domains are currently supported on Google Cloud Run.' });

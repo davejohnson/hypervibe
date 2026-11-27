@@ -245,6 +245,12 @@ async function plan(request: SharedDatabasePlanRequest): Promise<SharedDatabaseP
     if (bound && (found.state !== 'present' || found.server.instanceName !== binding!.database!.instanceName)) {
       return { blocked: `${name}'s database is recorded on shared database server ${binding!.database!.instanceName}, which was not found in ${scope.gcpProjectId}. Hypervibe will not create another server or an empty database in its place.` };
     }
+    if (desired.automatedBackups && found.state === 'present' && found.server.automatedBackups !== true) {
+      const target = `the app's shared database server ${found.server.instanceName}`;
+      return { blocked: found.server.automatedBackups === false
+        ? `Cloud SQL reports that automated backups on ${target} are disabled. Enabling them for every database on that server needs a project-level change. Hypervibe currently supports enabling backups on a dedicated instance.`
+        : `Hypervibe could not confirm a standard automated backup schedule on ${target}. Check the server's backup policy and run hv_plan again. An enhanced backup schedule is managed separately by Google Cloud Backup and DR.` };
+    }
     // The server is planned from an environment only when Google's own list shows none. One that exists is never changed from here.
     const instanceName = found.state === 'present' ? found.server.instanceName : newSharedServerName(request.project.name);
     const actions: PlanAction[] = [];

@@ -32,10 +32,11 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
       copyData: z.boolean().optional().describe('true only after the user approved copying the data, replacing anything in the target.'),
       cutover: z.boolean().optional().describe('Final move after the copy was checked: pause the source behind its maintenance page, copy and verify the data again, then forward its domain to the target. Returns needs_cutover_approval first.'),
       confirmCutover: z.boolean().optional().describe('true only after the user approved the steps from needs_cutover_approval, including the short maintenance window.'),
+      backupReviewId: z.string().min(1).optional().describe('When needs_cutover_approval includes a backupReviewId, pass it with confirmCutover after the user approves the backup change in the cutover steps.'),
       verifyOnly: z.boolean().optional().describe('Read-only: compare the source and the copy (row counts, per-table content checksums and downloaded file contents) without copying or releasing anything. Returns verified, differs, or blocked when required access or verification jobs are unavailable.'),
       refreshData: z.boolean().optional().describe('true only after the user approved copying the data again over an earlier verified copy. Without it, a re-run releases using the existing copy.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, from, to, gcpProjectId, region, domain, billingAccountName, gcpSetupPlanId, browserAccess, approveAccess, planId, confirmActions, inspectSource, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover }) => {
+    wrapCommandHandler(async ({ project: projectRef, from, to, gcpProjectId, region, domain, billingAccountName, gcpSetupPlanId, browserAccess, approveAccess, planId, confirmActions, inspectSource, importSecrets, copyData, refreshData, verifyOnly, cutover, confirmCutover, backupReviewId }) => {
       if (browserAccess && (!gcpSetupPlanId || approveAccess?.length)) return commandError('VALIDATION', 'Pass the exact gcpSetupPlanId with browserAccess, omitting approveAccess.');
       if (gcpSetupPlanId && (!browserAccess || browserAccess === 'gcp-setup') && !billingAccountName) {
         return commandError('VALIDATION', 'Use gcpSetupPlanId with the billing account selected for this saved setup.');
@@ -50,6 +51,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
         ...(browserAccess && { browserAccess }),
         ...(billingAccountName ? { billingAccountName } : {}), ...(approveAccess ? { approveAccess } : {}),
         ...(planId ? { planId } : {}), ...(confirmActions ? { confirmActions } : {}), ...(importSecrets ? { importSecrets } : {}), ...(copyData ? { copyData } : {}), ...(refreshData ? { refreshData } : {}), ...(verifyOnly ? { verifyOnly } : {}), ...(cutover ? { cutover } : {}), ...(confirmCutover ? { confirmCutover } : {}),
+        ...(backupReviewId && { backupReviewId }),
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
       });
       let resultRunId: string | undefined;
@@ -58,12 +60,14 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
         try { resultRunId = saveMigrationVerification(ctx, project.id, from, to, result); }
         catch { warnings = ['The local review library could not save this verification result.']; }
       }
-      const ask = (message: string) => ({ agentInstruction: { action: 'ask_user' as const, message }, next: ['hv_migrate'] });
+      const continueCutover = cutover && confirmCutover && backupReviewId && result.status !== 'needs_cutover_approval'
+        ? ' Keep cutover=true, confirmCutover=true and the backupReviewId from the approved cutover when continuing.' : '';
+      const ask = (message: string) => ({ agentInstruction: { action: 'ask_user' as const, message: message + continueCutover }, next: ['hv_migrate'] });
       switch (result.status) {
         case 'migrated':
           return commandSuccess(result, { hint: result.next, next: ['hv_health', 'hv_logs'] });
         case 'needs_cutover_approval':
-          return commandSuccess(result, ask('Show each step and the maintenance window, and ask the user to approve the cutover, then call again with cutover=true and confirmCutover=true.'));
+          return commandSuccess(result, ask(`Show each step and the maintenance window and ask the user to approve the cutover. Then call again with cutover=true and confirmCutover=true${result.backupReviewId ? ` and backupReviewId="${result.backupReviewId}"` : ''}.`));
         case 'cut_over':
           return commandSuccess(result, { hint: result.message, next: ['hv_health', 'hv_logs'] });
         case 'verified':
@@ -84,7 +88,7 @@ export function registerHvMigrateTools(commands: CommandRegistrar, ctx: CommandC
         case 'needs_connection':
           return commandSuccess(result, ask('Ask the user to finish the connect page in their browser, then call again.'));
         case 'pending':
-          return commandSuccess(result, { hint: result.planId ? `Continue hv_migrate with planId ${JSON.stringify(result.planId)} and the same approved confirmActions ${JSON.stringify(result.confirmActions ?? [])}.` : 'Some steps are still settling. Call hv_migrate again shortly.', next: ['hv_migrate'] });
+          return commandSuccess(result, { hint: (result.planId ? `Continue hv_migrate with planId ${JSON.stringify(result.planId)} and the same approved confirmActions ${JSON.stringify(result.confirmActions ?? [])}.` : 'Some steps are still settling. Call hv_migrate again shortly.') + continueCutover, next: ['hv_migrate'] });
         case 'blocked':
           return commandError('VALIDATION', result.message, {
             details: resultRunId ? { ...(result.details && typeof result.details === 'object' && !Array.isArray(result.details)

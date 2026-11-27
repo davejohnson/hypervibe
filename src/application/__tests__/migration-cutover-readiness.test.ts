@@ -11,6 +11,8 @@ import * as commands from '../commands.js';
 import * as engine from '../infrastructure-engine.js';
 import * as launch from '../launch.js';
 import { migrateEnvironment } from '../migrate.js';
+import * as backupEvidence from '../migration-database-backups.js';
+import { selectMigrationBuckets } from '../migration-storage.js';
 
 let directory: string;
 beforeEach(() => {
@@ -36,7 +38,8 @@ function fixture(sourceSettings = {}, targetSettings = {}) {
   const project = ctx.repos.projects.create({ name: 'cutover-readiness', defaultPlatform: 'railway' });
   ctx.repos.environments.create({ projectId: project.id, name: 'production' });
   const target = ctx.repos.environments.create({ projectId: project.id, name: 'gcp', platformBindings: { engine: {
-    kind: 'opentofu', importedSecrets: [], migration: { from: 'production', copiedAt: '2026-11-01T00:00:00.000Z', storage: [] },
+    kind: 'opentofu', importedSecrets: [], migration: { from: 'production', copiedAt: '2026-11-01T00:00:00.000Z', storage: [],
+      ...('database' in sourceSettings ? { database: { tables: 1, rows: '1', match: true, differences: [], restoreWarnings: 0 } } : {}) },
   } } });
   const store = new SpecStore();
   store.replace(project, { version: 1, project: project.name, gitRemoteUrl: 'https://github.com/example/fixture.git', environments: {
@@ -62,6 +65,95 @@ const domainProof: Partial<PlanAction> = { id: 'domain:' + domain, type: 'noop',
 const routeProof: Partial<PlanAction> = { id: 'maintenance:production:traffic', type: 'noop', verified: true,
   resource: { kind: 'maintenance', name: domain, provider: 'cloudflare' },
   metadata: { hostname: domain, targetEnvironment: 'gcp', targetService: 'web', operation: 'maintenanceEdgeRoute' } };
+
+const dailyDatabase = { backups: { mode: 'daily' }, database: { provider: 'railway' } };
+const nativeDatabase = { database: { provider: 'cloudsql', automatedBackups: true } };
+
+it('describes the narrower protection in the review when the destination database has backups enabled', async () => {
+  const f = fixture({ ...dailyDatabase, storage: { archive: {
+    provider: 'railway', type: 'bucket', purpose: 'backup', region: 'sjc', injectInto: [],
+  } } }, { database: { provider: 'cloudsql' } });
+  const observed = vi.spyOn(backupEvidence, 'observeMigrationDatabaseBackups').mockResolvedValue(true);
+  f.actions(domainProof);
+  expect(await f.migrate({ cutover: true })).toMatchObject({ status: 'blocked', message: expect.stringContaining('database.automatedBackups') });
+  expect(observed).not.toHaveBeenCalled();
+  new SpecStore().merge(f.project, { environments: { gcp: { database: { automatedBackups: true } } } });
+  const result = await f.migrate({ cutover: true });
+  expect(result).toMatchObject({ status: 'needs_cutover_approval', steps: expect.arrayContaining([
+    expect.stringMatching(/Google Cloud.*PostgreSQL.*independent.*restore tests/i),
+  ]) });
+  expect(observed).toHaveBeenCalledWith(f.project, expect.objectContaining({ id: f.target.id }), f.spec().environments.gcp);
+  expect(f.apply).not.toHaveBeenCalled();
+});
+
+it.each([{}, { maintenance: { enabled: true, mode: 'application', page: 'active' } }, desiredRoute])(
+  'requires fresh backup evidence before pausing or resuming traffic %#', async stage => {
+    const f = fixture({ ...dailyDatabase, ...stage }, nativeDatabase);
+    vi.spyOn(backupEvidence, 'observeMigrationDatabaseBackups').mockResolvedValue(false);
+    f.actions(domainProof, { ...routeProof, type: 'update' });
+    const before = f.spec();
+    expect(await f.migrate({ cutover: true, confirmCutover: true })).toMatchObject({
+      status: 'blocked', message: expect.stringMatching(/could not confirm.*automated backups/i) });
+    expect(f.spec()).toEqual(before);
+    expect(f.apply).not.toHaveBeenCalled();
+  });
+
+it('preserves the staging gate when cloud backups are confirmed', async () => {
+  const f = fixture({ ...dailyDatabase, deploy: promotion }, nativeDatabase);
+  vi.spyOn(backupEvidence, 'observeMigrationDatabaseBackups').mockResolvedValue(true);
+  f.actions(domainProof);
+  const result = await f.migrate({ cutover: true, confirmCutover: true });
+  expect(result).toMatchObject({ status: 'blocked', message: expect.stringMatching(/promotion.*staging/i) });
+  expect(result).not.toMatchObject({ message: expect.stringMatching(/backup/i) });
+  expect(f.apply).not.toHaveBeenCalled();
+});
+
+it('does not substitute an unrelated database for source file protection', async () => {
+  const f = fixture({ backups: { mode: 'daily' } }, nativeDatabase);
+  vi.spyOn(backupEvidence, 'observeMigrationDatabaseBackups').mockResolvedValue(true);
+  f.actions(domainProof);
+  expect(await f.migrate({ cutover: true })).toMatchObject({ status: 'blocked', message: expect.stringMatching(/daily backup/i) });
+});
+
+it.each(['copied', 'retained'])('preserves the independent backup requirement for a %s document bucket', async state => {
+  const copied = state === 'copied';
+  const storage = (provider: string) => ({ documents: { provider, type: 'bucket', region: provider === 'railway' ? 'sjc' : 'us-central1', injectInto: [] } });
+  const f = fixture({ ...dailyDatabase, ...(copied ? { storage: storage('railway') } : {}) },
+    { ...nativeDatabase, ...(copied ? { storage: storage('gcs') } : {}) });
+  const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'production')!;
+  const boundSource = f.ctx.repos.environments.updatePlatformBindings(source.id, { storage: {
+    documents: { provider: 'railway', externalId: 'documents-id', instanceScope: { projectId: 'railway-project' } },
+  } })!;
+  if (copied) {
+    const spec = f.spec().environments;
+    const { buckets } = selectMigrationBuckets(spec.production!, spec.gcp!, boundSource, 'fixture', 'gcp');
+    const binding = f.target.platformBindings.engine as engine.EngineBinding;
+    f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: { ...binding, storage: ['documents'],
+      migration: { ...binding.migration, storage: [{ name: 'documents', files: 1, bytes: 10, match: true, downloadVerifiedFor: buckets![0]!.identity }] } } });
+  }
+  vi.spyOn(backupEvidence, 'observeMigrationDatabaseBackups').mockResolvedValue(true);
+  f.actions(domainProof);
+  const before = f.spec();
+  for (const confirmCutover of [false, true]) {
+    expect(await f.migrate({ cutover: true, confirmCutover })).toMatchObject({ status: 'blocked',
+      message: expect.stringMatching(/backup.*bucket documents/i) });
+  }
+  expect(f.spec()).toEqual(before);
+  expect(f.apply).not.toHaveBeenCalled();
+});
+
+it('keeps covered service volumes and retained databases in the cutover review', async () => {
+  const f = fixture({ ...dailyDatabase, services: { web: { ...web.web, volume: { mountPath: '/uploads' } } } }, nativeDatabase);
+  const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'production')!;
+  f.ctx.repos.environments.updatePlatformBindings(source.id, { previousDatabase: {
+    provider: 'railway', externalId: 'old-id', engine: 'postgres', name: 'previous', providerScope: { projectId: 'railway-project' },
+  } });
+  vi.spyOn(backupEvidence, 'observeMigrationDatabaseBackups').mockResolvedValue(true);
+  f.actions(domainProof);
+  const review = await f.migrate({ cutover: true });
+  expect(review).toMatchObject({ status: 'blocked', message: expect.stringContaining('volume web') });
+  expect(review).toMatchObject({ message: expect.stringContaining('retained database') });
+});
 
 it.each([{}, { maintenance: { enabled: true, mode: 'application', page: 'active' } }, desiredRoute])(
   'keeps daily recovery and staging promotion checks ahead of new or resumed cutover %#', async (stage) => {

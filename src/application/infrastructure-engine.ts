@@ -31,7 +31,7 @@ import { registerEngineWebServiceResolver } from '../domain/services/domain-targ
 import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
-import { iamDatabaseUser } from '../adapters/providers/gcp/tofu/gcp-dedicated-database.js';
+import { iamDatabaseUser, reviewDedicatedBackupPlan } from '../adapters/providers/gcp/tofu/gcp-dedicated-database.js';
 import { gcpDatabaseLocation, gcpDatabaseOnSharedServer, gcpDatabasePlanBlocker, gcpOwnInstanceRecord, gcpRecordWithoutOwnInstance, type GcpDatabaseBinding, type GcpDatabaseLocation } from './gcp-database-location.js';
 import { googleSharedDatabaseCloud, sharedDatabase, type SharedDatabaseEngine } from './shared-database/index.js';
 import { imageRepositoryConfiguration, imageRepositoryState, observeImageRepository } from '../adapters/providers/gcp/gcp-image-repository.js';
@@ -1128,6 +1128,8 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       ?? `hv-${environmentName}-db-${crypto.randomBytes(3).toString('hex')}`.toLowerCase().replace(/[^a-z0-9-]/g, '-') } })!;
   const instanceName = database.instanceName;
   const databaseShape = databaseSpec ? gcpDatabaseShape(environmentName, databaseSpec) : undefined;
+  // During a move, only the requested destination owns this intent.
+  const dedicatedAutomatedBackups = databaseSpec?.automatedBackups && !placed && !move?.ownServer;
   if (!databaseSpec && boundDatabase) {
     // Removing the instance this environment owns: checked in the environment's own project.
     const name = boundDatabase.instanceName;
@@ -1344,6 +1346,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     ...(databaseSpec && databaseShape && !placed && move?.ownServer !== 'remove' ? { database: { instanceName, databaseName: database.databaseName, wireServices: databaseCredentialReady,
       tier: databaseShape.tier, deletionProtection: move?.ownServer === 'unprotect' ? false : databaseShape.deletionProtection,
       retainedBackups: databaseShape.retainedBackups, transactionLogDays: databaseShape.transactionLogDays,
+      ...(dedicatedAutomatedBackups ? { automatedBackups: true } : {}),
       ...(databaseSpec.version ? { majorVersion: databaseSpec.version } : {}) } } : {}),
     ...((!databaseSpec && engineBinding.database && !placed) || move?.ownServer === 'remove' ? { retiredDatabase: true } : {}),
     ...(cacheSpec ? { cache: {
@@ -1372,17 +1375,27 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   });
   let planId = crypto.randomUUID();
   let grantChanges: RuntimeSecretGrant[] = [];
-  const planEnvironment = (adopt?: { databaseInstance?: string; buckets?: string[] }) => planWithCloudRunRevisionMinimums(input.services,
-    verifyPlannedChanges => engine.plan({ backend: gcpEngineBackend, configuration: configure(adopt), auth: context.auth,
+  let checkCreatingInstance = true;
+  const planEnvironment = (adopt?: { databaseInstance?: string; buckets?: string[] }) => planWithCloudRunRevisionMinimums(input.services, async verifyPlannedChanges => {
+    let backupBlocker: string | undefined;
+    const result = await engine.plan({ backend: gcpEngineBackend, configuration: configure(adopt), auth: context.auth,
       state: context.state, planId, verifyPlannedChanges: shown => {
         grantChanges = runtimeSecretGrantChanges(shown, context.gcpProjectId, context.runtimeServiceAccountEmail);
+        if (dedicatedAutomatedBackups) {
+          const review = reviewDedicatedBackupPlan(shown, instanceName, { projectId: context.gcpProjectId, region: context.region, environmentId: context.environment.id });
+          if ('blocked' in review) { backupBlocker = review.blocked; return false; }
+          // Creating a login or logical database can also appear as a grouped database create. Only a new instance needs adoption discovery.
+          checkCreatingInstance = review.instance === 'create';
+        }
         return verifyPlannedChanges(shown);
-      } }));
+      } });
+    return !result.ok && backupBlocker ? { ...result, error: backupBlocker } : result;
+  });
   let planned = await planEnvironment();
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
   // A create for something that already exists means engine state lost track of it (for example,
   // an apply interrupted mid-create). Adopt it only with proof it is ours; otherwise block.
-  const leftovers = await findOwnLeftovers(token, context, environmentName, planned.actions, databaseSpec && !placed ? instanceName : undefined,
+  const leftovers = await findOwnLeftovers(token, context, environmentName, planned.actions, databaseSpec && !placed && checkCreatingInstance ? instanceName : undefined,
     Object.keys(environmentSpec!.storage ?? {}));
   if ('blocked' in leftovers) return { blocked: [leftovers.blocked] };
   if (leftovers.databaseInstance || leftovers.buckets.length) {
@@ -1471,6 +1484,12 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     if (dependencies.length && action.type !== 'noop') action.dependsOn = dependencies;
   }
   const databaseAction = serviceActions.find((action) => action.id === 'database:postgres');
+  if (dedicatedAutomatedBackups && databaseAction?.metadata?.engineAdopt === true) {
+    databaseAction.reason += ` This plan adopts ${instanceName} with its current settings. Run hv_plan again to review its automated backups.`;
+  }
+  if (dedicatedAutomatedBackups && databaseAction?.diff?.some(change => change.field === 'google_sql_database_instance.settings.0.backup_configuration.0.enabled')) {
+    databaseAction.reason += ` Enable automated Cloud SQL backups on ${instanceName}. Google bills for backup storage.`;
+  }
   const placedActions = placed?.actions ?? [];
   // The step that copies the database comes before anything the engine changes; the one that deletes the old copy comes last.
   const moveFirst = move?.before ?? [];
@@ -1553,7 +1572,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
     gcpInfrastructureNotes.release,
     ...(missingKeys.length ? [missingOutsideKeysMessage(environmentName, missingKeys)] : []),
     ...(!anyService ? ['This environment declares no services; any previously created services will be deleted.'] : []),
-    ...(databaseShape && databaseAction && databaseAction.type !== 'noop' ? [databaseShape.summary] : []),
+    ...(databaseShape && databaseAction && databaseAction.type !== 'noop' && !(dedicatedAutomatedBackups && databaseAction.metadata?.engineAdopt) ? [databaseShape.summary] : []),
     ...(cacheSpec && !cacheReady && anyService
       ? [gcpInfrastructureNotes.redis] : []),
     ...(databaseSpec && !databaseCredentialReady && anyService

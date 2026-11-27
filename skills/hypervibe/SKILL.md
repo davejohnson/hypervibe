@@ -172,6 +172,17 @@ when the job ends. A fresh comparison (`verifyOnly`) of a private Railway
 database is refused; the copy's own check is its proof. Historical receipts
 record what matched at the time of the copy. Report these limits before
 requesting a maintenance window.
+
+For cloud-managed PostgreSQL backups on Google Cloud, AWS or Azure, set
+`database.automatedBackups: true` and review the environment's infrastructure
+plan. If only the database needs protection, a Railway-to-Google cutover can
+accept this setting after checking the actual Cloud SQL database. Explain that
+the destination gets native backups without an independent database copy or
+Hypervibe restore tests. Keep cutover blocked for protected buckets, volumes or
+other databases until their recovery is covered. Preserve required staging
+promotion. When `needs_cutover_approval` returns a `backupReviewId`, pass it
+with `confirmCutover: true` after the user approves those steps.
+
 For supported operations the workflow also stops at
 `needs_secret_import` and `needs_copy_approval`. The source keeps serving.
 After a verified copy, a re-run releases without copying again; pass

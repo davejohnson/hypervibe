@@ -7,7 +7,10 @@ import { recordSecretVersionMetadata, writeSecretVersion } from '../infrastructu
 import { SERVER_BUSY } from './administrator.js';
 import type { SeenServer, SharedDatabaseCloud } from './ports.js';
 
-interface ListedInstance { name?: string; region?: string; state?: string; databaseVersion?: string; settings?: { userLabels?: Record<string, string>; deletionProtectionEnabled?: boolean } }
+interface ListedInstance {
+  name?: string; project?: string; region?: string; state?: string; databaseVersion?: string; instanceType?: string;
+  settings?: { userLabels?: Record<string, string>; deletionProtectionEnabled?: boolean; backupConfiguration?: { enabled?: boolean; backupTier?: string } };
+}
 
 /**
  * Google Cloud behind the module's ports: Cloud SQL's admin interface, Secret
@@ -33,8 +36,14 @@ export function googleSharedDatabaseCloud(access: { token: string; credentials: 
         if (Array.isArray(body.warnings) && body.warnings.length) return { state: 'unknown', reason: 'Google could not reach every region while listing this project\'s database servers, so the list may be incomplete. Nothing was planned; try again.' };
         for (const item of body.items ?? []) {
           if (typeof item.name !== 'string' || typeof item.region !== 'string') return { state: 'unknown', reason: 'Google listed a database server without a name or region. Nothing was planned.' };
+          const postgres = /^POSTGRES_[1-9][0-9]$/.test(item.databaseVersion ?? '');
+          const backups = item.settings?.backupConfiguration;
+          const labels = item.settings?.userLabels ?? {};
           servers.push({ instanceName: item.name, region: item.region, runnable: item.state === 'RUNNABLE', deletionProtection: item.settings?.deletionProtectionEnabled !== false,
-            ...(/^POSTGRES_[1-9][0-9]$/.test(item.databaseVersion ?? '') ? { majorVersion: Number(item.databaseVersion!.slice(9)) } : {}), labels: item.settings?.userLabels ?? {} });
+            ...(postgres ? { majorVersion: Number(item.databaseVersion!.slice(9)) } : {}), labels,
+            ...(postgres && item.project === gcpProjectId && item.instanceType === 'CLOUD_SQL_INSTANCE' && !Object.hasOwn(labels, 'hv-environment')
+              && backups?.backupTier === 'STANDARD' && typeof backups.enabled === 'boolean'
+              ? { automatedBackups: backups.enabled } : {}) });
         }
         pageToken = body.nextPageToken;
         if (!pageToken) return { state: 'listed', servers };

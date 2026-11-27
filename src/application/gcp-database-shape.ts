@@ -40,7 +40,9 @@ export function gcpDatabaseShape(environmentName: string, database: NonNullable<
   return {
     tier: size.tier, deletionProtection, retainedBackups, transactionLogDays,
     summary: `Database: ${size.label}, about US$${size.monthlyUsd} a month plus storage. `
-      + `New databases start with ${retainedBackups} daily backups and ${transactionLogDays} days of point-in-time recovery; existing backup and recovery settings are preserved. `
+      + (database.automatedBackups
+        ? `New databases start with ${retainedBackups} daily backups and ${transactionLogDays} days of point-in-time recovery. Automated backups stay enabled. Existing backup retention, location and point-in-time recovery settings are preserved. `
+        : `New databases start with ${retainedBackups} daily backups and ${transactionLogDays} days of point-in-time recovery; existing backup and recovery settings are preserved. `)
       + `Deletion protection is ${deletionProtection ? 'on' : 'off'}.`,
   };
 }

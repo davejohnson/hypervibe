@@ -69,6 +69,28 @@ function fixture() {
   return { ctx, project, environment, spec, configurations, enginePlan, fetch, setState: (value: typeof state) => { state = value; } };
 }
 
+it('takes a native backup request through the infrastructure planner and checks the previous owner before any relabel', async () => {
+  const f = fixture();
+  const spec = projectSpecSchema.parse({ version: 1, project: f.project.name, environments: {
+    staging: { hosting: { provider: 'cloudrun' }, services: {}, database: { provider: 'cloudsql', automatedBackups: true } },
+  } });
+  f.enginePlan.mockImplementation(async ({ configuration, verifyPlannedChanges }) => {
+    const address = 'google_sql_database_instance.db';
+    expect(configuration.resources[address]?.costAttributes).toContain('settings.*.backup_configuration.*.enabled');
+    const sql = (configuration.files['cloudsql.tf.json'] as { resource: { google_sql_database_instance: { db: { name: string; project: string; region: string } } } }).resource.google_sql_database_instance.db;
+    const instance = { name: sql.name, id: sql.name, project: sql.project, region: sql.region, database_version: 'POSTGRES_16', instance_type: 'CLOUD_SQL_INSTANCE',
+      connection_name: `${sql.project}:${sql.region}:${sql.name}` };
+    const labels = { 'managed-by': 'hypervibe', 'hv-environment': f.environment.id.toLowerCase() };
+    const before = { ...instance, settings: [{ user_labels: { ...labels, 'hv-environment': 'someone-else' }, backup_configuration: [{ enabled: false, backup_tier: 'STANDARD' }] }] };
+    const after = { ...instance, settings: [{ user_labels: labels, backup_configuration: [{ enabled: true, backup_tier: 'STANDARD' }] }] };
+    expect(verifyPlannedChanges?.({ resource_changes: [{ address, change: { actions: ['update'], before, after } }] })).toBe(false);
+    return { ok: false, stage: 'plan review', error: 'The saved engine plan does not match the reviewed change.' };
+  });
+  const result = await planInfrastructureEngine(f.ctx, { project: f.project, spec, specRevision: 1, environmentName: 'staging' });
+  expect(result).toEqual({ blocked: [expect.stringMatching(/could not verify ownership/i)] });
+  expect(f.enginePlan).toHaveBeenCalledOnce();
+});
+
 describe('resources left only in engine state by an apply that was cut off', () => {
   // Live 2026-11-20: the network dropped mid-apply; the engine had created the workloads and a bucket, Hypervibe had
   // recorded none of them, and every later plan stopped at "which this plan does not manage".

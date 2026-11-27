@@ -611,7 +611,7 @@ export function buildCloudRunConfiguration(given: GcpCloudRunEngineInput): Engin
     }
   }
   // The database's own resources come from its module; this generator only places them.
-  const database = dedicatedDatabase({ projectId: input.projectId, region: input.region, environmentId: input.environmentId, database: input.database,
+  const database = dedicatedDatabase({ projectId: input.projectId, region: input.region, environmentId: input.environmentId, database: input.database, adoptInstance: input.adopt?.databaseInstance,
     retired: input.retiredDatabase, workerLoginEmail: onDemand ? input.runtimeServiceAccountEmail ?? '' : undefined });
   Object.assign(resources, database.mappings);
   if (input.releaseJob) {

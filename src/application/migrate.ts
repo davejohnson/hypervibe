@@ -16,8 +16,8 @@ import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { acquireManagedDatabaseAccess, type DatabaseAccessLease } from '../domain/services/database-access.service.js';
 import { databaseEnvAliasKeys } from '../domain/services/database-env.js';
 import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-database-identity.js';
-import { isDeepStrictEqual } from 'node:util';
-import { finalCopyReceipt, migrationCutoverReadiness, protectForwardingTarget, targetWriteRecovery } from './migration-cutover-readiness.js';
+import { finalCopyReceipt, forwardedCutover, migrationCutoverReadiness, protectForwardingTarget, reviewCutover, targetWriteRecovery, verifiedFinalCopy,
+  type CutoverBackupReview, type FinalCopyReceipt } from './migration-cutover-readiness.js';
 import { desiredDomainServiceName } from '../domain/services/domain-attach-policy.js';
 import { migrationVersionReceiptSchema, type MigrationSourceInventory } from '../domain/plan/migration-version.contract.js';
 import { planMigrationSourceVersion } from './migration-version-inspection.js';
@@ -90,7 +90,7 @@ export type MigrateResult =
       dataCopiedAt?: string;
       next: string;
     }
-  | { status: 'needs_cutover_approval'; domain: string; steps: string[]; message: string }
+  | ReturnType<typeof reviewCutover>
   | { status: 'cut_over'; domain: string; target: string; database?: { tables: number; rows: string; match: boolean; differences: string[] }; message: string }
   | {
       status: 'verified' | 'differs';
@@ -147,7 +147,8 @@ export function proposeTargetEnvironment(source: EnvironmentSpec, options: { reg
       ...(service.public !== undefined ? { public: service.public } : {}),
     }])),
     envVars,
-    ...(source.database ? { database: { provider: 'cloudsql' } } : {}),
+    ...(source.database ? { database: { provider: 'cloudsql',
+      ...(source.backups?.mode === 'daily' || source.database.automatedBackups ? { automatedBackups: true } : {}) } } : {}),
     ...(source.cache ? { cache: { provider: 'memorystore', region: options.region ?? 'us-central1' } } : {}),
     ...(source.queues ? { queues: source.queues } : {}),
     ...(source.storage ? { storage: Object.fromEntries(Object.entries(source.storage).filter(([, storage]) => storage.purpose !== 'backup').map(([name, storage]) => [name, {
@@ -278,6 +279,7 @@ interface MigrateParams {
    */
   cutover?: boolean;
   confirmCutover?: boolean;
+  backupReviewId?: string;
   sourceDirectory?: string;
 }
 
@@ -824,7 +826,8 @@ async function removeRailwayExports(token: () => Promise<string>, bucket: string
 }
 
 /** Plans and applies the source environment, accepting only pause and traffic changes. */
-async function applySourceStage(ctx: CommandContext, project: Project, environmentName: string, confirmActions: string[] | undefined, stage: string, planId?: string): Promise<'done' | MigrateResult> {
+async function applySourceStage(ctx: CommandContext, project: Project, environmentName: string, confirmActions: string[] | undefined,
+  stage: string, revision: number, planId?: string): Promise<'done' | MigrateResult> {
   const registry = createCommandRegistry(ctx);
   type SourcePlan = { planId: string; blocked?: unknown[]; actions: Array<{ id: string; type: string; reason?: string; requiresConfirm?: boolean; billable?: boolean; dataBearing?: boolean; metadata?: { operation?: string } }> };
   let reviewed: SourcePlan | undefined;
@@ -851,6 +854,7 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
       if (!planned.ok) return { status: 'blocked', message: `Planning the ${stage} of ${environmentName} failed: ${planned.error?.message ?? 'unknown error'}` };
       plan = planned.data as SourcePlan;
     }
+    if (new SpecStore().get(project)?.revision !== revision) return { status: 'blocked', message: `The cutover configuration changed while planning the ${stage}. Review the current cutover again.` };
     if (plan.blocked?.length) return { status: 'blocked', message: `The ${stage} of ${environmentName} is blocked: ${JSON.stringify(plan.blocked).slice(0, 500)}` };
     const changes = plan.actions.filter((action) => action.type !== 'noop');
     if (!changes.length) return 'done';
@@ -872,6 +876,15 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
   return { status: 'pending', message: `The ${stage} of ${environmentName} is still settling. Run hv_migrate with cutover=true again.`, receipts: [] };
 }
 
+function saveFinalCopy(ctx: CommandContext, destination: Environment, finalCopy: FinalCopyReceipt): boolean {
+  const engine = destination.platformBindings.engine as EngineBinding;
+  if (!engine.migration || !ctx.repos.environments.replacePlatformBindingsIfUnchanged(destination, {
+    ...destination.platformBindings, engine: { ...engine, migration: { ...engine.migration, finalCopy } },
+  })) return false;
+  ctx.repos.environments.syncRepoBindingsForId(destination.id);
+  return true;
+}
+
 /**
  * The final move. The source shows its maintenance page and its workloads are
  * suspended, so nothing writes while the data is copied again and verified;
@@ -885,13 +898,12 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
   const target = spec.environments[params.to]!;
   const web = source.domainTarget?.environment === params.to ? source.domainTarget.service : desiredDomainServiceName(target);
   const environment = (name: string) => ctx.repos.environments.findByProjectAndName(params.project.id, name)!;
-  const readiness = await migrationCutoverReadiness(params.project, environment(params.from), source, params.to, target, web);
+  const initialDestination = environment(params.to);
+  const readiness = await migrationCutoverReadiness(params.project, environment(params.from), source, initialDestination, target, web);
   if (store.get(params.project)?.revision !== revision) return { status: 'blocked', message: 'The cutover configuration changed during the source check. Review the current cutover again.' };
-  const recovery = targetWriteRecovery;
   const { domain } = readiness;
-  if (domain && readiness.alreadyForwarding && readiness.problems.length) {
-    return { status: 'cut_over', domain, target: params.to, message: `${domain} already forwards to ${params.to}. ${readiness.problems.join(' ')} ${recovery}` };
-  }
+  const forwarding = forwardedCutover(readiness, initialDestination);
+  if (forwarding) return forwarding;
   if (readiness.problems.length || !domain || !web) return { status: 'blocked', message: readiness.problems.join(' ') };
   // Settings that name the target's own public URL move to the source domain, which visitors keep using.
   const sourceOrigin = `https://${domain}`;
@@ -899,49 +911,54 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
   const retarget = Object.fromEntries(Object.entries(target.envVars ?? {})
     .filter(([, value]) => targetOrigin && value.replace(/\/$/, '') === targetOrigin).map(([key]) => [key, sourceOrigin]));
   const routed = source.domainTarget?.environment === params.to && source.maintenance?.page === 'off';
-  const observeTrafficMove = async (): Promise<MigrateResult> => {
-    const latest = store.get(params.project)!.spec;
-    const observed = await migrationCutoverReadiness(params.project, environment(params.from), latest.environments[params.from]!,
-      params.to, latest.environments[params.to]!, web);
-    if (!observed.alreadyForwarding || observed.domain !== domain) return { status: 'pending', receipts: [],
-      message: `Forwarding ${domain} to ${params.to} has not been verified. Keep the source paused and check the current route before another move. ${observed.problems.join(' ')}`.trim() };
-    return { status: 'cut_over', domain, target: params.to, message: [`${domain} now forwards to ${params.to}.`, ...observed.problems, recovery].join(' ') };
-  };
-  if (routed) {
-    const destination = environment(params.to);
-    const migration = (destination.platformBindings.engine as EngineBinding | undefined)?.migration;
-    const expected = finalCopyReceipt(environment(params.from), destination, domain, web, readiness.pauseFingerprint);
-    if (!readiness.alreadyForwarding && (!expected || !isDeepStrictEqual(expected, migration?.finalCopy))) {
-      return { status: 'blocked', message: `Traffic to ${params.to} needs a verified final copy made during the current source pause. Keep the source paused. Reconcile any writes accepted on the target before reviewing a new final copy under the maintenance page.` };
+  const approvedBackupReviewId = params.confirmCutover && params.backupReviewId === readiness.backupReview?.id ? params.backupReviewId : undefined;
+  const moveTraffic = async (destination: Environment, receipt: FinalCopyReceipt, backups?: CutoverBackupReview): Promise<MigrateResult> => {
+    if (backups && receipt.backupReviewId !== backups.id) {
+      if (approvedBackupReviewId !== backups.id) return reviewCutover(params.from, params.to, domain, web, backups);
+      if (!saveFinalCopy(ctx, destination, { ...receipt, backupReviewId: backups.id })) return { status: 'blocked',
+        message: 'The verified final copy changed before traffic moved. Keep the source paused and review the current cutover again.' };
     }
-    const done = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'traffic move', params.planId);
-    if (done !== 'done') return done;
-    return observeTrafficMove();
-  }
-  if (!params.confirmCutover) {
-    return {
-      status: 'needs_cutover_approval', domain,
-      steps: [
-        `Pause ${params.from}: ${domain} shows a maintenance page (HTTP 503) and its web and worker services are suspended. Let running jobs and uploads finish first.`,
-        `Copy the ${params.from} database and files to ${params.to} again, replacing the earlier copy, and verify every table and file.${needsSourceValue ? ` ${TRANSFER_SECRET_NOTICE}` : ''}`,
-        ...(Object.keys(retarget).length ? [`Set ${Object.keys(retarget).join(', ')} on ${params.to} to ${sourceOrigin}, so links and logins use ${domain}.`] : []),
-        `Send ${domain} to ${params.to} (${web}). ${params.from} stays paused with its data. ${recovery}`,
-      ],
-      message: `${domain} is unavailable from the pause until the traffic move, including time for the final copy, verification, and any outstanding approvals.`,
-    };
-  }
+    const routeRevision = routed ? revision : store.merge(params.project, { environments: { [params.from]: {
+      domainTarget: { environment: params.to, service: web }, maintenance: { enabled: true, mode: 'application', page: 'off' },
+    } } }).revision;
+    const moved = await applySourceStage(ctx, params.project, params.from, routed ? params.confirmActions : undefined,
+      'traffic move', routeRevision, routed ? params.planId : undefined);
+    if (moved !== 'done') return moved;
+    const latest = store.get(params.project)!.spec;
+    const destinationNow = environment(params.to);
+    const observed = await migrationCutoverReadiness(params.project, environment(params.from), latest.environments[params.from]!,
+      destinationNow, latest.environments[params.to]!, web);
+    const forwarded = observed.domain === domain && forwardedCutover(observed, destinationNow, true);
+    return forwarded || { status: 'pending', receipts: [],
+      message: `Forwarding ${domain} to ${params.to} has not been verified. Keep the source paused and check the current route before another move. ${observed.problems.join(' ')}`.trim() };
+  };
+  const saved = verifiedFinalCopy(environment(params.from), initialDestination, domain, web, readiness.pauseFingerprint);
+  if (saved) return moveTraffic(initialDestination, saved, readiness.backupReview);
+  if (routed) return { status: 'blocked', message: `Traffic to ${params.to} needs a verified final copy made during the current source pause. Keep the source paused. Reconcile any writes accepted on the target before reviewing a new final copy under the maintenance page.` };
+  const reviewBeforeCopy = (backups?: CutoverBackupReview, paused = false) => reviewCutover(params.from, params.to, domain, web, backups, [
+    paused ? `Keep ${params.from} paused behind its maintenance page while making the final copy.`
+      : `Pause ${params.from} so ${domain} shows a maintenance page (HTTP 503) and its web and worker services are suspended. Let running jobs and uploads finish first.`,
+    `Copy the ${params.from} database and files to ${params.to} again, replacing the earlier copy, and verify every table and file.${needsSourceValue ? ` ${TRANSFER_SECRET_NOTICE}` : ''}`,
+    ...(Object.keys(retarget).length ? [`Set ${Object.keys(retarget).join(', ')} on ${params.to} to ${sourceOrigin}, so links and logins use ${domain}.`] : []),
+  ]);
+  if (!params.confirmCutover || readiness.backupReview?.id !== approvedBackupReviewId) return reviewBeforeCopy(readiness.backupReview, !!readiness.pauseFingerprint);
   // 1. Pause the source so nothing writes during the final copy.
+  let pauseRevision = revision;
   if (!(source.maintenance?.enabled && source.maintenance.mode === 'application')) {
-    store.merge(params.project, { environments: { [params.from]: { maintenance: { enabled: true, mode: 'application', page: 'active' } } } });
+    pauseRevision = store.merge(params.project, { environments: { [params.from]: { maintenance: { enabled: true, mode: 'application', page: 'active' } } } }).revision;
   }
-  const paused = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'pause', params.planId);
+  const paused = await applySourceStage(ctx, params.project, params.from, params.confirmActions, 'pause', pauseRevision, params.planId);
   if (paused !== 'done') return paused;
-  const pausedSpec = store.get(params.project)!.spec;
+  const { spec: pausedSpec, revision: pausedRevision } = store.get(params.project)!;
   const pausedReadiness = await migrationCutoverReadiness(params.project, environment(params.from), pausedSpec.environments[params.from]!,
-    params.to, pausedSpec.environments[params.to]!, web);
+    environment(params.to), pausedSpec.environments[params.to]!, web);
+  const forwardedWhilePausing = forwardedCutover(pausedReadiness, environment(params.to));
+  if (forwardedWhilePausing) return forwardedWhilePausing;
   if (pausedReadiness.problems.length || !pausedReadiness.pauseFingerprint) return {
     status: 'blocked', message: [`The final copy requires a verified pause for ${domain} and every source workload.`, ...pausedReadiness.problems].join(' '),
   };
+  if (store.get(params.project)?.revision !== pausedRevision) return { status: 'blocked', message: 'The cutover configuration changed during the pause check. Review the current cutover again.' };
+  if (pausedReadiness.backupReview && pausedReadiness.backupReview.id !== approvedBackupReviewId) return reviewBeforeCopy(pausedReadiness.backupReview, true);
   const previousAttempt = (environment(params.to).platformBindings.engine as EngineBinding)?.migration?.copyAttempt?.id;
   // 2. Point the target at the source domain (released with the copy), copy again and prove it matches.
   if (Object.keys(retarget).length) store.merge(params.project, { environments: { [params.to]: { envVars: retarget } } });
@@ -960,22 +977,16 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
   const currentTarget = current.spec.environments[params.to];
   if (!currentSource || !currentTarget || currentSource.domain !== source.domain
     || desiredDomainServiceName(currentTarget) !== web) return { status: 'blocked', message: 'The cutover domain or target service changed during the copy. Review the current cutover again.' };
-  const finalReadiness = await migrationCutoverReadiness(params.project, environment(params.from), currentSource, params.to, currentTarget, web);
+  const finalReadiness = await migrationCutoverReadiness(params.project, environment(params.from), currentSource, environment(params.to), currentTarget, web);
+  const forwardedDuringCopy = forwardedCutover(finalReadiness, environment(params.to));
+  if (forwardedDuringCopy) return forwardedDuringCopy;
   if (finalReadiness.problems.length) return { status: 'blocked', message: finalReadiness.problems.join(' ') };
   if (store.get(params.project)?.revision !== current.revision) return { status: 'blocked', message: 'The cutover configuration changed before traffic moved. Review the current cutover again.' };
   const destination = environment(params.to);
-  const engine = destination.platformBindings.engine as EngineBinding;
-  const receipt = finalCopyReceipt(environment(params.from), destination, domain, web, finalReadiness.pauseFingerprint);
-  if (!receipt || receipt.copyAttemptId === previousAttempt || receipt.pauseFingerprint !== pausedReadiness.pauseFingerprint || !engine.migration
-    || !ctx.repos.environments.replacePlatformBindingsIfUnchanged(destination, {
-      ...destination.platformBindings, engine: { ...engine, migration: { ...engine.migration, finalCopy: receipt } },
-    })) return { status: 'blocked', message: 'The final copy or source pause changed before traffic moved. Keep the source paused and verify the current copy.' };
-  ctx.repos.environments.syncRepoBindingsForId(destination.id);
-  // 3. Send the domain to the target.
-  store.merge(params.project, { environments: { [params.from]: { domainTarget: { environment: params.to, service: web }, maintenance: { enabled: true, mode: 'application', page: 'off' } } } });
-  const moved = await applySourceStage(ctx, params.project, params.from, undefined, 'traffic move');
-  if (moved !== 'done') return moved;
-  const observed = await observeTrafficMove();
+  const receipt = finalCopyReceipt(environment(params.from), destination, domain, web, finalReadiness.pauseFingerprint, approvedBackupReviewId);
+  if (!receipt || receipt.copyAttemptId === previousAttempt || receipt.pauseFingerprint !== pausedReadiness.pauseFingerprint
+    || !saveFinalCopy(ctx, destination, receipt)) return { status: 'blocked', message: 'The final copy or source pause changed before traffic moved. Keep the source paused and verify the current copy.' };
+  const observed = await moveTraffic(destination, receipt, finalReadiness.backupReview);
   return observed.status === 'cut_over' && copied.database ? { ...observed, database: copied.database } : observed;
 }
 

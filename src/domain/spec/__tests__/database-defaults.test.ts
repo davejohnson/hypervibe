@@ -30,6 +30,18 @@ describe('host-native database default', () => {
     expect(projectSpecSchema.safeParse(spec('unknown-host')).success).toBe(false);
   });
 
+  it.each(['cloudrun', 'aws', 'azure'])('accepts opt-in automated backups for the native %s database', (hosting) => {
+    const database = (settings: Record<string, unknown>) => projectSpecSchema.parse(spec(hosting, settings)).environments.production.database;
+    expect(database({ automatedBackups: true })?.automatedBackups).toBe(true);
+    expect(database({})).not.toHaveProperty('automatedBackups');
+    expect(projectSpecSchema.safeParse(spec(hosting, { automatedBackups: false })).success).toBe(false);
+  });
+
+  it.each([['railway', 'railway'], ['railway', 'cloudsql'], ['cloudrun', 'rds'], ['azure', 'railway']])(
+    'refuses automated backup intent outside a managed cloud database (%s / %s)', (hosting, provider) => {
+      expect(projectSpecSchema.safeParse(spec(hosting, { provider, automatedBackups: true })).success).toBe(false);
+    });
+
   it('shares the exact connectivity metadata used by registered native database adapters', () => {
     const registeredNativeProviders = providerRegistry.namesFor('database').filter(name =>
       providerRegistry.getMetadata(name)?.lifecycle?.databaseConnectivity

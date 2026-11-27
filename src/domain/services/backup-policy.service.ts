@@ -66,7 +66,7 @@ const scope = (value: unknown): Record<string, string> | undefined => {
 };
 const externalId = (component: Component) => identity(component.externalId) ?? identity(component.bindings.instanceId) ?? identity(component.bindings.serviceId);
 
-function policyFor(spec: EnvironmentSpec | undefined, environment?: Environment | null, components: Component[] = []): EffectiveBackupPolicy {
+export function resolveEnvironmentBackupPolicy(spec: EnvironmentSpec | undefined, environment?: Environment | null, components: Component[] = []): EffectiveBackupPolicy {
   const resources: BackupResource[] = [];
   const desired = spec?.database;
   const databases = components.filter(component => component.environmentId === environment?.id && (component.type === 'postgres' || component.type === desired?.engine || /^data-migration:.*:postgres$/.test(component.type)));
@@ -133,7 +133,7 @@ function policyFor(spec: EnvironmentSpec | undefined, environment?: Environment 
 /** Resolve defaults without rewriting source specs or changing existing spec hashes. */
 export function resolveBackupPolicies(spec: ProjectSpec, environments: Environment[] = [], components: Component[] = []): Record<string, EffectiveBackupPolicy> {
   return Object.fromEntries([...new Set([...Object.keys(spec.environments), ...environments.map(environment => environment.name)])].map(name =>
-    [name, policyFor(spec.environments[name], environments.find(environment => environment.name === name), components)]));
+    [name, resolveEnvironmentBackupPolicy(spec.environments[name], environments.find(environment => environment.name === name), components)]));
 }
 
 function descriptor(resource: BackupResource): BackupTargetDescriptor | undefined {
@@ -193,7 +193,7 @@ const knownObservationSchema = z.object({ state: z.literal('known'), source: rec
   retention: z.object({ unit: z.enum(['days', 'backups']), value: z.number().positive() }).strict().optional() }).strict();
 
 export async function observeBackupPolicy(context: BackupPolicyContext): Promise<BackupPolicyObservation> {
-  const policy = policyFor(context.spec, context.environment, context.components);
+  const policy = resolveEnvironmentBackupPolicy(context.spec, context.environment, context.components);
   const resources: BackupCoverageItem[] = [];
   let managedProgram: BackupPolicyObservation['managedProgram'] = policy.mode === 'daily' && policy.resources.length
     ? { ...resolveBackupStrategy(context.spec), state: 'blocked' } : undefined;
@@ -231,7 +231,7 @@ export async function observeBackupPolicy(context: BackupPolicyContext): Promise
 }
 
 export async function configureBackupPolicyItem(context: BackupPolicyContext & { item: BackupCoverageItem; reviewed: DailyBackupReview }): Promise<Receipt> {
-  const policy = policyFor(context.spec, context.environment, context.components);
+  const policy = resolveEnvironmentBackupPolicy(context.spec, context.environment, context.components);
   const resource = policy.resources.find(resource => resource.kind === context.item.resource.kind && resource.name === context.item.resource.name
     && resource.provider === context.item.resource.provider && resource.componentId === context.item.resource.componentId);
   const target = resource ? descriptor(resource) : undefined;

@@ -10,6 +10,12 @@
  * stays in the environment's own project.
  */
 export const GCP_DEFAULT_DATABASE_NAME = 'app';
+export const GCP_SHARED_DATABASE_LABEL = 'hv-shared-database';
+
+export function gcpDedicatedDatabaseOwner(labels: Record<string, string> | undefined, environmentId: string): boolean {
+  return labels?.['managed-by'] === 'hypervibe' && labels['hv-environment'] === environmentId.toLowerCase()
+    && !Object.hasOwn(labels, GCP_SHARED_DATABASE_LABEL);
+}
 
 export interface GcpDatabaseLocation {
   /** Google project that holds the Cloud SQL instance. */
