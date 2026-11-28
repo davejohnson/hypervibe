@@ -43,6 +43,8 @@ import { applyInfrastructureEngine } from './infrastructure-engine.js';
 import { cloudEngineFor } from './cloud-engines.js';
 import { anyBucketBackupDescriptorSchema } from '../domain/plan/bucket-backup-plan.contract.js';
 import { applyDnsPlan } from './dns-hosting.js';
+import { applyDomainHandoff } from './domain-handoff.js';
+import { domainHandoffBlocker } from '../domain/services/domain-handoff-guard.js';
 import { getDnsBindingIdentity, hasOwnedDnsRecords } from './dns-engine.js';
 import { verifyDnsTrafficAbsent } from './dns-absence.js';
 import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
@@ -86,6 +88,7 @@ import {
 import { setupCustomDomain, teardownCustomDomain } from '../domain/services/domain.service.js';
 import {
   DOMAIN_ADOPT_OPERATION,
+  completeHostingDomainInventory,
   DOMAIN_DETACH_OPERATION,
   DOMAIN_RETARGET_OPERATION,
   desiredDomainServiceName,
@@ -807,6 +810,16 @@ export async function executePlanApply(ctx: CommandContext, params: {
   }
   const envName = loaded.document.environmentName;
   const planScope = loaded.document.scope ?? 'full';
+  if (planScope === 'domain-handoff') {
+    if (invalidSpec) return invalidSpec;
+    const result = await applyDomainHandoff(ctx, { ...params, environmentName: envName });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
+  }
+  if (planScope !== 'dns-engine' || loaded.document.dns?.source?.kind !== 'domain-handoff') {
+    const handoff = domainHandoffBlocker(spec, envName, ctx.repos.environments.findByProjectAndName(project.id, envName),
+      (loaded.document.engine as { teardown?: boolean } | undefined)?.teardown);
+    if (handoff) return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: handoff }] };
+  }
   if (planScope === 'bucket-backups') {
     if (invalidSpec) return invalidSpec;
     const engine = cloudEngineFor(spec, envName);
@@ -1025,6 +1038,14 @@ export async function executePlanApply(ctx: CommandContext, params: {
     const gaps = Array.isArray(savedGaps) ? savedGaps.filter((gap): gap is string => typeof gap === 'string').join(' ') : '';
     return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe',
       reason: `Backup readiness is blocked. ${gaps} No provider mutation is authorized; run hv_plan after resolving the reported protection gaps.` }] };
+  }
+  if (planScope === 'domain-adoption') {
+    if (!environment || params.alwaysRunBootstrap || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
+      return { kind: 'blocked', applyBlocked: [{ category: 'prerequisite', provider: 'hypervibe', reason: 'The domain adoption plan needs its exact existing environment.' }] };
+    }
+    const result = await executor.execute({ planRunId: planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
+      handler: action => applyDomain(ctx, project, envName, envSpec, action) });
+    return { kind: 'executed', envName, result, actionScopedWarnings: [] };
   }
   if (planScope === 'database-bindings') {
     if (!environment || loaded.run.projectId !== project.id || loaded.run.environmentId !== environment.id) {
@@ -2960,8 +2981,8 @@ async function applyDomain(
           .find(([domain]) => domain.toLowerCase() === normalizedDomain)?.[1]
       : undefined;
     if (
-      matches.length !== 1
-      || observedDomainStatus?.providerDomainId !== providerDomainId
+      matches.length !== 1 || !completeHostingDomainInventory(observed, { provider: action.resource.provider, projectId, environmentId })
+      || observedDomainStatus?.providerDomainId !== providerDomainId || observedDomainStatus?.providerVerified !== true
     ) {
       return {
         success: false,
@@ -2986,6 +3007,7 @@ async function applyDomain(
         },
       },
       domainDns: {
+        records: [],
         ...existingDomainBinding,
         name: action.resource.name,
         proxied: booleanField(metadata, 'domainProxy') ?? environmentSpec.domainProxy ?? true,

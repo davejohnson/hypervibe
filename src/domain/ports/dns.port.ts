@@ -2,6 +2,13 @@
 export type DnsProvider = 'cloudflare' | 'gcp' | 'aws' | 'azure';
 export type DnsRecordType = 'A' | 'AAAA' | 'CNAME' | 'TXT' | 'CAA' | 'MX';
 
+/** Cloudflare always flattens an apex CNAME. Its non-address records can coexist at that owner. */
+export function cnameConflictTypes(zone: DnsZoneIdentity, name: string): readonly DnsRecordType[] {
+  const hostname = (value: string) => value.toLowerCase().replace(/\.$/, '');
+  return zone.provider === 'cloudflare' && hostname(zone.zoneName) === hostname(name)
+    ? ['A', 'AAAA'] : ['A', 'AAAA', 'TXT', 'MX', 'CAA'];
+}
+
 /** Exact provider-native zone identity. Names alone never establish ownership. */
 export interface DnsZoneIdentity {
   provider: DnsProvider;

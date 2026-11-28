@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isIP } from 'node:net';
-import type { DnsEngineInput, DnsProvider, DnsRecordIntent, DnsRecordType, DnsZoneIdentity } from '../../../domain/ports/dns.port.js';
+import { cnameConflictTypes, type DnsEngineInput, type DnsProvider, type DnsRecordIntent, type DnsRecordType, type DnsZoneIdentity } from '../../../domain/ports/dns.port.js';
 import type { EngineConfiguration, EngineResourceMapping, InfrastructureEngineBackend } from '../../../domain/ports/infrastructure-engine.port.js';
 import { DNS_PROVIDER_REQUIREMENTS } from './provider-pins.js';
 
@@ -185,7 +185,9 @@ export function buildDnsConfiguration(input: DnsEngineInput): EngineConfiguratio
     groups.set(address, [...groups.get(address) ?? [], record]);
   }
   for (const record of input.records.filter(item => item.type === 'CNAME')) {
-    if (input.records.some(item => item !== record && dnsFqdn(item.name) === dnsFqdn(record.name) && (item.type !== 'CNAME' || item.values[0] !== record.values[0]))) throw new Error('CNAME cannot coexist with sibling record types or targets.');
+    const conflicts = cnameConflictTypes(input.zone, record.name);
+    if (input.records.some(item => item !== record && dnsFqdn(item.name) === dnsFqdn(record.name)
+      && (conflicts.includes(item.type) || item.type === 'CNAME' && item.values[0] !== record.values[0]))) throw new Error('CNAME cannot coexist with conflicting record types or targets.');
   }
   for (const [address, records] of [...groups].sort(([a], [b]) => a.localeCompare(b))) {
     const first = records[0]!;

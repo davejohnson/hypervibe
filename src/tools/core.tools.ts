@@ -45,7 +45,8 @@ import { projectField, envField } from './schemas.js';
 import { commandSuccess, commandError, wrapCommandHandler, HvError } from '../application/results.js';
 import { planInfrastructureEngine } from '../application/infrastructure-engine.js';
 import { dailyBucketNames, readCloudBucketBackup } from '../application/cloud-bucket-backups.js';
-import { planHostedDns } from '../application/dns-hosting.js';
+import { planHostedDns, planHostedDomainAdoption } from '../application/dns-hosting.js';
+import { planDomainHandoff, publicEdgeStatus } from '../application/domain-handoff.js';
 import { planEmailDns } from '../application/dns-integrations.js';
 import { awsEngine, cloudEngineFor, planSharedDatabaseRemoval } from '../application/cloud-engines.js';
 import {
@@ -676,7 +677,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
       env: envField,
       credential: z.string().optional().describe('Declared credential role to review across all aliases and environments.'),
       intent: z.enum(['adopt', 'rotate', 'remove']).optional().describe('Adopt preserves existing values; rotate reviews one frozen replacement; both require scope=credentials. Remove requires scope=shared-database.'),
-      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown', 'shared-database']).optional().describe('Default full. shared-database with intent="remove" plans removing the app\'s shared database server (Google Cloud) once no environment has a database on it: two confirmed steps, each its own plan and apply (turn off deletion protection, then delete); it takes project only, plus env when the app spans several Google projects or regions. Google Cloud, AWS and Azure environments always plan infrastructure with OpenTofu; infrastructure is an explicit alias. The plan includes Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it does not release code (use hv_deploy). teardown plans removing an entire Google Cloud, AWS or Azure environment (every resource, its files and settings; on AWS the database keeps a final snapshot, and on Google Cloud the project setup stays); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
+      scope: z.enum(['full', 'credentials', 'retained-cleanup', 'secrets', 'database-credential-aliases', 'backups', 'infrastructure', 'teardown', 'shared-database', 'domain-adoption', 'domain-handoff']).optional().describe('Default full. domain-adoption reviews the verified existing service domain and imports its exact serving DNS records in place. domain-handoff reviews moving an adopted live domain to its new hosting environment. shared-database with intent="remove" plans removing the app\'s shared database server (Google Cloud) once no environment has a database on it: two confirmed steps, each its own plan and apply (turn off deletion protection, then delete); it takes project only, plus env when the app spans several Google projects or regions. Google Cloud, AWS and Azure environments always plan infrastructure with OpenTofu; infrastructure is an explicit alias. The plan includes Hypervibe-owned secrets plus every infrastructure change OpenTofu computes, applied as one reviewed unit; it does not release code (use hv_deploy). teardown plans removing an entire Google Cloud, AWS or Azure environment (every resource, its files and settings; on AWS the database keeps a final snapshot, and on Google Cloud the project setup stays); every action needs exact confirmation, and a successful apply removes the environment from the spec. backups isolates explicitly requested backup setup and never deploys. database-credential-aliases repairs provider database references without changing SQL passwords or deploying. secrets updates only supplied delegated runtime secretRefs in one existing managed-CI environment, without deployment or unrelated infrastructure changes. retained-cleanup isolates retained resource destruction.'),
       services: z.array(z.string().min(1)).optional().describe('Restrict the plan to these spec services (partial deploy). Must be a subset of the spec services.'),
       envVars: z.record(z.string(), z.string()).optional().describe('One-off env var overrides for this plan only; values are encrypted in the stored plan and win over .env and spec envVars at apply. Durable non-secret values belong in the spec.'),
       envFile: z.string().optional().describe('Local .env file to consider as deploy input. The default .env.<env> target is prepared for every declared environment; when loading is enabled, policy-selected portable values are synced from repo .env without overwriting target values. Loaded values are encrypted in the stored plan and never returned.'),
@@ -751,6 +752,32 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
         return commandSuccess({ environment: routingEnvironment, scope, mode: 'observation', ...evidence }, {
           hint: 'Read the policy and recovery evidence for each resource. This review has no executable backup changes.',
         });
+      }
+      if (scope === 'domain-handoff') {
+        if ([services, envVars, envFile, includeEnvFile, secretRefs, credential, intent].some(value => value !== undefined)) {
+          return commandError('VALIDATION', 'A hostname handoff takes only project, target env and scope.');
+        }
+        if (!routingSpec) return commandError('NOT_FOUND', 'Declare the target edgeDomain in the project spec first.');
+        const plan = await planDomainHandoff(ctx, { project, spec: routingSpec.spec, specRevision: routingSpec.revision, environmentName: routingEnvironment });
+        if ('blocked' in plan) return commandError('VALIDATION', 'The hostname handoff is blocked.', { details: { blocked: plan.blocked } });
+        const pending = plan.actions.some(action => action.type !== 'noop');
+        return commandSuccess({ planId: plan.planRunId, ...ctx.repos.runs.planReport(plan.planRunId), scope, environment: plan.environmentName,
+          actions: plan.actions.map(({ metadata, ...action }) => action), confirmActions: plan.confirmActions }, {
+          hint: pending ? 'Review this step, apply it, then run the same target handoff plan to continue.' : 'The target hostname and its route were verified.',
+          next: pending ? ['hv_apply'] : [] });
+      }
+      if (scope === 'domain-adoption') {
+        if ([services, envVars, envFile, secretRefs, credential, intent].some(value => value !== undefined) || includeEnvFile) {
+          return commandError('VALIDATION', 'Domain adoption takes only project, env and scope.');
+        }
+        if (!routingSpec) return commandError('VALIDATION', 'Declare the existing source domain and DNS zone first.', { next: ['hv_spec'] });
+        const plan = await planHostedDomainAdoption(ctx, { project, spec: routingSpec.spec, environmentName: routingEnvironment, specRevision: routingSpec.revision });
+        if ('blocked' in plan) return commandError('VALIDATION', 'Domain adoption is blocked.', { details: { blocked: plan.blocked }, next: ['hv_spec', 'hv_plan'] });
+        const pending = plan.actions.filter(action => action.type !== 'noop');
+        return commandSuccess({ planId: plan.planRunId, ...ctx.repos.runs.planReport(plan.planRunId), scope: plan.scope, environment: routingEnvironment,
+          specRevision: plan.specRevision, actions: pending.map(({ metadata: _metadata, ...action }) => action), confirmActions: plan.confirmActions }, {
+          hint: pending.length ? 'Review the saved plan, apply it, then run this domain-adoption plan again.' : 'The existing hosting attachment and its traffic DNS are verified.',
+          next: pending.length ? ['hv_apply'] : [] });
       }
       const retainedExecution = Boolean(retainedEnvironment && ctx.repos.components.findByEnvironmentId(retainedEnvironment.id)
         .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
@@ -1123,7 +1150,12 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
             next: ['hv_health', 'hv_plan'],
           });
         }
+        const edge = await publicEdgeStatus(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName });
+        const edgeResult = edge ? { edgeDomain: edge } : {};
+        if (edge && !retainedEnvironment) return commandSuccess({ environment: envName, engine: 'opentofu', partial: true, workers: 'not read', ...edgeResult },
+          { warnings: ['The target environment has no local hosting binding yet.'] });
         const engine = await engineWorkerStatus(ctx, project, specResult.spec, envName);
+        if ('blocked' in engine && edge) return commandSuccess({ environment: envName, engine: 'opentofu', workers: 'not read', partial: true, ...retained, ...edgeResult }, { warnings: [engine.blocked] });
         if ('blocked' in engine && retainedDatabases.length) return commandSuccess({
           environment: envName, engine: 'opentofu', workers: 'not read', partial: true, ...retained,
         }, { warnings: [engine.blocked] });
@@ -1135,7 +1167,7 @@ export function registerCoreTools(commands: CommandRegistrar, ctx: CommandContex
           // A failed read is not "fresh": say the age is unknown instead of staying silent.
           if (notes.unreadable) engine.warnings.push(notes.unreadable);
         }
-        return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers: engine.workers, ...retained }, {
+        return commandSuccess({ environment: envName, specRevision: specResult.revision, engine: 'opentofu', coverage: { runtimeWorkers: 'included', infrastructure: 'hv_plan', repositoryFiles: 'outside infrastructure status' }, workers: engine.workers, ...retained, ...edgeResult }, {
           warnings: engine.warnings,
           hint: engine.warnings.length ? 'Fix the warnings above, then check hv_status again.' : 'Run hv_plan scope="infrastructure" to check infrastructure drift.',
           next: engine.warnings.length ? ['hv_plan'] : ['hv_plan', 'hv_health'],

@@ -10,11 +10,13 @@ import { requiresActionConfirmation, type PlanAction } from '../domain/plan/plan
 import { ConvergeExecutor, type PlanRunDocument, type ConvergeResult } from '../domain/plan/converge.executor.js';
 import { parseHostingBindings } from '../domain/ports/hosting.port.js';
 import { normalizeProviderDnsRecord, providerDnsRecordShouldBeProxied } from '../domain/services/domain-dns-records.js';
-import { dnsEngineState, executeDnsEngineSegment, executeDnsOwnershipReconciliation, getDnsBindingIdentity, hasOwnedDnsRecords, prepareDnsEnginePlan } from './dns-engine.js';
+import { dnsEngineState, executeDnsEngineSegment, executeDnsOwnershipReconciliation, getDnsBindingIdentity, hasOwnedDnsRecords, importedTrafficClaim, prepareDnsEnginePlan, verifyHandoffDnsPayload } from './dns-engine.js';
 import { verifyDnsTrafficAbsent } from './dns-absence.js';
 import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
-import { desiredDomainServiceName, DOMAIN_RETARGET_OPERATION, observedDomainService } from '../domain/services/domain-attach-policy.js';
+import { completeHostingDomainInventory, desiredDomainServiceName, DOMAIN_ADOPT_OPERATION, DOMAIN_RETARGET_OPERATION, observedDomainService } from '../domain/services/domain-attach-policy.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
+import { DomainHandoffBlocked, handoffReviewSchema } from '../domain/plan/domain-handoff.js';
+import { diffEnvironment } from '../domain/plan/diff.engine.js';
 
 const HOSTING_DNS_OWNER = 'hosting-domain';
 type PreparedDns = Awaited<ReturnType<typeof prepareDnsEnginePlan>>;
@@ -33,6 +35,7 @@ export function persistDnsPlanRun(ctx: CommandContext, params: {
   }
   const document: PlanRunDocument = {
     kind: 'hv_plan', scope: 'dns-engine', environmentName: params.environmentName, specRevision: params.specRevision,
+    ...(params.source?.kind === 'domain-handoff' && { lockEnvironmentIds: [handoffReviewSchema.parse(params.source.review).targetId] }),
     observedFingerprint: null, actions: params.prepared.actions,
     dns: { descriptor: params.prepared.descriptor, ...(params.source ? { source: params.source } : {}) },
   };
@@ -50,13 +53,12 @@ function hostingSource(environment: Environment, spec: EnvironmentSpec, observed
   const binding = bindings.domainDns;
   if (!binding || binding.name !== domain || !binding.providerDomainId || !binding.serviceName || !binding.serviceId || !binding.environmentId
     || bindings.provider !== spec.hosting.provider || !bindings.projectId || !bindings.environmentId) return 'The hosting attachment needs exact bound provider, service, environment and domain identities before DNS can change.';
-  if (observed.partial || observed.provider !== bindings.provider || observed.projectId !== bindings.projectId || observed.environmentId !== bindings.environmentId
-    || observed.completeness?.project !== 'complete' || observed.completeness.environment !== 'complete' || observed.completeness.services !== 'complete') {
+  if (!completeHostingDomainInventory(observed, bindings)) {
     return 'The hosting provider could not verify its exact project, environment and service inventory.';
   }
-  const matches = observed.services.filter(service => service.externalId === binding.serviceId && service.name === binding.serviceName
-    && service.customDomains.includes(domain));
-  if (matches.length !== 1 || matches[0]!.customDomainStatus?.[domain]?.providerDomainId !== binding.providerDomainId
+  const matches = observed.services.filter(service => service.customDomains.includes(domain));
+  if (matches.length !== 1 || matches[0]!.externalId !== binding.serviceId || matches[0]!.name !== binding.serviceName
+    || matches[0]!.customDomainStatus?.[domain]?.providerDomainId !== binding.providerDomainId
     || binding.environmentId !== observed.environmentId) return 'The exact hosting attachment changed or was not observed. DNS records remain untouched.';
   const requirements = (matches[0]!.customDomainStatus?.[domain]?.dnsRecords ?? []).map(normalizeProviderDnsRecord)
     .map(record => record ? { name: record.name, type: record.type, value: record.value, purpose: record.purpose } : null)
@@ -85,8 +87,8 @@ const bindingFingerprint = (environment: Environment) => createHash('sha256')
 
 /** Called after the ordinary planner's fresh hosting observation, before exposing its plan. */
 export async function planHostedDns(ctx: CommandContext, params: {
-  project: Project; spec: ProjectSpec; environmentName: string; specRevision: number; observed: ObservedState | null;
-  actions?: PlanAction[];
+  project: Project; spec: Pick<ProjectSpec, 'environments'>; environmentName: string; specRevision: number; observed: ObservedState | null;
+  actions?: PlanAction[]; adoptTrafficOnly?: boolean; verifyOnly?: boolean;
 }): Promise<SavedDnsPlan | { blocked: string[] } | null> {
   const spec = params.spec.environments[params.environmentName];
   const environment = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
@@ -128,6 +130,13 @@ export async function planHostedDns(ctx: CommandContext, params: {
   if (!params.observed) return { blocked: ['The current hosting attachment could not be observed. DNS remains unchanged.'] };
   const source = hostingSource(environment, spec, params.observed, domain);
   if (typeof source === 'string') return { blocked: [source] };
+  const importedClaim = importedTrafficClaim(environment, domain);
+  if (!remove && !retarget && importedClaim && importedClaim !== binding.providerDomainId) {
+    return { blocked: ['The traffic DNS was imported for a different hosting attachment. Verify its recorded ownership before continuing.'] };
+  }
+  // The DNS import can finish before its separate hosting receipt. Ordinary
+  // plans and retries must retain the traffic scope throughout that interval.
+  const adoptTrafficOnly = params.adoptTrafficOnly || Boolean(!remove && !retarget && importedClaim && binding.trafficOnlyDomainId !== importedClaim);
   if (cancellation) {
     const selection = binding.dnsSelection!;
     const evidence = await verifyDnsTrafficAbsent({ ctx, project: params.project, domain,
@@ -144,7 +153,13 @@ export async function planHostedDns(ctx: CommandContext, params: {
     return null;
   }
   const service = params.observed.services.find(service => service.externalId === source.serviceId)!;
-  const requirements = service.customDomainStatus?.[domain]?.dnsRecords;
+  const status = service.customDomainStatus?.[domain];
+  if (adoptTrafficOnly && status?.providerVerified !== true) return { blocked: ['Domain adoption needs a currently verified hosting attachment.'] };
+  // A verified attachment can have separate, still-active ownership TXT records.
+  // Only the records carrying the existing route are part of this adoption.
+  const requirements = adoptTrafficOnly || binding.trafficOnlyDomainId === binding.providerDomainId
+    ? status?.dnsRecords?.filter(record => normalizeProviderDnsRecord(record)?.purpose?.toUpperCase().includes('TRAFFIC'))
+    : status?.dnsRecords;
   if (!remove && !requirements?.length) return { blocked: ['The exact hosting attachment has not supplied its DNS requirements yet. Run hv_plan again when the provider has made them available.'] };
   const groups = new Map<string, { key: string; name: string; type: DnsRecordType; values: string[]; ttl: number; proxied?: boolean }>();
   for (const input of remove ? [] : requirements ?? []) {
@@ -159,8 +174,12 @@ export async function planHostedDns(ctx: CommandContext, params: {
       name: record.name, type: record.type as DnsRecordType, values: [record.value], ttl: spec.dns?.ttl ?? 300, proxied });
   }
   const prepared = await prepareDnsEnginePlan({ ctx, project: params.project, environment, environmentSpec: spec,
-    owner: HOSTING_DNS_OWNER, domain, records: [...groups.values()], remove });
+    owner: HOSTING_DNS_OWNER, domain, records: [...groups.values()], remove,
+    ...(adoptTrafficOnly ? { adoptOnly: { mode: params.verifyOnly || binding.trafficOnlyDomainId === binding.providerDomainId ? 'verify' : 'plan',
+      providerDomainId: binding.providerDomainId } } : {}) });
   if (prepared.blocked?.length) return { blocked: prepared.blocked };
+  if (params.verifyOnly) return owned && prepared.ready ? null
+    : { blocked: ['The adopted source DNS still needs reconciliation. Review its existing record and native identity.'] };
   if (retargetSource?.stage === 'adopt' && prepared.actions.some(action => !['noop', 'update'].includes(action.type))) {
     return { blocked: ['The legacy retarget stage may only import exact existing DNS records. It cannot create, replace or destroy records before ownership is established.'] };
   }
@@ -177,7 +196,80 @@ export async function planHostedDns(ctx: CommandContext, params: {
     return null;
   }
   return persistDnsPlanRun(ctx, { ...params, environment, prepared, source: { ...source, remove,
-    ...(retargetSource ? { retarget: retargetSource } : {}) } });
+    ...(adoptTrafficOnly ? { adoptTrafficOnly: true } : {}), ...(retargetSource ? { retarget: retargetSource } : {}) } });
+}
+
+/** Review just an existing verified attachment and the exact DNS records already serving it. */
+export async function planHostedDomainAdoption(ctx: CommandContext, params: {
+  project: Project; spec: ProjectSpec; environmentName: string; specRevision: number;
+}): Promise<(SavedDnsPlan & { scope: 'domain-adoption' | 'dns-engine' }) | { blocked: string[] }> {
+  const { project, environmentName, specRevision } = params;
+  const spec = params.spec.environments[environmentName];
+  const environment = ctx.repos.environments.findByProjectAndName(project.id, environmentName);
+  if (!spec?.domain || !spec.dns || spec.domainTarget || !environment) return { blocked: [
+    'Declare the currently served hostname, DNS provider and exact zone on the existing source environment before adopting its route.'] };
+  const hosting = providerRegistry.getMetadata(spec.hosting.provider)?.lifecycle?.hosting;
+  if (hosting?.customDomains !== 'managed') return { blocked: ['This hosting provider does not support adopting an existing service domain.'] };
+  const bindings = parseHostingBindings(environment);
+  const { provider, projectId, environmentId, services, domainDns } = bindings;
+  const adapter = await ctx.adapterFactory.getProviderAdapter(spec.hosting.provider, project);
+  if (provider !== spec.hosting.provider || !projectId || !environmentId || !adapter.success || !adapter.adapter?.observe) {
+    return { blocked: ['The verified hosting connection and exact bound source project and environment are required.'] };
+  }
+  let observed: ObservedState;
+  try {
+    await adapter.adapter.configureTarget?.({ region: spec.hosting.region });
+    observed = await adapter.adapter.observe(environment);
+  } catch { return { blocked: ['The hosting provider could not observe the existing attachment.'] }; }
+  if (!completeHostingDomainInventory(observed, bindings)) {
+    return { blocked: ['The hosting provider could not verify this exact project, environment and complete service inventory.'] };
+  }
+  const owners = observed.services.filter(service => service.customDomains.includes(spec.domain!));
+  const serviceName = desiredDomainServiceName(spec);
+  if (owners.length !== 1 || !serviceName || owners[0]!.name !== serviceName || owners[0]!.externalId !== services?.[serviceName]?.serviceId
+    || owners[0]!.customDomainStatus?.[spec.domain]?.providerVerified !== true || !owners[0]!.customDomainStatus?.[spec.domain]?.providerDomainId) {
+    return { blocked: ['The existing hostname must be verified on the one bound public web service in this environment.'] };
+  }
+  const { actions } = diffEnvironment({ spec, envName: environmentName, observed,
+    local: { projectExists: true, environmentExists: true, services: [], components: [],
+      bindings: { provider, projectId, environmentId, services, domainDns } },
+    customDomainManagement: hosting.customDomains, customDomainRetarget: hosting.customDomainRetarget,
+    customDomainTrafficProxy: hosting.domainTrafficProxy });
+  const action = actions.find(action => action.id === `domain:${spec.domain}`);
+  if (!action?.verified || action.type === 'replace' || action.metadata?.blockedReason
+    || action.metadata?.operation && action.metadata.operation !== DOMAIN_ADOPT_OPERATION) {
+    return { blocked: ['The existing domain cannot be adopted with its current target or retained identity.'] };
+  }
+  if (action.metadata?.operation !== DOMAIN_ADOPT_OPERATION) {
+    const dns = await planHostedDns(ctx, { ...params, observed, actions: [action], adoptTrafficOnly: true });
+    if (dns) return 'blocked' in dns ? dns : { ...dns, scope: 'dns-engine' };
+    if (!action.metadata?.dnsEngineReady || action.type !== 'noop' || !hasOwnedDnsRecords(environment, HOSTING_DNS_OWNER)) {
+      return { blocked: ['The exact traffic records still need a verified DNS ownership receipt.'] };
+    }
+  }
+  // The hosting action only records native identifiers. Verification record values
+  // are unnecessary for the review or the local binding.
+  const { dnsRecords: _requirements, ...metadata } = action.metadata ?? {};
+  const review = { ...action, metadata };
+  const document: PlanRunDocument = { kind: 'hv_plan', scope: 'domain-adoption', environmentName, specRevision,
+    observedFingerprint: null, actions: [review] };
+  const run = ctx.repos.runs.create({ projectId: project.id, environmentId: environment.id, type: 'plan', plan: document as unknown as Record<string, unknown> });
+  ctx.repos.runs.updateStatus(run.id, 'succeeded');
+  return { planRunId: run.id, scope: 'domain-adoption', environmentName, specRevision, actions: [review], confirmActions: [], warnings: [] };
+}
+
+/** Recheck an imported source against the same full-plan hosting inventory and scoped DNS authority. */
+export async function verifyAdoptedHostingTraffic(ctx: CommandContext, project: Project, environment: Environment, spec: EnvironmentSpec,
+  observed: ObservedState | null, specRevision: number): Promise<boolean> {
+  const bindings = parseHostingBindings(environment);
+  const binding = bindings.domainDns;
+  const serviceName = desiredDomainServiceName(spec);
+  if (!spec.domain || spec.domainTarget || !binding?.providerDomainId || binding.trafficOnlyDomainId !== binding.providerDomainId
+    || binding.name !== spec.domain || !serviceName || binding.serviceName !== serviceName || binding.serviceId !== bindings.services?.[serviceName]?.serviceId
+    || !observed || !observed.projectExists) return false;
+  const result = await planHostedDns(ctx, { project, spec: { environments: { [environment.name]: spec } }, environmentName: environment.name,
+    specRevision, observed, adoptTrafficOnly: true, verifyOnly: true });
+  return result === null;
 }
 
 export async function applyDnsPlan(ctx: CommandContext, params: {
@@ -206,6 +298,8 @@ export async function applyDnsPlan(ctx: CommandContext, params: {
     if (typeof current === 'string' || Object.entries(current).some(([key, value]) => !isDeepStrictEqual(source[key], value))) {
       return { kind: 'blocked', reason: typeof current === 'string' ? current : 'The hosting attachment changed. Run hv_plan again.' };
     }
+    if (source.adoptTrafficOnly && observed.services.find(service => service.externalId === source.serviceId)
+      ?.customDomainStatus?.[descriptor.domain]?.providerVerified !== true) return { kind: 'blocked', reason: 'The source domain is no longer verified. Review its existing route again.' };
     if (source.retarget) {
       const retarget = source.retarget as Record<string, unknown>;
       const target = retargetDestination(environment, spec, observed, descriptor.domain);
@@ -221,6 +315,8 @@ export async function applyDnsPlan(ctx: CommandContext, params: {
     } else if (source.remove !== !spec.domain) {
       return { kind: 'blocked', reason: 'The hosting removal intent changed. Run hv_plan again.' };
     }
+  } else if (source?.kind === 'domain-handoff') {
+    if (descriptor.owner !== HOSTING_DNS_OWNER || descriptor.domain !== handoffReviewSchema.parse(source.review).hostname) return { kind: 'blocked', reason: 'The DNS transfer does not name the reviewed source record.' };
   } else if (source?.kind === 'gcp-domain') {
     const { verifyGcpDnsSource } = await import('./infrastructure-engine.js');
     const verification = await verifyGcpDnsSource(ctx, params.project, params.spec, source);
@@ -230,12 +326,27 @@ export async function applyDnsPlan(ctx: CommandContext, params: {
     const verification = await verifyDnsIntegrationSource(ctx, params.project, spec, source);
     if (!verification.ready) return { kind: 'blocked', reason: verification.reason ?? 'The DNS integration source could not be verified.' };
   } else return { kind: 'blocked', reason: 'The saved DNS plan has no verified originating workflow.' };
+  const checkHandoff = async () => {
+    if (source.kind === 'domain-handoff') {
+      const { verifyHandoffDnsSource } = await import('./domain-handoff.js');
+      try {
+        if (!verifyHandoffDnsPayload(ctx, descriptor, handoffReviewSchema.parse(source.review), source.stage)) throw new DomainHandoffBlocked('The saved DNS artifact does not target the exact reviewed public origin or verification records.');
+        await verifyHandoffDnsSource(ctx, params, source, loaded.document.actions, environment.id);
+      }
+      catch (error) { throw new Error(error instanceof DomainHandoffBlocked ? error.message : 'The source, DNS or replacement route could not be verified before applying this handoff.'); }
+    }
+  };
   const result = await executor.execute({ planRunId: params.planId, currentSpecRevision: params.specRevision,
     confirmActions: params.confirmActions,
-    handler: async action => action.metadata?.operation === 'dnsOwnershipReconcile'
-      ? executeDnsOwnershipReconciliation({ ctx, project: params.project, environment, descriptor })
-      : { success: false, status: 'blocked', message: 'DNS stages only execute their saved engine segment or exact ownership reconciliation.' },
-    segmentHandler: (segment, members) => executeDnsEngineSegment({ ctx, project: params.project, environment, descriptor, segment, members }),
+    handler: async action => {
+      await checkHandoff();
+      return action.metadata?.operation === 'dnsOwnershipReconcile' ? executeDnsOwnershipReconciliation({ ctx, project: params.project, environment, descriptor })
+        : { success: false, status: 'blocked', message: 'DNS stages only execute their saved engine segment or exact ownership reconciliation.' };
+    },
+    segmentHandler: async (segment, members) => {
+      await checkHandoff();
+      return executeDnsEngineSegment({ ctx, project: params.project, environment, descriptor, segment, members });
+    },
   });
   const executed = result.success && loaded.document.actions.some(action => action.type !== 'noop');
   if (executed && source.kind === 'hosting-domain') {
@@ -258,7 +369,8 @@ export async function applyDnsPlan(ctx: CommandContext, params: {
       }
     }
     if (binding?.name === descriptor.domain) {
-      ctx.repos.environments.updatePlatformBindings(current.id, { domainDns: { ...binding, dnsEngineRemoved: source.remove === true, dnsStagePending: false } });
+      ctx.repos.environments.updatePlatformBindings(current.id, { domainDns: { ...binding, dnsEngineRemoved: source.remove === true, dnsStagePending: false,
+        ...(source.adoptTrafficOnly ? { trafficOnlyDomainId: binding.providerDomainId } : {}) } });
     }
   }
   return { kind: 'executed', envName: environmentName, result };

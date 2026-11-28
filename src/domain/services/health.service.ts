@@ -6,6 +6,7 @@ import type { Environment } from '../entities/environment.entity.js';
 import { UNCONFIGURED_HOSTING_PROVIDER, type Project } from '../entities/project.entity.js';
 import type { Service } from '../entities/service.entity.js';
 import { parseHostingBindings } from '../ports/hosting.port.js';
+import { ownedEdgeEndpoint } from '../plan/domain-handoff.js';
 import { adapterFactory } from './adapter.factory.js';
 
 const envRepo = new EnvironmentRepository();
@@ -280,6 +281,8 @@ export function resolveServiceBaseUrl(
   serviceName: string,
   declaredDomain?: string
 ): string | null {
+  const edge = ownedEdgeEndpoint(environment);
+  if (edge?.service === serviceName) return edge.publicUrl;
   const bindings = parseHostingBindings(environment);
   const serviceBinding = bindings.services?.[serviceName];
   const candidate = serviceBinding?.url ?? serviceBinding?.customDomains?.[0];

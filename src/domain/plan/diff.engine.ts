@@ -12,6 +12,7 @@ import {
   DOMAIN_ADOPT_OPERATION,
   DOMAIN_DETACH_OPERATION,
   DOMAIN_RETARGET_OPERATION,
+  completeHostingDomainInventory,
   desiredDomainServiceName,
   domainRetargetBindingSchema,
   observedDomainService,
@@ -1534,7 +1535,8 @@ export function diffEnvironment(input: {
       && oldService && (attachedServices.length === 0 || (attachedServices.length === 1
         && attachedService === oldService && domainStatus?.providerDomainId === oldBinding.data.providerDomainId)));
     const boundServiceDomainAdoption = Boolean(
-      exactTargetAttachment && !domainBindingPresent
+      exactTargetAttachment && !domainBindingPresent && local.bindings?.provider === provider
+      && completeHostingDomainInventory(observed, { provider, projectId: target.projectId, environmentId: target.environmentId })
       && (!boundDomainDns?.name || boundDomainDns.name === spec.domain)
       && domainStatus?.providerDomainId && domainStatus.providerVerified === true
     );

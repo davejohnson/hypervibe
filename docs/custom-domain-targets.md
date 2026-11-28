@@ -30,6 +30,60 @@ superseded by the engine's exact-zone identity, ownership and recovery checks.
 Legacy record identities require explicit engine adoption before their removal;
 a missing engine state is not evidence that public traffic DNS is absent.
 
+## Adopt a hostname already serving a Railway app
+
+Use this review when Railway already serves the hostname on the public web
+service and the environment has no saved domain ownership. It also works when
+the full environment plan is waiting to publish an unrelated deploy workflow.
+
+1. Inspect the source environment with `hv_inspect`. Confirm the verified
+   Railway claim on the bound web service and its required traffic CNAME.
+   Inspect Cloudflare with the same Hypervibe project, `resource="dns"`, the
+   zone name as `scope`, and the full traffic hostname as `name`. Match the
+   CNAME target and record its native ID, zone ID, account ID and proxy mode.
+2. Merge the hostname and DNS selection into the existing source environment
+   with `hv_spec`. For example, a proxied apex CNAME that currently sends
+   traffic to Railway uses the following shape. Substitute the observed IDs,
+   hostname and current routing target. The `on` setting preserves the proxy
+   required by application maintenance during a later cutover.
+
+   ```json
+   {
+     "environments": {
+       "production": {
+         "domain": "example.com",
+         "dns": {
+           "provider": "cloudflare",
+           "zone": { "id": "<zone ID>", "name": "example.com", "accountId": "<account ID>" },
+           "policy": { "proxy": "on" },
+           "adoptRecords": [
+             { "id": "<CNAME record ID>", "name": "example.com", "type": "CNAME", "values": ["current-route.up.railway.app"] }
+           ]
+         }
+       }
+     }
+   }
+   ```
+
+3. Run `hv_plan` on the source environment with `scope="domain-adoption"`.
+   Review and apply the saved plan to record the existing Railway attachment.
+   Run the same plan again to review the exact DNS import. Apply that plan
+   using its plan ID and confirmation IDs. A changed native identity, target,
+   proxy setting or proposed provider write stops the import.
+4. Repeat the scoped plan. An empty action list confirms that the attachment
+   and traffic record have converged. The normal cutover preview can then
+   recheck the route, including its native DNS ownership, before a pause.
+
+If the DNS import finishes before Hypervibe can record the hosting receipt,
+the next scoped plan offers a local ownership repair. Apply it to recheck the
+original Railway claim, Cloudflare record and private OpenTofu record ID. A
+successful repair resumes cutover without importing the record a second time.
+
+The import leaves the Railway verification TXT and separate mail or ownership
+records under their existing management. Cloudflare flattens its apex CNAME,
+so an independent TXT at the same owner is compatible. Conflicting address
+records still block the plan. [Cloudflare apex flattening](https://developers.cloudflare.com/dns/cname-flattening/set-up-cname-flattening/)
+
 ## Reviewed provider boundary
 
 The target-selection rule applies to existing managed environment domains.

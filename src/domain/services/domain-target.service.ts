@@ -38,6 +38,23 @@ export function registerEngineWebServiceResolver(resolver: EngineWebServiceResol
   engineWebServiceResolver = resolver;
 }
 
+export async function observeEngineDomainOrigin(project: Project, target: Environment, targetSpec: EnvironmentSpec,
+  hostname: string, service: string): Promise<DomainTargetObservation> {
+  const unknown = (reason: string): DomainTargetObservation => ({ state: 'unknown', reason });
+  const web = targetSpec.services[service];
+  if (target.projectId !== project.id || !engineWebServiceResolver || !web || web.workloadKind !== 'web'
+    || web.public === false || targetSpec.domainTarget || targetSpec.maintenance?.enabled) {
+    return unknown('The selected environment cannot verify an available public cloud web service.');
+  }
+  const observed = await engineWebServiceResolver({ project, environment: target, environmentName: target.name, service });
+  if ('unknown' in observed) return unknown(observed.unknown);
+  return admitTarget({ hostname, path: web.healthCheckPath ?? '/', url: observed.url, fingerprint: origin => bindingIdentityFingerprint({
+    projectId: project.id, environmentId: target.id, environmentName: target.name,
+    provider: observed.provider, providerProjectId: observed.providerProjectId, providerEnvironmentId: observed.providerEnvironmentId,
+    serviceName: service, serviceId: observed.serviceId, resourceUid: observed.resourceUid, origin,
+  }) }, unknown);
+}
+
 /** Read-only target admission. No custom-domain, DNS, deployment or data writes. */
 export async function observeDomainTarget(params: {
   project: Project;
@@ -63,15 +80,7 @@ export async function observeDomainTarget(params: {
       return unknown('The target must be an available public web service without another traffic handoff or active maintenance.');
     }
     if (isEngineManaged(targetSpec)) {
-      if (!engineWebServiceResolver) return unknown('The OpenTofu engine is not available to verify the target.');
-      const observed = await engineWebServiceResolver({ project: params.project, environment: target, environmentName: desired.environment, service: desired.service });
-      if ('unknown' in observed) return unknown(observed.unknown);
-      return await admitTarget({ hostname, path: serviceSpec.healthCheckPath ?? '/', url: observed.url, fingerprint: (origin) => bindingIdentityFingerprint({
-        projectId: params.project.id, environmentId: target.id, environmentName: target.name,
-        provider: observed.provider, providerProjectId: observed.providerProjectId,
-        providerEnvironmentId: observed.providerEnvironmentId, serviceName: desired.service, serviceId: observed.serviceId,
-        resourceUid: observed.resourceUid, origin,
-      }) }, unknown);
+      return await observeEngineDomainOrigin(params.project, target, targetSpec, hostname, desired.service);
     }
     const bindings = parseHostingBindings(target);
     const sourceBindings = parseHostingBindings(params.environment);

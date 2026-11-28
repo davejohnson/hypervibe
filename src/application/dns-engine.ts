@@ -3,7 +3,7 @@ import { OpenTofuEngine } from '../adapters/engine/opentofu/engine.js';
 import { dnsEngineBackend, buildDnsConfiguration, dnsRecordAddress, dnsRecordNativeId } from '../adapters/dns/tofu/dns-engine.backend.js';
 import { resolveDnsConnection, dnsZoneFingerprint } from '../adapters/dns-observation/connections.js';
 import type { DnsObserver } from '../adapters/dns-observation/http-observer.js';
-import type { DnsRecordIntent, DnsRecordType, DnsObservedRecord, DnsZoneIdentity } from '../domain/ports/dns.port.js';
+import { cnameConflictTypes, type DnsRecordIntent, type DnsRecordType, type DnsObservedRecord, type DnsZoneIdentity } from '../domain/ports/dns.port.js';
 import type { EngineActionSegment, EngineConfiguration, EngineSegmentResult, EngineStateIdentity } from '../domain/ports/infrastructure-engine.port.js';
 import { engineSegmentOf } from '../domain/ports/infrastructure-engine.port.js';
 import { redactEngineOutput } from '../adapters/engine/opentofu/runner.js';
@@ -11,6 +11,7 @@ import type { Project } from '../domain/entities/project.entity.js';
 import type { Environment } from '../domain/entities/environment.entity.js';
 import type { EnvironmentSpec } from '../domain/spec/spec.schema.js';
 import type { PlanAction } from '../domain/plan/plan.types.js';
+import { DomainHandoffBlocked, exactHandoffDnsChanges, type HandoffReview } from '../domain/plan/domain-handoff.js';
 import type { ActionResult } from '../domain/plan/converge.executor.js';
 import { resolveDnsPolicy } from '../domain/services/dns-policy.service.js';
 import { additionalGcpDomainDnsOwner } from '../domain/services/domain-scope.js';
@@ -26,6 +27,7 @@ interface DnsBinding {
   version: 1; zone: DnsZoneIdentity; domain: string; connectionScope?: string;
   recordsEncrypted: string; ownersEncrypted: string; configurationEncrypted: string;
   zoneFingerprint: string; zoneNativeId?: string; ownedOwners: string[]; ownerDomains?: Record<string, string>; attempt?: DnsPlanDescriptor;
+  trafficOnlyDomainId?: string;
 }
 export interface DnsPlanDescriptor {
   version: 1; planId: string; segment: Omit<EngineActionSegment, 'addresses'>;
@@ -36,11 +38,31 @@ interface Snapshot { name: string; type: DnsRecordType; fingerprint: string }
 interface DnsPayload {
   configuration: EngineConfiguration; records: DnsRecordIntent[]; retired: DnsRecordIntent[];
   owners: Record<string, DesiredDnsRecord[]>; managed: ManagedRecord[]; observations: Snapshot[]; bindingFingerprint: string;
-  readOnlyReconciliation?: boolean; zoneNativeId?: string;
+  readOnlyReconciliation?: boolean; zoneNativeId?: string; trafficOnlyDomainId?: string;
+}
+
+/** Re-bind the frozen DNS intent to the reviewed public origin before executing its saved segment. */
+export function verifyHandoffDnsPayload(ctx: CommandContext, descriptor: DnsPlanDescriptor, review: HandoffReview, stage: unknown): boolean {
+  if (stage !== 'route' && stage !== 'cleanup') return false;
+  const payload = ctx.secretStore.decryptObject<DnsPayload>(descriptor.payloadEncrypted);
+  const cNames = payload.records.filter(record => record.type === 'CNAME');
+  const traffic = cNames[0];
+  const host = new URL(review.edge.origin).hostname;
+  if (cNames.length !== 1 || !traffic || traffic.name !== review.hostname || traffic.proxied !== true || traffic.ttl !== 1
+    || traffic.values.length !== 1 || dnsValue('CNAME', traffic.values[0]!) !== host
+    || traffic.authority.kind !== 'managed' || traffic.authority.nativeId !== review.recordId || traffic.authority.preserveValues.length
+    || dnsRecordAddress(descriptor.zone, traffic) !== review.recordAddress) return false;
+  const other = [...payload.records.filter(record => record !== traffic), ...payload.retired];
+  return (stage === 'cleanup' || !payload.retired.length) && other.every(record => record.type === 'TXT' && record.authority.kind === 'managed'
+    && review.verification.some(proof => proof.address === dnsRecordAddress(descriptor.zone, record)
+      && proof.id === (record.authority as { nativeId: string }).nativeId && proof.name === record.name));
 }
 export interface DnsPlanInput {
+  handoff?: { review: HandoffReview; stage: 'route' | 'cleanup' };
   ctx: CommandContext; project: Project; environment: Environment; environmentSpec: EnvironmentSpec;
   owner: string; domain: string; records: DesiredDnsRecord[]; remove?: boolean; retainExistingTypes?: DnsRecordType[];
+  /** Import exact existing records without authorizing a provider mutation. */
+  adoptOnly?: { mode: 'plan' | 'verify'; providerDomainId: string };
 }
 export interface DnsPreparedPlan { actions: PlanAction[]; descriptor?: DnsPlanDescriptor; ready: boolean; blocked?: string[] }
 export interface DnsEngineDependencies {
@@ -75,12 +97,27 @@ function privateValues(records: DnsRecordIntent[]): string[] {
     ...(record.authority.kind === 'adopt' ? record.authority.existingValues : [])]));
 }
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+/** An import can include an in-place provider update. Inspect the raw plan before saving it. */
+function onlyExactDnsImports(shown: unknown, configuration: EngineConfiguration): boolean {
+  const rows = (shown as { resource_changes?: unknown } | null)?.resource_changes;
+  if (!Array.isArray(rows)) return false;
+  const expected = new Set(Object.keys(configuration.resources));
+  for (const row of rows) {
+    if (!row || row.mode !== 'managed' || !expected.delete(row.address) || row.deposed || row.previous_address
+      || !Array.isArray(row.change?.actions) || row.change.actions.length !== 1 || row.change.actions[0] !== 'no-op') return false;
+    const id = configuration.imports?.[row.address];
+    if (id ? row.change.importing?.id !== id : row.change.importing !== undefined) return false;
+  }
+  return expected.size === 0;
+}
+
 function sameZone(left: DnsZoneIdentity, right: DnsZoneIdentity): boolean {
   return left.provider === right.provider && left.zoneId === right.zoneId && normalized(left.zoneName) === normalized(right.zoneName)
     && ['accountId', 'projectId', 'subscriptionId', 'resourceGroup'].every(key => left.scope[key as keyof typeof left.scope] === right.scope[key as keyof typeof right.scope]);
 }
 const extraOwner = (owner?: string) => Boolean(owner && /^gcp-domain-[a-f0-9]{20}$/.test(owner));
-const bindingKey = (owner?: string) => extraOwner(owner) ? `dnsEngine_${owner}` : 'dnsEngine';
+const bindingKey = (owner?: string) => extraOwner(owner) || owner === 'edge-domain' ? `dnsEngine_${owner}` : 'dnsEngine';
 
 /** The original primary DNS state also holds email and other integrations. Extra hosts have independent state and recovery. */
 export function gcpDomainDnsOwner(environment: Environment, domain: string, primary?: string, savedOwner?: string): string {
@@ -105,6 +142,10 @@ function binding(environment: Environment, owner?: string): DnsBinding | undefin
   return value;
 }
 export function getDnsBindingIdentity(environment: Environment, owner?: string): DnsZoneIdentity | undefined { return binding(environment, owner)?.zone; }
+export function importedTrafficClaim(environment: Environment, hostname: string): string | undefined {
+  const saved = binding(environment, 'hosting-domain');
+  return saved?.ownerDomains?.['hosting-domain'] === hostname && hasOwnedDnsRecords(environment, 'hosting-domain') ? saved.trafficOnlyDomainId : undefined;
+}
 export function getDnsBindingSelection(environment: Environment, owner?: string): { zone: DnsZoneIdentity; connectionScope?: string } | undefined {
   const saved = binding(environment, owner);
   return saved ? { zone: saved.zone, connectionScope: saved.connectionScope } : undefined;
@@ -158,7 +199,74 @@ async function observeRecords(observer: DnsObserver, name: string, type: DnsReco
 }
 function ownerOf(key: string): string { return key.split(':', 1)[0]!; }
 export function dnsEngineState(environment: Environment, provider: string, owner?: string): EngineStateIdentity & { partition: 'environment' } {
+  if (owner === 'edge-domain') {
+    const receipt = environment.platformBindings.edgeDomain as { projectId?: string; targetId?: string; sourceId?: string } | undefined;
+    if (receipt?.targetId !== environment.id || receipt.projectId !== environment.projectId || !receipt.sourceId) throw new Error('The transferred DNS state has no matching ownership receipt.');
+    return { provider: `dns-${provider}`, projectId: environment.projectId, environmentId: receipt.sourceId, partition: 'environment' };
+  }
+  if (!extraOwner(owner) && environment.platformBindings.edgeDomainReleased) {
+    // The original state now belongs to the target. Any future DNS work on the donor starts in its own namespace.
+    return { provider: `dns-${provider}`, projectId: environment.projectId, environmentId: `${environment.id}-after-handoff`, partition: 'environment' };
+  }
   return { provider: `dns-${provider}`, projectId: environment.projectId, environmentId: extraOwner(owner) ? `${environment.id}-${owner}` : environment.id, partition: 'environment' };
+}
+
+/** A handoff changes one already-owned, proxied CNAME in place. Verification TXT can retire only after the hosting claim is gone. */
+export async function observeEdgeDomainDns(ctx: CommandContext, project: Project, environment: Environment, hostname: string,
+  transferred: boolean, deps: DnsEngineDependencies = defaults, observation: 'ownership' | 'serving' = 'ownership') {
+  const slot = transferred ? 'edge-domain' : 'hosting-domain';
+  const saved = binding(environment, slot);
+  if (!saved || saved.zone.provider !== 'cloudflare' || !saved.zone.scope.accountId || !saved.zoneNativeId
+    || saved.domain !== hostname && saved.ownerDomains?.['hosting-domain'] !== hostname) throw new DomainHandoffBlocked('Adopt the exact Cloudflare DNS records for the source domain first.');
+  const inventory = owned(ctx, saved);
+  const previous = saved.attempt ? ctx.secretStore.decryptObject<DnsPayload>(saved.attempt.payloadEncrypted) : undefined;
+  const canonical = previous?.managed ?? inventory;
+  if (otherOwnership(ctx, environment, slot, saved.zone, canonical.map(record => record.intent))) throw new DomainHandoffBlocked('Another environment claims this DNS record. Resolve the competing ownership first.');
+  if (saved.attempt && saved.attempt.owner !== 'hosting-domain' || saved.ownedOwners.some(owner => owner !== 'hosting-domain')
+    || canonical.some(record => record.owner !== 'hosting-domain' || !record.intent.values.length || record.intent.authority.kind !== 'managed'
+      || record.intent.authority.preserveValues.length)) throw new DomainHandoffBlocked('This DNS state also owns other records or has an unrelated operation in progress. Preserve its existing consumers.');
+  const traffic = canonical.filter(record => record.intent.name === hostname && record.intent.type === 'CNAME');
+  if (traffic.length !== 1 || !traffic[0]!.intent.proxied || canonical.some(record => record !== traffic[0] && record.intent.type !== 'TXT')) {
+    throw new DomainHandoffBlocked('The private DNS state must own one proxied hostname CNAME and only its source verification TXT records.');
+  }
+  const connection = await deps.connect({ context: ctx, zone: saved.zone, connectionScope: saved.connectionScope,
+    scopeHints: lookupHints(project, hostname, saved.zone) });
+  if ('blocked' in connection) throw new DomainHandoffBlocked('The saved DNS connection is unavailable.');
+  const zone = await connection.observer.observeZone();
+  if (zone.status !== 'present' || zone.value.visibility !== 'public' || !sameZone(zone.value.identity, saved.zone)
+    || zone.value.providerNativeId !== saved.zoneNativeId || dnsZoneFingerprint(zone.value) !== saved.zoneFingerprint) throw new DomainHandoffBlocked('The public DNS zone changed or cannot be verified.');
+  let stateIds: Record<string, string> | undefined;
+  if (observation === 'ownership') {
+    const engine = await deps.engine();
+    const inspected = await engine.inspectState({ backend: dnsEngineBackend(saved.zone), configuration: ctx.secretStore.decryptObject(saved.configurationEncrypted),
+      auth: connection.auth, state: dnsEngineState(environment, saved.zone.provider, slot), project: projectNativeIds });
+    if (!inspected.ok || !inspected.present || Object.keys(inspected.value).some(address => !canonical.some(record => record.address === address))) {
+      throw new DomainHandoffBlocked('The private engine state cannot establish exclusive ownership of the source DNS records.');
+    }
+    stateIds = inspected.value;
+  }
+  const seen = [];
+  for (const record of canonical) {
+    const { intent, address } = record;
+    if (intent.authority.kind !== 'managed') throw new DomainHandoffBlocked('Incomplete DNS ownership.');
+    const nativeId = intent.authority.nativeId;
+    const native = stateIds?.[address];
+    const present = await observeRecords(connection.observer, intent.name, intent.type);
+    const exact = present.find(row => row.nativeId === nativeId);
+    const retired = previous?.retired.some(old => old.key === intent.key);
+    if (!native && !exact && retired && intent.type === 'TXT') continue;
+    if (stateIds && (!native || normalizeNativeId(saved.zone, intent, native) !== nativeId) || !exact || exact.values.length !== 1
+      || intent.type === 'CNAME' && (present.length !== 1 || exact.proxied !== true || exact.ttl !== 1)
+      || !intent.values.includes(exact.values[0]!) && !previous?.records.some(item => item.key === intent.key && item.values.includes(exact.values[0]!))) {
+      throw new DomainHandoffBlocked('A managed DNS record changed identity, value, proxy settings or ownership.');
+    }
+    seen.push({ name: intent.name, type: intent.type, value: exact.values[0]!, id: intent.authority.nativeId, address, key: intent.key });
+  }
+  const cname = seen.find(record => record.type === 'CNAME')!;
+  const key = /^hosting-domain:(.+)\.0$/.exec(cname.key)?.[1];
+  if (!key) throw new DomainHandoffBlocked('The source DNS record has no stable hosting address.');
+  return { zone: { provider: 'cloudflare' as const, zoneId: saved.zone.zoneId, zoneName: saved.zone.zoneName, scope: { accountId: saved.zone.scope.accountId } },
+    connectionId: connection.connectionId, traffic: { ...cname, key }, verification: seen.filter(record => record.type === 'TXT'), pending: Boolean(saved.attempt) };
 }
 function lookupHints(project: Project, domain: string, zone: DnsZoneIdentity): string[] {
   return [...new Set([parseGitHubRepoFromRemote(project.gitRemoteUrl), domain, normalized(zone.zoneName)].filter((value): value is string => Boolean(value)))];
@@ -301,10 +409,10 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
           return blocked(`Existing ${record.type} records for ${record.name} are not owned by this DNS state. Add exact native IDs and current values to dns.adoptRecords and review the import plan.`);
         } else records.push({ ...record, authority: { kind: 'absent' } });
       }
-      // A CNAME cannot coexist with other ordinary record types at its owner.
-      if (record.type === 'CNAME') for (const other of ['A', 'AAAA', 'TXT', 'MX', 'CAA'] as DnsRecordType[]) {
+      const conflicts = cnameConflictTypes(identity, record.name);
+      if (record.type === 'CNAME') for (const other of conflicts) {
         if ((await read(record.name, other)).length) return blocked(`Existing ${other} records conflict with the desired CNAME for ${record.name}; preserve them and resolve the conflict explicitly.`);
-      } else if ((await read(record.name, 'CNAME')).length) return blocked(`An existing CNAME conflicts with ${record.type} at ${record.name}.`);
+      } else if (conflicts.includes(record.type) && (await read(record.name, 'CNAME')).length) return blocked(`An existing CNAME conflicts with ${record.type} at ${record.name}.`);
     }
     const publicSecurity = input.remove ? undefined : await deps.security(input.domain);
     const caaRecords = input.remove ? [] : await read(input.domain, 'CAA');
@@ -341,12 +449,46 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
     }
     const overlap = otherOwnership(input.ctx, current, input.owner, identity, [...records, ...retired]);
     if (overlap) return blocked(overlap);
+    if (input.adoptOnly) {
+      if (retired.length || records.some(record => record.authority.kind === 'absent'
+        || record.authority.kind === 'adopt' && ownerOf(record.key) !== input.owner)) {
+        return blocked('Domain adoption requires every traffic record to exist and match its selected native ID. It cannot create or retire records.');
+      }
+      for (const record of records.filter(entry => ownerOf(entry.key) === input.owner)) {
+        const authority = record.authority;
+        const candidates = await read(record.name, record.type);
+        const exact = authority.kind !== 'absent' && candidates.find(entry => entry.nativeId === authority.nativeId);
+        if (!exact || record.type === 'CNAME' && candidates.length !== 1 || JSON.stringify(sorted(exact.values)) !== JSON.stringify(sorted(record.values))
+          || identity.provider === 'cloudflare' && exact.proxied !== record.proxied) {
+          return blocked('Domain adoption needs the exact current traffic records, targets and proxy settings. Inspect the existing route and review the selected records again.');
+        }
+        if (!effective.dns.ttl) record.ttl = exact.ttl;
+        if (record.ttl !== exact.ttl) return blocked('Domain adoption preserves the current record TTL. Use its existing TTL when reviewing the import.');
+      }
+    }
     const configuration = buildDnsConfiguration({ zone: identity, records, retiredRecords: retired });
     const engine = await deps.engine();
     const state = dnsEngineState(current, identity.provider, input.owner);
+    const publicTarget = input.handoff ? new URL(input.handoff.review.edge.origin).hostname : undefined;
+    // The Worker origin is public in the review. Keep it visible to the private exact-change predicate.
+    // Credential redactions and private TXT values still apply even if one happens to equal that hostname.
+    const sensitiveRecords = [...records, ...retired].flatMap(record => privateValues([record]).filter(value =>
+      !publicTarget || record.type !== 'CNAME' || record.name !== input.domain || value !== publicTarget));
+    const auth = { ...connection.auth, redact: sorted([...connection.auth.redact, ...sensitiveRecords]) };
+    const source = records.filter(record => ownerOf(record.key) === input.owner);
+    const recoverTrafficReceipt = Boolean(input.adoptOnly?.mode === 'plan' && saved && source.length
+      && source.every(record => record.authority.kind === 'managed'));
+    if (input.adoptOnly?.mode === 'verify' || recoverTrafficReceipt) {
+      if (!saved || input.adoptOnly?.mode === 'verify' && saved.attempt) return blocked('The source DNS import still needs a completed ownership receipt.');
+      const inspected = await engine.inspectState({ backend: dnsEngineBackend(identity), configuration: input.ctx.secretStore.decryptObject(saved.configurationEncrypted),
+        auth, state, project: projectNativeIds });
+      if (!inspected.ok || !inspected.present || !exactManagedIds(identity, source, inspected.value)) return blocked('The native IDs in the source DNS state do not prove ownership of its current traffic records.');
+      if (input.adoptOnly?.mode === 'verify') return { actions: [], ready: true };
+    }
     const planId = randomUUID();
-    const auth = { ...connection.auth, redact: sorted([...connection.auth.redact, ...privateValues([...records, ...retired])]) };
-    const planned = await engine.plan({ backend: dnsEngineBackend(identity), configuration, auth, state, planId });
+    const planned = await engine.plan({ backend: dnsEngineBackend(identity), configuration, auth, state, planId,
+      ...(input.adoptOnly ? { verifyPlannedChanges: (shown: unknown) => onlyExactDnsImports(shown, configuration) }
+        : input.handoff ? { verifyPlannedChanges: (shown: unknown) => exactHandoffDnsChanges(shown, input.handoff!.review, input.handoff!.stage) } : {}) });
     if (!planned.ok) return blocked(redactEngineOutput(planned.error, auth.redact));
     if (planned.blockers.length || planned.unmanagedDeletes.length) return { actions: [], ready: false, blocked: [...planned.blockers.map(value => redactEngineOutput(value, auth.redact)), ...(planned.unmanagedDeletes.length ? ['DNS state includes undeclared resources. Preserve it and reconcile exact ownership before deleting anything.'] : [])] };
     const allIntents = [...records, ...retired];
@@ -359,8 +501,9 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
       }));
       if (action.type === 'replace' || action.type === 'create' && observedExisting) return blocked('The DNS plan would recreate an observed resource. Restore its ownership state or review an explicit import; recreation is not a recovery shortcut.');
     }
-    const reconcile = Boolean(saved && planned.actions.every(action => action.type === 'noop') && (hash(owners) !== previousOwnersFingerprint || saved.attempt));
+    const reconcile = Boolean(saved && planned.actions.every(action => action.type === 'noop') && (hash(owners) !== previousOwnersFingerprint || saved.attempt || recoverTrafficReceipt));
     const payload: DnsPayload = { configuration, records, retired, owners, managed: previous, readOnlyReconciliation: reconcile, zoneNativeId: zone.value.providerNativeId,
+      ...(input.adoptOnly && { trafficOnlyDomainId: input.adoptOnly.providerDomainId }),
       observations: [...snapshots.values()].map(entry => entry.snapshot), bindingFingerprint: hash(saved ?? null) };
     const descriptor: DnsPlanDescriptor = { version: 1, planId, segment: planned.segment, state, zone: identity,
       owner: input.owner, domain: input.domain, connectionId: connection.connectionId, connectionScope: effective.dns.connectionScope,
@@ -372,7 +515,8 @@ export async function prepareDnsEnginePlan(input: DnsPlanInput, deps: DnsEngineD
     }));
     if (reconcile) actions.splice(0, actions.length, { id: `dns-reconcile:${input.owner}`, type: 'update', verified: true,
       resource: { kind: 'domain', provider: `dns-${identity.provider}`, name: input.domain },
-      reason: 'Verify exact native DNS absence and retained shared records, then reconcile the saved ownership receipt. This step makes no DNS changes.',
+      reason: recoverTrafficReceipt ? 'Verify the existing traffic record and finish recording its hosting attachment. This step makes no DNS changes.'
+        : 'Verify exact native DNS absence and retained shared records, then reconcile the saved ownership receipt. This step makes no DNS changes.',
       metadata: { operation: DNS_RECONCILE_OPERATION, domain: input.domain } });
     return { actions, descriptor, ready: actions.every(action => action.type === 'noop') };
   } catch {
@@ -400,6 +544,14 @@ export async function executeDnsOwnershipReconciliation(input: {
     if (connection.connectionId !== d.connectionId) return stop('The DNS connection changed after review.');
     const zone = await connection.observer.observeZone();
     if (zone.status !== 'present' || dnsZoneFingerprint(zone.value) !== d.zoneFingerprint) return stop('The exact DNS zone changed or could not be observed.');
+    if (payload.trafficOnlyDomainId) {
+      const engine = await deps.engine();
+      const inspected = await engine.inspectState({ backend: dnsEngineBackend(d.zone), configuration: payload.configuration,
+        auth: connection.auth, state: d.state, project: projectNativeIds });
+      if (!inspected.ok || !inspected.present || !exactManagedIds(d.zone, payload.records.filter(record => ownerOf(record.key) === d.owner), inspected.value)) {
+        return stop('The private DNS state no longer contains the reviewed native traffic record IDs.');
+      }
+    }
     const observations = new Map<string, DnsObservedRecord[]>();
     for (const snapshot of payload.observations) {
       const present = await observeRecords(connection.observer, snapshot.name, snapshot.type);
@@ -425,6 +577,8 @@ export async function executeDnsOwnershipReconciliation(input: {
       managed.push({ owner: ownerOf(record.key), address, intent: { ...record, values: desired ? record.values : [] } });
     }
     input.ctx.repos.environments.updatePlatformBindings(current.id, { [bindingKey(d.owner)]: { ...saved, domain: d.domain,
+      trafficOnlyDomainId: managed.some(record => record.owner === 'hosting-domain' && record.intent.values.length)
+        ? payload.trafficOnlyDomainId ?? saved.trafficOnlyDomainId : undefined,
       recordsEncrypted: input.ctx.secretStore.encryptObject(managed), ownersEncrypted: input.ctx.secretStore.encryptObject(payload.owners),
       configurationEncrypted: input.ctx.secretStore.encryptObject(payload.configuration),
       ownedOwners: sorted(managed.filter(record => record.intent.values.length).map(record => record.owner)), attempt: undefined } });
@@ -456,11 +610,20 @@ function projectNativeIds(state: unknown): Record<string, string> {
 function normalizeNativeId(zone: DnsZoneIdentity, record: DnsRecordIntent, id: string): string {
   if (zone.provider === 'cloudflare') {
     if (id.includes('/') && (!id.startsWith(`${zone.zoneId}/`) || id.split('/').length !== 2)) throw new Error('Engine DNS state names a different Cloudflare zone.');
-    return dnsRecordNativeId(zone, record.name, record.type, id.includes('/') ? id.split('/')[1]! : id);
+    const native = dnsRecordNativeId(zone, record.name, record.type, id.includes('/') ? id.split('/')[1]! : id);
+    if (record.authority.kind === 'adopt' && native !== record.authority.nativeId) throw new Error('Engine state names a different Cloudflare record than the reviewed import.');
+    return native;
   }
   const expected = dnsRecordNativeId(zone, record.name, record.type);
   if ((zone.provider === 'azure' ? id.toLowerCase() !== expected.toLowerCase() : id !== expected)) throw new Error('Engine DNS state native identity does not match the reviewed zone and record.');
   return expected;
+}
+
+function exactManagedIds(zone: DnsZoneIdentity, records: DnsRecordIntent[], state: Record<string, string>): boolean {
+  return records.length > 0 && records.every(record => {
+    const native = state[dnsRecordAddress(zone, record)];
+    return native && record.authority.kind === 'managed' && normalizeNativeId(zone, record, native) === record.authority.nativeId;
+  });
 }
 
 /** Execute only the saved DNS segment, rechecking connection, zone and every observed record before mutations. */
@@ -493,7 +656,10 @@ export async function executeDnsEngineSegment(input: {
     if (hash(old ?? null) !== payload.bindingFingerprint || old && !sameZone(old.zone, d.zone)) return stop('The environment DNS binding changed after this plan.');
     const overlap = otherOwnership(input.ctx, current, d.owner, d.zone, [...payload.records, ...payload.retired]);
     if (overlap) return stop(overlap);
+    const trafficOnlyDomainId = payload.trafficOnlyDomainId ?? (payload.records.some(record => ownerOf(record.key) === 'hosting-domain')
+      ? old?.trafficOnlyDomainId : undefined);
     const base: DnsBinding = { version: 1, zone: d.zone, domain: d.domain, connectionScope: d.connectionScope, zoneNativeId: payload.zoneNativeId,
+      trafficOnlyDomainId,
       zoneFingerprint: d.zoneFingerprint, recordsEncrypted: input.ctx.secretStore.encryptObject(payload.managed),
       ownersEncrypted: input.ctx.secretStore.encryptObject(payload.owners), configurationEncrypted: input.ctx.secretStore.encryptObject(payload.configuration),
       ownedOwners: sorted(payload.managed.filter(record => record.intent.values.length).map(record => record.owner)),

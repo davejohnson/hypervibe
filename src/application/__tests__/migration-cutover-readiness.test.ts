@@ -11,6 +11,7 @@ import * as commands from '../commands.js';
 import * as engine from '../infrastructure-engine.js';
 import * as launch from '../launch.js';
 import { migrateEnvironment } from '../migrate.js';
+import * as domainTarget from '../../domain/services/domain-target.service.js';
 import * as backupEvidence from '../migration-database-backups.js';
 import * as bucketEvidence from '../cloud-bucket-backups.js';
 import { selectMigrationBuckets } from '../migration-storage.js';
@@ -219,6 +220,34 @@ it('uses the verified domain from the full source plan and rejects unverified at
   expect(await f.migrate({ cutover: true })).toMatchObject({ status: 'needs_cutover_approval', domain });
 });
 
+it('reviews the public app URL on a target that has only a provider-issued address', async () => {
+  const native = 'https://web-123-uc.a.run.app';
+  const f = fixture({ envVars: { APP_URL: 'https://' + domain, API_URL: 'https://api.example.com' } }, {
+    envVars: { APP_URL: native + '/', API_URL: native, PATH_URL: native + '/hooks' },
+  });
+  f.actions(domainProof);
+  vi.spyOn(domainTarget, 'observeDomainTarget').mockResolvedValue({ state: 'ready', target: {
+    origin: native, targetFingerprint: 'target-identity',
+  } });
+  const result = await f.migrate({ cutover: true });
+  expect(result).toMatchObject({ status: 'needs_cutover_approval', steps: expect.arrayContaining([
+    'Set APP_URL on gcp to https://' + domain + ', so links and logins use ' + domain + '.',
+  ]) });
+  expect(f.spec().environments.gcp!.envVars!.APP_URL).toBe(native + '/');
+  expect(f.apply).not.toHaveBeenCalled();
+});
+
+it('keeps production serving if the target address for its public app URL cannot be verified', async () => {
+  const f = fixture({ envVars: { APP_URL: 'https://' + domain } }, { envVars: { APP_URL: 'https://web-123-uc.a.run.app' } });
+  f.actions(domainProof);
+  vi.spyOn(domainTarget, 'observeDomainTarget').mockResolvedValue({ state: 'unknown', reason: 'The target request timed out.' });
+  expect(await f.migrate({ cutover: true, confirmCutover: true })).toMatchObject({
+    status: 'blocked', message: expect.stringMatching(/target.*address/i),
+  });
+  expect(f.spec().environments.production!.maintenance?.enabled).not.toBe(true);
+  expect(f.apply).not.toHaveBeenCalled();
+});
+
 it('allows a temporary target rehearsal while production protections are pending', async () => {
   const f = fixture(protectedSource);
   expect(await f.migrate()).toMatchObject({ status: 'migrated', target: 'gcp' });
@@ -253,8 +282,22 @@ it('never resumes a pending traffic move using a pre-pause copy', async () => {
   expect(f.apply).not.toHaveBeenCalled();
 });
 
+it.each(['retained', 'requested', 'in progress'] as const)('protects a live target after its source route has been retired (%s)', async stage => {
+  const edgeDomain = { hostname: domain, fromEnvironment: 'production', service: 'web' };
+  const f = fixture({}, stage === 'requested' ? { edgeDomain } : {});
+  if (stage === 'retained') f.ctx.repos.environments.updatePlatformBindings(f.target.id, { edgeDomain });
+  if (stage === 'in progress') f.ctx.repos.environments.updatePlatformBindings(f.target.id, { domainHandoffIncoming: edgeDomain });
+  for (const input of [{}, { refreshData: true, copyData: true }, { cutover: true, confirmCutover: true }]) {
+    expect(await f.migrate(input)).toMatchObject({ status: 'blocked', message: expect.stringMatching(/hostname|traffic/i) });
+  }
+  expect(launch.launchEnvironment).not.toHaveBeenCalled();
+  expect(f.apply).not.toHaveBeenCalled();
+});
+
 it('records a final-copy receipt through the normal stateless cutover and preserves a healthy resume', async () => {
-  const f = fixture();
+  const native = 'https://web-123-uc.a.run.app';
+  const f = fixture({ envVars: { APP_URL: 'https://' + domain } }, { envVars: { APP_URL: native, API_URL: native + '/api' } });
+  vi.spyOn(domainTarget, 'observeDomainTarget').mockResolvedValue({ state: 'ready', target: { origin: native, targetFingerprint: 'serving' } });
   const source = f.ctx.repos.environments.findByProjectAndName(f.project.id, 'production')!;
   const pausedAt = '2026-11-01T00:01:00.000Z';
   const binding = { state: 'active', mode: 'application', updatedAt: pausedAt,
@@ -279,6 +322,7 @@ it('records a final-copy receipt through the normal stateless cutover and preser
   });
   vi.mocked(commands.createCommandRegistry).mockReturnValue({ get: () => ({ execute: observedSource }) } as never);
   expect(await f.migrate({ cutover: true, confirmCutover: true })).toMatchObject({ status: 'cut_over' });
+  expect(f.spec().environments.gcp!.envVars).toMatchObject({ APP_URL: 'https://' + domain, API_URL: native + '/api' });
   const migration = (f.ctx.repos.environments.findById(f.target.id)!.platformBindings.engine as engine.EngineBinding).migration!;
   expect(migration.finalCopy).toMatchObject({ sourceEnvironmentId: source.id, targetEnvironmentId: f.target.id,
     domain, targetService: 'web', copyAttemptId: migration.copyAttempt!.id, copiedAt: migration.copiedAt });

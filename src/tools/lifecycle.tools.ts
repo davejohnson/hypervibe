@@ -1,4 +1,6 @@
 import { credentialRecoveryDeletionOwners } from '../domain/services/credential-lifecycle.service.js';
+import { domainHandoffDeletionOwners } from '../domain/services/domain-handoff-guard.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import {
@@ -84,6 +86,10 @@ export function registerLifecycleTools(commands: CommandRegistrar, ctx: CommandC
         });
       }
       const project = ctx.resolveProjectOrThrow({ project: projectRef });
+      const domainOwners = domainHandoffDeletionOwners(ctx.repos.environments.findByProjectId(project.id), new SpecStore().getForInspection(project)?.spec,
+        { ...(scope === 'environment' && env && { environment: env.trim() }), ...(scope === 'service' && name && { service: name.trim() }) });
+      if (domainOwners.length) return commandError('VALIDATION', 'Local deletion would lose ownership of a live or transferring public hostname.', {
+        details: { environments: domainOwners }, hint: 'Retain the serving owner. Finish any pending hostname transfer before deleting the source records.' });
       const credentialOwners = credentialRecoveryDeletionOwners(project.id, { ...(scope === 'environment' && env ? { environment: env } : {}), ...(scope === 'service' && name ? { service: name } : {}) });
       if (credentialOwners.length) return commandError('VALIDATION', 'Credential or database recovery, or activation evidence would be lost. Local deletion is blocked.', {
         details: { environments: credentialOwners },
