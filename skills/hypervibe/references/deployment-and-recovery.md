@@ -136,6 +136,14 @@ deployment, or provider tool to restart the app around that boundary. A paused
 environment cannot switch hosting providers; prepare a separate target through
 its own Hypervibe plan and apply instead.
 
+When Railway already serves the hostname but Hypervibe has no binding, inspect
+the exact Railway web attachment and Cloudflare traffic record. Set the
+hostname, zone, proxy setting and observed record ID and value in the source
+spec. Use a source plan with `scope="domain-adoption"` to review the attachment
+and DNS import. Apply each reviewed stage until that scope verifies the route.
+For a target protected by staging promotion, configure the original public URL
+before promoting so the release uses the intended links and redirects.
+
 After the user's manual copy, verify the target app against its intended data
 and storage before moving visitors. If the user wants the existing public URL
 to reach a prepared `next` environment's public `web` service, set this on the
@@ -163,6 +171,13 @@ original hostname after switching traffic.
 After an uncertain routing result, preserve the requested page/target and saved
 transition state. Follow Hypervibe's recovery result before selecting another
 target or page; do not clear bindings or retry through Cloudflare directly.
+
+To retire Railway after forwarding has been verified, set `edgeDomain` on
+the Google Cloud target with `hostname`, `service` and `fromEnvironment`.
+Use the target's `hv_plan scope="domain-handoff"` and review each saved step.
+Hypervibe updates the existing proxied CNAME, verifies the Worker through the
+public hostname, releases the Railway attachment, and records the target as
+owner. Verify that the target serves the hostname before retiring the source.
 
 To show the maintenance page again, change `page` to `"active"` while keeping
 application maintenance enabled and the target declared, then plan and apply.

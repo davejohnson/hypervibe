@@ -18,6 +18,8 @@ import { connectCloudflareInBrowser } from './local-connect-page.js';
 import { resolveDnsConnection } from '../adapters/dns-observation/connections.js';
 import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
 import { applyDnsPlan } from './dns-hosting.js';
+import { publicEdgeStatus, type PublicEdgeStatus } from './domain-handoff.js';
+import { domainHandoffBlocker } from '../domain/services/domain-handoff-guard.js';
 import { grantCiReleaseAccess, previewCiReleaseAccess, renderReleaseWorkflow, writeReleaseWorkflow } from './infrastructure-engine-ci.js';
 import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
 import { connectAzure } from './azure-connect.js';
@@ -68,7 +70,7 @@ export type LaunchResult =
   /** Returned only when a caller asked to stop after a phase (for example migration). */
   | { status: 'ready'; phase: 'prepare' | 'infrastructure'; infrastructureRounds: number }
   | { status: 'pending'; message: string; receipts: ActionReceipt[]; planId?: string; htmlPath?: string; confirmActions?: string[] }
-  | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; domains?: Array<{ name: string; status: 'serving' | 'certificate_pending' }>; infrastructureRounds: number;
+  | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; domains?: Array<{ name: string; status: 'serving' | 'certificate_pending' }>; edgeDomain?: PublicEdgeStatus; infrastructureRounds: number;
       ciWorkflow?: { path: string; changed: boolean; branch: string } };
 
 export const GCP_REVIEWED_ACCESS = ['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'] as const;
@@ -218,6 +220,8 @@ async function runLaunch(ctx: CommandContext, params: {
 }): Promise<LaunchResult> {
   const environmentSpec = params.spec.environments[params.environmentName];
   if (!environmentSpec) return { status: 'blocked', message: `The spec has no environment "${params.environmentName}".` };
+  const handoff = domainHandoffBlocker(params.spec, params.environmentName, ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName));
+  if (handoff) return { status: 'blocked', message: handoff };
   if (!isEngineManaged(environmentSpec)) {
     return { status: 'blocked', message: 'hv_launch runs environments managed by the OpenTofu engine. Choose hosting.provider="cloudrun" with hv_spec first.' };
   }
@@ -368,11 +372,13 @@ async function runLaunch(ctx: CommandContext, params: {
     status: pendingCertificates.has(domain) ? 'certificate_pending' as const : 'serving' as const }));
   const primary = environmentSpec.domain ? domains[0] : undefined;
   if (primary?.status === 'serving') urls.custom = `https://${primary.name}`;
+  const edge = environmentSpec.edgeDomain ? await publicEdgeStatus(ctx, params) : undefined;
+  if (edge?.state === 'serving') urls.edge = edge.publicUrl;
   return {
     status: 'live',
     urls,
     releases: released.results,
-    ...(primary ? { domain: primary } : {}), ...(environmentSpec.domains?.length ? { domains } : {}),
+    ...(primary ? { domain: primary } : {}), ...(environmentSpec.domains?.length ? { domains } : {}), ...(edge && { edgeDomain: edge }),
     infrastructureRounds: rounds,
     ...(ciWorkflow ? { ciWorkflow } : {}),
   };

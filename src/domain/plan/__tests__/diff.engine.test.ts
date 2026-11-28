@@ -1890,6 +1890,7 @@ describe('diffEnvironment — domain and workload', () => {
       spec: spec({ domain: 'myapp.dev' }),
       envName: 'production',
       observed: observed({
+        completeness: { project: 'complete', environment: 'complete', services: 'complete' },
         services: [observedWeb({
           customDomains: ['myapp.dev'],
           customDomainStatus: {

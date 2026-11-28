@@ -278,6 +278,50 @@ To show the 503 page again, set `maintenance.page: "active"`, leaving
 and apply. This changes the existing route back to the page without restarting
 the source. It does not stop the target or other clients from writing data.
 
+### Transfer the forwarded hostname before retiring Railway
+
+Once the paused Railway environment forwards its hostname to a healthy Cloud Run
+web service, declare the existing Worker route on the target with `hv_spec`.
+Use the real public hostname, the target web service name and the name of the
+paused source environment. For example, the target environment can include
+
+```json
+{
+  "edgeDomain": {
+    "hostname": "example.com",
+    "service": "web",
+    "fromEnvironment": "production"
+  }
+}
+```
+
+Keep the source's reviewed forwarding and maintenance settings during the
+transfer. Run `hv_plan env="next" scope="domain-handoff"` on the target and
+review each saved plan before applying its exact actions. Repeat the target
+plan after each apply. Hypervibe keeps the Worker serving requests and changes
+the existing proxied CNAME in place to the provider-issued Cloud Run hostname.
+It checks the Worker marker and the public application response before
+releasing the exact Railway attachment. Once Railway confirms absence, any
+managed Railway verification TXT records get their own removal review. A final
+step moves the Worker and its private DNS state ownership to the target.
+Cloudflare proxying remains enabled because Workers routes require a proxied DNS
+record. [Cloudflare Workers routes](https://developers.cloudflare.com/workers/configuration/routing/routes/)
+
+The transfer supports an adopted Cloudflare CNAME in a source DNS state that
+contains its traffic record and optional source-verification TXT records.
+Other managed consumers sharing that state block the transfer. Unmanaged TXT
+records stay in the zone. A target handoff plan showing `noop` verifies the
+target's DNS ownership, Worker and public response independently of Railway.
+`hv_status` shows the public URL alongside the native origin and checks whether
+the Worker is serving. Service health checks use the retained public hostname.
+You can then remove the source's domain, DNS, forwarding and maintenance intent
+and review its infrastructure retirement separately. The handoff itself keeps
+the source workloads paused and preserves its data. Local plan/apply tests cover
+the transfer and recovery from a lost release acknowledgement. Live handoff
+remains unverified. Removing the permanent edge is currently unavailable, and
+target teardown is blocked while the target owns it. Hypervibe also protects
+the local project, environment and service records that hold the active route.
+
 ### Resume the source
 
 With no `domainTarget` configured, set

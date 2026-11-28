@@ -32,6 +32,7 @@ import { resolveBackupStrategy, withBackupStorageDefaults } from '../services/ba
 import { providerRegistry } from '../registry/provider.registry.js';
 import { firstProviderSpecValidationFailure } from '../services/provider-spec-validation.js';
 import { SpecStore, type SpecResult } from '../spec/spec.store.js';
+import { domainHandoffBlocker } from '../services/domain-handoff-guard.js';
 import {
   EMAIL_MANAGED_ENV_KEYS,
   type ProjectSpec,
@@ -1697,6 +1698,8 @@ export class PlanService {
     const scope = options?.scope ?? 'full';
     const selectedEnvironment = specResult.spec.environments[environmentName];
     const retainedEnvironment = scope === 'full' ? this.envRepo.findByProjectAndName(project.id, environmentName) : undefined;
+    const handoff = domainHandoffBlocker(specResult.spec, environmentName, retainedEnvironment ?? this.envRepo.findByProjectAndName(project.id, environmentName));
+    if (handoff) return { error: handoff };
     const retainedExecutionRecovery = Boolean(retainedEnvironment && this.componentRepo.findByEnvironmentId(retainedEnvironment.id)
       .some(component => hasDatabaseBootstrapObservationOrCleanup(component.bindings)));
     // Existing credential values and already acknowledged task observation are

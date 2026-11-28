@@ -7,6 +7,14 @@ const domain = { name: 'app.example.com', providerDomainId: 'domain-id', service
   creationAcknowledged: true, recreateRevision: 'reviewed-repair', records: [record] };
 const local = { provider: 'railway', projectId: 'project-id', environmentId: 'staging-id', domainDns: domain };
 
+it('retains the exact domain whose verification records were left under external management by its reviewed import', () => {
+  const imported = { ...local, domainDns: { ...domain, trafficOnlyDomainId: domain.providerDomainId } };
+  expect(mergeRepoPlatformBindings(imported, local).domainDns).toEqual(imported.domainDns);
+  const pending = { ...local, dnsEngine: { domain: domain.name, trafficOnlyDomainId: domain.providerDomainId } };
+  expect(mergeRepoPlatformBindings(pending, { ...local, dnsEngine: { domain: domain.name } }).dnsEngine).toEqual(pending.dnsEngine);
+  expect(() => mergeRepoPlatformBindings(local, pending)).toThrow(/local verified import/);
+});
+
 describe('repository domain recovery retention', () => {
   it('still reconstructs an absent local domain from the repository export', () => {
     expect(mergeRepoPlatformBindings({}, local)).toEqual(local);

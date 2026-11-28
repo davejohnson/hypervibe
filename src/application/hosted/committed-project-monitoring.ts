@@ -7,7 +7,7 @@ export interface CommittedProjectMonitoringInputV1 {
   source: CommittedSpecInspectionInputV1;
   bindings?: CommittedBindingsInspectionInputV1;
 }
-export interface CommittedMonitoringEndpointV1 extends HostedPublicEndpointV1 { source: 'spec' | 'binding' }
+export interface CommittedMonitoringEndpointV1 extends HostedPublicEndpointV1 { source: 'spec' | 'binding'; via?: 'cloudflare-worker' }
 export interface CommittedProjectMonitoringReceiptV1 extends Omit<CommittedSpecInspectionReceiptV1, 'environments'> {
   bindingSource: CommittedBindingsInspectionReceiptV1['source'] | null;
   environments: Array<Omit<CommittedSpecInspectionReceiptV1['environments'][number], 'publicEndpoints'> & {
@@ -34,9 +34,9 @@ export function inspectCommittedProjectMonitoringV1(input: CommittedProjectMonit
       if (declared.length) {
         for (const endpoint of declared) {
           const url = publicOrigin(endpoint.url);
-          if (url) targets.add({ url, services: [service.name], kind: 'custom', source: 'spec' });
+          if (url) targets.add({ url, services: [service.name], kind: 'custom', source: 'spec', ...(endpoint.via && { via: endpoint.via }) });
         }
-        continue;
+        if (declared.every(endpoint => !endpoint.via)) continue;
       }
       if (bindings?.provider !== environment.hosting.provider) continue;
       const binding = bindings.services[service.name];

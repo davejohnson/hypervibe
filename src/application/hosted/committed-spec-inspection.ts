@@ -95,6 +95,7 @@ export interface CommittedSpecInspectionReceiptV1 {
     publicEndpoints: Array<{
       url: string;
       services: string[];
+      via?: 'cloudflare-worker';
     }>;
     features: string[];
     declaredProviders: DeclaredProviderCapabilityV1[];
@@ -476,6 +477,8 @@ function environmentReceipt(
     .filter((service) => service.public && service.workloadKind === 'web')
     .map((service) => service.name);
   const endpoint = publicServices.length > 0 ? safeHttpsEndpoint(environment.domain) : null;
+  const edge = environment.edgeDomain;
+  const edgeUrl = edge && publicServices.includes(edge.service) ? safeHttpsEndpoint(edge.hostname) : null;
 
   return {
     name: receiptName,
@@ -486,7 +489,8 @@ function environmentReceipt(
         : {}),
     },
     services,
-    publicEndpoints: endpoint ? [{ url: endpoint, services: publicServices }] : [],
+    publicEndpoints: [...(endpoint ? [{ url: endpoint, services: publicServices }] : []),
+      ...(edge && edgeUrl ? [{ url: edgeUrl, services: [edge.service], via: 'cloudflare-worker' as const }] : [])],
     features: environmentFeatures(environment),
     declaredProviders: environmentProviders(environment),
   };

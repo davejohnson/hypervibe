@@ -29,6 +29,7 @@ import { googleBackupTeardownWarnings } from './gcp-bucket-backup-records.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
 import { registerEngineWebServiceResolver } from '../domain/services/domain-target.service.js';
+import { domainHandoffBlocker } from '../domain/services/domain-handoff-guard.js';
 import crypto from 'crypto';
 import { fetchWithRetry } from '../utils/fetch-retry.js';
 import { S3_COMPATIBLE_SECRET_KEYS, domainEngineKey } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
@@ -871,6 +872,8 @@ export async function planInfrastructureEngine(ctx: CommandContext, params: {
   environmentName: string;
 }): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const engine = cloudEngineFor(params.spec, params.environmentName);
+  const handoff = domainHandoffBlocker(params.spec, params.environmentName, ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName));
+  if (handoff) return { blocked: [handoff] };
   if (!engine) return { blocked: [`Environment ${params.environmentName} is not managed by the OpenTofu engine. Its hosting provider is not Google Cloud, AWS or Azure.`] };
   return engine.plan(ctx, params);
 }
@@ -1019,6 +1022,8 @@ export async function planGcpTeardown(ctx: CommandContext, params: {
 }): Promise<InfrastructurePlanResult | { blocked: string[] }> {
   const name = params.environmentName;
   const declared = params.spec.environments[name];
+  const handoff = domainHandoffBlocker(params.spec, name, ctx.repos.environments.findByProjectAndName(params.project.id, name), true);
+  if (handoff) return { blocked: [handoff] };
   if (!declared) return { blocked: [`Environment ${name} is not in the spec.`] };
   if (environmentDomains(declared).length) {
     return { blocked: [`Remove ${name}'s custom domains from the spec and apply that first; teardown does not change DNS.`] };

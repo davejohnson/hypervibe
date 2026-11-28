@@ -19,6 +19,7 @@ import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-datab
 import { finalCopyReceipt, forwardedCutover, migrationCutoverReadiness, protectForwardingTarget, reviewCutover, targetWriteRecovery, verifiedFinalCopy,
   type CutoverBackupReview, type FinalCopyReceipt } from './migration-cutover-readiness.js';
 import { desiredDomainServiceName } from '../domain/services/domain-attach-policy.js';
+import { observeDomainTarget } from '../domain/services/domain-target.service.js';
 import { migrationVersionReceiptSchema, type MigrationSourceInventory } from '../domain/plan/migration-version.contract.js';
 import { planMigrationSourceVersion } from './migration-version-inspection.js';
 import { migrationDatabaseBindingConflict } from './migration-database-binding.js';
@@ -912,9 +913,25 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
   if (readiness.problems.length || !domain || !web) return { status: 'blocked', message: readiness.problems.join(' ') };
   // Settings that name the target's own public URL move to the source domain, which visitors keep using.
   const sourceOrigin = `https://${domain}`;
-  const targetOrigin = target.domain ? `https://${target.domain.trim()}` : undefined;
-  const retarget = Object.fromEntries(Object.entries(target.envVars ?? {})
-    .filter(([, value]) => targetOrigin && value.replace(/\/$/, '') === targetOrigin).map(([key]) => [key, sourceOrigin]));
+  const settings = Object.entries(target.envVars ?? {});
+  let targetOrigin = target.domain ? `https://${target.domain.trim()}` : undefined;
+  // Without a declared target hostname, the source identifies which settings name the app itself.
+  const candidates = targetOrigin ? settings : settings.filter(([key, value]) =>
+    source.envVars?.[key]?.replace(/\/$/, '') === sourceOrigin && value.replace(/\/$/, '') !== sourceOrigin
+    && /^https:\/\/[^/?#@]+\/?$/.test(value));
+  if (!targetOrigin && candidates.length) {
+    const origin = await observeDomainTarget({ project: params.project, environment: environment(params.from),
+      environmentSpec: { ...source, domainTarget: { environment: params.to, service: web } } });
+    if (origin.state !== 'ready' || !origin.target) return { status: 'blocked',
+      message: `The target service address for ${candidates.map(([key]) => key).join(', ')} could not be verified. ${origin.reason ?? 'Check the target and review the cutover again.'}` };
+    if (store.get(params.project)?.revision !== revision) return { status: 'blocked', message: 'The cutover settings changed while verifying the target address. Review the current cutover again.' };
+    targetOrigin = origin.target.origin;
+  }
+  const retarget = Object.fromEntries(candidates.filter(([, value]) => value.replace(/\/$/, '') === targetOrigin)
+    .map(([key]) => [key, sourceOrigin]));
+  if (target.deploy?.promoteFrom && Object.keys(retarget).length) {
+    return { status: 'blocked', message: `Set ${Object.keys(retarget).join(', ')} on ${params.to} to ${sourceOrigin} before the cutover, apply those settings, and promote the verified release from ${target.deploy.promoteFrom}. Changing the target settings requires a new promotion. Review the cutover again when that release is running.` };
+  }
   const routed = source.domainTarget?.environment === params.to && source.maintenance?.page === 'off';
   const approvedBackupReviewId = params.confirmCutover && params.backupReviewId === readiness.backupReview?.id ? params.backupReviewId : undefined;
   const moveTraffic = async (destination: Environment, receipt: FinalCopyReceipt, backups?: CutoverBackupReview): Promise<MigrateResult> => {

@@ -1690,6 +1690,8 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   domainProxy: z.boolean().optional(),
   /** Route this hostname through its owned Cloudflare Worker to a verified service in a separate environment. */
   domainTarget: z.object({ environment: z.string().min(1), service: z.string().min(1) }).strict().optional(),
+  /** Continue serving a previously forwarded hostname on its existing Cloudflare Worker. */
+  edgeDomain: z.object({ hostname: dnsHostnameSchema, service: z.string().min(1), fromEnvironment: z.string().min(1) }).strict().optional(),
   /** One-time custom-domain replacement revision. A new value plans a confirmation-gated provider delete/recreate. */
   domainRecreateRevision: z.string().min(1).max(100).optional(),
   domainRegistration: domainRegistrationSpecSchema.optional(),
@@ -2309,6 +2311,20 @@ export const projectSpecSchema = z.object({
     if (environment.dns && !environment.domain) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'dns'],
         message: 'Select DNS only for an environment that has a domain.' });
+    }
+    if (environment.edgeDomain) {
+      const { hostname, service, fromEnvironment } = environment.edgeDomain;
+      const web = environment.services[service];
+      const conflicts = Object.entries(spec.environments).some(([name, other]) =>
+        name !== environmentName && other.edgeDomain?.hostname === hostname
+        || name !== fromEnvironment && other.domain?.toLowerCase().replace(/\.$/, '') === hostname
+        || other.domains?.some(extra => extra.domain === hostname));
+      if (environment.hosting.provider !== 'cloudrun' || fromEnvironment === environmentName
+        || !web || web.workloadKind !== 'web' || web.public === false || environment.maintenance?.enabled
+        || environment.domainTarget || conflicts) {
+        ctx.addIssue({ code: 'custom', path: ['environments', environmentName, 'edgeDomain'],
+          message: 'Choose one Cloud Run public web service for the existing forwarded hostname. Only its named source can still declare the same hostname.' });
+      }
     }
     if (environment.domainTarget) {
       const destination = spec.environments[environment.domainTarget.environment];

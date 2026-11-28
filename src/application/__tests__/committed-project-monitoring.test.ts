@@ -28,6 +28,22 @@ function input(domain?: string) {
   };
 }
 
+it('discovers a declared Worker hostname and the bound provider origin with their separate evidence', () => {
+  const committed = source({ version: 1, project: 'invoiceperfect.com', environments: { next: {
+    hosting: { provider: 'cloudrun' }, services: { web: { public: true, workloadKind: 'web' } },
+    edgeDomain: { hostname: 'example.com', fromEnvironment: 'retired', service: 'web' },
+  } } });
+  const bindings = source({ version: 1, project: 'invoiceperfect.com', environments: { next: {
+    platformBindings: { provider: 'cloudrun', projectId: 'cloud-project', environmentId: 'us-central1',
+      services: { web: { serviceId: 'web-service', url: 'https://web-123.run.app' } } },
+  } } });
+  const result = inspectCommittedProjectMonitoringV1({ schemaVersion: 1, source: committed, bindings });
+  expect(result.environments[0]?.publicEndpoints).toEqual([
+    { url: 'https://example.com/', services: ['web'], kind: 'custom', source: 'spec', via: 'cloudflare-worker' },
+    { url: 'https://web-123.run.app/', services: ['web'], kind: 'provider', source: 'binding' },
+  ]);
+});
+
 describe('committed project monitoring v1', () => {
   it('projects exact per-environment public bindings without changing desired DNS or email management', () => {
     const receipt = inspectCommittedProjectMonitoringV1(input());

@@ -14,6 +14,7 @@ import type { Run, RunReceipt } from '../entities/run.entity.js';
 import type { ObservedState } from '../ports/observe.port.js';
 import { engineSegmentOf, type EngineActionSegment, type EngineSegmentResult } from '../ports/infrastructure-engine.port.js';
 import { validBucketBackupActions } from './bucket-backup-plan.contract.js';
+import { handoffReviewSchema, handoffSteps } from './domain-handoff.js';
 import { resolvePlanActionAuthority } from './action-authority.js';
 import { migrationVersionActionSchema } from './migration-version.contract.js';
 import { requiresActionConfirmation, type PlanAction } from './plan.types.js';
@@ -264,7 +265,9 @@ export const planRunDocumentSchema = z.object({
     'managed-ci-publication',
     'managed-ci-credentials',
     'infrastructure-engine',
+    'domain-handoff',
     'dns-engine',
+    'domain-adoption',
     'domain-registration',
   ]).optional(),
   environmentName: z.string().min(1),
@@ -318,6 +321,18 @@ export const planRunDocumentSchema = z.object({
   if (document.actions.some(action => action.metadata?.operation === 'migrationSourceVersion')) {
     ctx.addIssue({ code: 'custom', message: 'Private source version inspection requires its own plan.' });
   }
+  if (document.scope === 'domain-adoption') {
+    const [action] = document.actions;
+    if (document.actions.length !== 1 || !action || action.resource.kind !== 'domain'
+      || action.id !== `domain:${action.resource.name}` || !action.verified || action.billable || action.requiresConfirm
+      || !(action.type === 'update' && action.metadata?.operation === 'customDomainAdopt'
+        || action.type === 'noop' && action.metadata?.operation === 'domainDnsReady' && action.metadata.dnsEngineReady === true)
+      || document.dns || document.engine || document.overrides || document.inputRequired?.length || document.sourceCommitSha
+      || document.integrationFingerprints || document.lockEnvironmentIds?.length || document.observedFingerprint !== null) {
+      ctx.addIssue({ code: 'custom', message: 'Domain adoption requires one verified existing service domain.' });
+    }
+    return;
+  }
   if (document.scope === 'domain-registration') {
     const [action] = document.actions;
     if (document.actions.length !== 1 || !action || action.resource.kind !== 'domain' || action.resource.provider !== 'cloudflare'
@@ -333,6 +348,11 @@ export const planRunDocumentSchema = z.object({
   }
   if (document.scope === 'dns-engine') {
     const descriptor = document.dns?.descriptor;
+    const handoff = document.dns?.source?.kind === 'domain-handoff' ? handoffReviewSchema.safeParse(document.dns.source.review) : undefined;
+    const handoffLocks = handoff?.success && descriptor?.owner === 'hosting-domain' && descriptor.domain === handoff.data.hostname
+      && descriptor.state.environmentId === handoff.data.sourceId && descriptor.state.projectId === handoff.data.projectId
+      && isDeepStrictEqual(descriptor.zone, handoff.data.zone) && document.environmentName === handoff.data.sourceEnvironment
+      && isDeepStrictEqual(document.lockEnvironmentIds, [handoff.data.targetId]);
     const reconciliation = descriptor && document.actions.length === 1
       && document.actions[0]?.type === 'update' && document.actions[0]?.verified === true
       && document.actions[0]?.metadata?.operation === 'dnsOwnershipReconcile'
@@ -340,7 +360,7 @@ export const planRunDocumentSchema = z.object({
       && document.actions[0]?.resource.name === descriptor.domain
       && document.actions[0]?.resource.provider === `dns-${descriptor.zone.provider}`;
     if (!descriptor || document.overrides || document.inputRequired?.length || document.sourceCommitSha
-      || document.integrationFingerprints || document.lockEnvironmentIds?.length
+      || document.integrationFingerprints || (handoff ? !handoffLocks : document.lockEnvironmentIds?.length)
       || descriptor.state.provider !== `dns-${descriptor.zone.provider}`
       || descriptor.state.partition !== 'environment'
       || !reconciliation && document.actions.some(action => {
@@ -352,6 +372,24 @@ export const planRunDocumentSchema = z.object({
         return !isDeepStrictEqual(reviewed, descriptor.segment);
       })) ctx.addIssue({ code: 'custom', message: 'DNS plans contain only the exact saved DNS engine segment and its source identity.' });
     return;
+  }
+  if (document.scope === 'domain-handoff') {
+    const review = handoffReviewSchema.safeParse(document.handoff);
+    const action = document.actions[0];
+    const step = z.enum(handoffSteps).safeParse(action?.metadata?.step);
+    if (!review.success || !step.success || !action || document.actions.length !== 1 || action.metadata?.operation !== 'domainHandoff'
+      || action.id !== `domain-handoff:${step.data}:${review.data.hostname}` || action.resource.kind !== 'domain'
+      || action.type !== ({ detach: 'destroy', claim: 'update', verify: 'noop' } as const)[step.data] || !action.verified
+      || action.resource.name !== review.data.hostname || action.resource.provider !== (step.data === 'detach' ? review.data.sourceProvider : 'cloudflare')
+      || step.data !== 'verify' && action.requiresConfirm !== true || action.metadata.engineSegment || document.dns || document.engine || document.overrides
+      || document.inputRequired?.length || document.environmentName !== review.data.targetEnvironment
+      || !isDeepStrictEqual(document.lockEnvironmentIds ?? [], step.data !== 'verify' ? [review.data.sourceId] : [])) {
+      ctx.addIssue({ code: 'custom', message: 'A domain handoff requires one exact reviewed action and both environment identities.' });
+    }
+    return;
+  }
+  if (document.actions.some(action => action.metadata?.operation === 'domainHandoff') || document.handoff !== undefined) {
+    ctx.addIssue({ code: 'custom', message: 'A domain handoff requires its own plan.' });
   }
   if (document.dns) ctx.addIssue({ code: 'custom', message: 'A DNS descriptor requires its isolated DNS engine stage.' });
   const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure', 'gcpRetainDatabaseAliasImports',
@@ -863,6 +901,7 @@ function dnsZoneLockKey(zone: z.infer<typeof dnsPlanDescriptorSchema>['zone']): 
 
 /** Derive locks only from persisted native scope; arbitrary plan-supplied lock keys are ignored. */
 function dnsZoneResourceLocks(document: PlanRunDocument): string[] | undefined {
+  if (document.scope === 'domain-handoff') return [dnsZoneLockKey(handoffReviewSchema.parse(document.handoff).zone)];
   if (document.scope === 'dns-engine' && document.dns) return [dnsZoneLockKey(document.dns.descriptor.zone)];
   if (document.scope !== 'infrastructure-engine') return undefined;
   const domains = new Set<string>();

@@ -378,6 +378,8 @@ export const hostingBindingsSchema = z.object({
     proxied: z.boolean().optional(),
     recreateRevision: z.string().optional(),
     providerDomainId: z.string().optional(),
+    /** This existing verified claim's non-traffic verification records are managed separately. */
+    trafficOnlyDomainId: z.string().min(1).optional(),
     /** Create acknowledged, but this exact provider identity has not yet been observed. */
     creationAcknowledged: z.boolean().optional(),
     serviceName: z.string().optional(),

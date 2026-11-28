@@ -326,6 +326,15 @@ describe('custom domain desired service plan/apply boundary', () => {
     expect(f.upsertDns).not.toHaveBeenCalled();
   });
 
+  it.each(['provider', 'project'] as const)('withholds ordinary adoption when the observed %s does not prove ownership', async missing => {
+    const f = fixture({ owner: 'web' });
+    if (missing === 'provider') f.observed.provider = 'other';
+    else f.observed.completeness!.project = 'unknown';
+    const { action } = await f.plan();
+    expect(action.metadata?.operation).not.toBe('customDomainAdopt');
+    expect(action.metadata?.blockedReason).toBeTruthy();
+  });
+
   it.each(['serviceName', 'serviceId', 'environmentId', 'providerDomainId'])('never overwrites a retained conflicting %s during local domain adoption', async key => {
     const f = fixture({ owner: 'web' });
     const { action } = await f.plan();

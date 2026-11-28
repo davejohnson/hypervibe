@@ -7,6 +7,13 @@ export const DOMAIN_DETACH_OPERATION = 'customDomainDetach';
 export const DOMAIN_ADOPT_OPERATION = 'customDomainAdopt';
 export const DOMAIN_RETARGET_OPERATION = 'customDomainRetarget';
 
+export function completeHostingDomainInventory(observed: ObservedState | null | undefined,
+  scope: { provider?: string; projectId?: string; environmentId?: string }): observed is ObservedState {
+  return Boolean(observed && observed.projectExists && !observed.partial && scope.provider && scope.projectId && scope.environmentId
+    && observed.provider === scope.provider && observed.projectId === scope.projectId && observed.environmentId === scope.environmentId
+    && observed.completeness?.project === 'complete' && observed.completeness.environment === 'complete' && observed.completeness.services === 'complete');
+}
+
 /** The reviewed spec, never a binding's insertion order, owns public traffic. */
 export function desiredDomainServiceName(spec: Pick<EnvironmentSpec, 'services'>): string | undefined {
   const candidates = Object.entries(spec.services).filter(([, service]) => (
@@ -51,6 +58,14 @@ export type DomainAttachParams = {
 };
 
 export type DomainDetachParams = DomainAttachParams;
+
+/** A complete per-service, per-environment inventory. Only a completed exact read can return null. */
+export interface ScopedCustomDomainReader {
+  getCustomDomainStatus(params: DomainAttachParams): Promise<{ id: string; domain: string } | null>;
+}
+export function supportsScopedCustomDomainRead(adapter: unknown): adapter is ScopedCustomDomainReader {
+  return Boolean(adapter && typeof (adapter as Partial<ScopedCustomDomainReader>).getCustomDomainStatus === 'function');
+}
 
 export type DomainRecreateParams = DomainAttachParams;
 

@@ -36,6 +36,8 @@ const HYPERVIBE_DIR = '.hypervibe';
 const BINDINGS_FILE = 'bindings.json';
 const SENSITIVE_KEY_PATTERN = /(^|_)?(secret|token|password|connectionstring|connectionurl|databaseurl|databaseprivateurl|privateurl|privatekey|apikey)($|_)?/i;
 const LOCAL_ONLY_BINDING_KEYS = new Set([
+  'trafficOnlyDomainId',
+  'domainHandoff', 'domainHandoffRoute', 'domainHandoffIncoming', 'edgeDomain', 'edgeDomainReleased', 'dnsEngine_edge-domain',
   'delegatedEnvBindings',
   'credentialUpdates',
   'runtimeRollouts',
@@ -140,6 +142,12 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  if ([repoBindings.domainDns, repoBindings.dnsEngine].some(slot => asRecord(slot)?.trafficOnlyDomainId !== undefined)) {
+    throw new Error('The DNS adoption receipt must come from the local verified import.');
+  }
+  if (['domainHandoff', 'domainHandoffRoute', 'domainHandoffIncoming', 'edgeDomain', 'edgeDomainReleased', 'dnsEngine_edge-domain'].some(key => Object.hasOwn(repoBindings, key))) {
+    throw new Error('Private hostname transfer receipts and DNS state cannot be imported from repository bindings.');
+  }
   const repoEngine = asRecord(repoBindings.engine);
   if (Object.hasOwn(repoEngine ?? {}, 'runtimeSecretGrantOrigins') || (Object.hasOwn(repoBindings, 'engine') && !repoEngine
     && Object.hasOwn(asRecord(existing.engine) ?? {}, 'runtimeSecretGrantOrigins'))) throw new Error('Runtime secret grant ownership is local only and cannot be imported.');
@@ -269,6 +277,17 @@ export function mergeRepoPlatformBindings(
   }
   if (!parseServiceVolumeBindings({ platformBindings: merged })) {
     throw new Error('Malformed or duplicate merged service-volume identity; refusing to overwrite recovery state.');
+  }
+  const released = asRecord(existing.edgeDomainReleased);
+  if (typeof released?.hostname === 'string') {
+    // Export can lag the atomic move. Keep a stale source checkout from reclaiming the target's live hostname or DNS state.
+    if (!existing.domainDns && asRecord(merged.domainDns)?.name === released.hostname) delete merged.domainDns;
+    if (!existing.maintenance && asRecord(asRecord(merged.maintenance)?.edge)?.hostname === released.hostname) delete merged.maintenance;
+    if (!existing.dnsEngine && asRecord(merged.dnsEngine)?.domain === released.hostname) delete merged.dnsEngine;
+    const services = asRecord(merged.services);
+    const service = typeof released.sourceService === 'string' ? asRecord(services?.[released.sourceService]) : null;
+    if (services && service && Array.isArray(service.customDomains)) merged.services = { ...services,
+      [String(released.sourceService)]: { ...service, customDomains: service.customDomains.filter(name => name !== released.hostname) } };
   }
   return merged;
 }

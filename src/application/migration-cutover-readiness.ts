@@ -12,6 +12,10 @@ import { commonEngineProblems, isEngineManaged } from '../domain/services/infras
 import { MAINTENANCE_OPERATIONS } from '../domain/services/maintenance-plan.service.js';
 import { dnsHostnameSchema } from '../domain/spec/dns.schema.js';
 import { environmentSpecSchema, type EnvironmentSpec, type ProjectSpec } from '../domain/spec/spec.schema.js';
+import { parseHostingBindings } from '../domain/ports/hosting.port.js';
+import { verifyAdoptedHostingTraffic } from './dns-hosting.js';
+import { importedTrafficClaim } from './dns-engine.js';
+import { createCommandContext } from './context.js';
 import { observeMigrationDatabaseBackups } from './migration-database-backups.js';
 import { observeCloudBucketBackup } from './cloud-bucket-backups.js';
 import type { BackupResource } from '../domain/services/backup-policy.service.js';
@@ -182,14 +186,33 @@ export async function migrationCutoverReadiness(project: Project, environment: E
     && action.verified && action.type === 'noop' && action.metadata?.operation === MAINTENANCE_OPERATIONS.verifyEnter)) {
     problems.push(`The complete source maintenance boundary for ${from} still needs verification.`);
   }
-  const domainReady = verified.some(action => action.resource.kind === 'domain'
+  let domainReady = verified.some(action => action.resource.kind === 'domain'
     && action.resource.provider === source.hosting.provider && action.type === 'noop');
+  let domainProblem = `The full source plan must verify the existing domain ${domain} before cutover.`;
+  // A CI publication plan omits domain actions. Its full hosting observation can
+  // still verify an already adopted live route before requesting a source pause.
+  if (!source.maintenance?.enabled && !routingRequested) {
+    try {
+      const receipt = parseHostingBindings(environment).domainDns?.trafficOnlyDomainId;
+      const imported = importedTrafficClaim(environment, domain);
+      if (imported && imported !== receipt) {
+        domainReady = false;
+        domainProblem = `Finish recording the source DNS ownership for ${domain} with hv_plan scope="domain-adoption" before cutover.`;
+      } else if (receipt) {
+        domainReady = (domainReady || plan.scope === 'managed-ci-publication')
+          && await verifyAdoptedHostingTraffic(createCommandContext(), project, environment, source, plan.observed, plan.specRevision);
+      }
+    } catch {
+      domainReady = false;
+      domainProblem = `The saved DNS ownership for ${domain} could not be verified before cutover.`;
+    }
+  }
   // While entering or resuming application maintenance the full planner replaces
   // its ordinary domain action with the scoped, provider-observed edge action.
   const edgeReady = source.maintenance?.enabled && source.maintenance.mode === 'application' && verified.some(action =>
     action.id === `maintenance:${from}:edge` && action.metadata?.operation === MAINTENANCE_OPERATIONS.edgeEnable
     && dnsHostnameSchema.safeParse(action.metadata.hostname).data === domain);
-  if (!alreadyForwarding && !edgeReady && !domainReady) problems.push(`The full source plan must verify the existing domain ${domain} before cutover.`);
+  if (!alreadyForwarding && !edgeReady && !domainReady) problems.push(domainProblem);
   if (routingRequested && !route) problems.push(`The source plan could not verify the requested traffic route from ${domain} to ${to}.`);
   return { domain, problems, alreadyForwarding, pauseFingerprint: observedPause(environment, source, domain, plan.actions), backupReview };
 }
@@ -220,6 +243,11 @@ export async function protectForwardingTarget(project: Project, spec: ProjectSpe
     { status: 'blocked'; message: string } | { status: 'cut_over'; domain: string; target: string; message: string } | ReturnType<typeof reviewCutover> | undefined
   > {
   const from = source.name;
+  const targetBindings = destination?.platformBindings;
+  if (spec.environments[to]?.edgeDomain || targetBindings?.edgeDomain || targetBindings?.domainHandoffIncoming
+    || targetBindings?.['dnsEngine_edge-domain']) {
+    return { status: 'blocked', message: `${to} has a live hostname or a hostname transfer in progress. Review its domain-handoff plan to verify the public route. ${targetWriteRecovery}` };
+  }
   const other = Object.entries(spec.environments).find(([name, environment]) => name !== from && environment.domainTarget?.environment === to);
   if (other) return { status: 'blocked', message: `${other[0]} has a traffic route configured to ${to}. Verify that live route before operating on the target. ${targetWriteRecovery}` };
   const origin = spec.environments[from]!;
