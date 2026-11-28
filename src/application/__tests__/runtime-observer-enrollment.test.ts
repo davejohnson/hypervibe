@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { azureKey } from '../../adapters/providers/azure/tofu/azure-engine.config.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import { admitRuntimeObserver, runtimeObservationIntent } from '../../domain/spec/runtime-observation.js';
-import { writeRepoBindingsForEnvironment } from '../../domain/spec/repo-bindings-file.js';
+import { mergeRepoPlatformBindings, writeRepoBindingsForEnvironment } from '../../domain/spec/repo-bindings-file.js';
 import { renderRuntimeObservationWorkflow } from '../../domain/services/runtime-observation-workflow.js';
 import { azureObserverLogCondition, addAzureObserverConfiguration } from '../../adapters/providers/azure/tofu/azure-observer.config.js';
 import { addAwsObserverConfiguration, awsObserverPolicies } from '../../adapters/providers/aws/tofu/aws-observer.config.js';
@@ -57,6 +57,8 @@ describe('scheduled runtime observer enrollment', () => {
     expect(environment.platformBindings.runtimeObserver).toBeNull();
     expect(previousRuntimeObserverServices(environment.platformBindings, 'aws')).toEqual(['api', 'worker']);
     expect(previousRuntimeObserverServices(environment.platformBindings, 'azure')).toBeUndefined();
+    expect(() => mergeRepoPlatformBindings({}, { runtimeObserverCleanup: environment.platformBindings.runtimeObserverCleanup })).toThrow('local only');
+    expect(mergeRepoPlatformBindings(environment.platformBindings, {}).runtimeObserverCleanup).toEqual(environment.platformBindings.runtimeObserverCleanup);
     beginRuntimeObserverApply(ctx, environment, 'aws');
     expect(previousRuntimeObserverServices(environment.platformBindings, 'aws')).toEqual(['api', 'worker']);
     clearRuntimeObserver(ctx, environment);

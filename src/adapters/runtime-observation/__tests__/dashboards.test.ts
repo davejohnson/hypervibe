@@ -88,6 +88,12 @@ it('keeps an unchanged app free of monitoring resources and routes opt-in costs 
   ];
   for (const [provider, enabled, disabled, name] of cases) {
     expect(disabled.files[name]).toBeUndefined();
+    if (enabled.files['observer.tf.json']) {
+      expect(disabled.files['observer.tf.json']).toBeUndefined();
+      for (const [address, mapping] of Object.entries(enabled.resources)) {
+        if (mapping.actionId === 'identity:runtime-observer') expect(disabled.resources[address]).toEqual(mapping);
+      }
+    }
     const addresses = Object.entries(native(enabled, name)).flatMap(([type, entries]) => Object.keys(entries).map(key => type + '.' + key));
     for (const change of ['create', 'delete']) {
       const configuration = change === 'create' ? enabled : disabled;

@@ -41,6 +41,7 @@ const LOCAL_ONLY_BINDING_KEYS = new Set([
   'delegatedEnvBindings',
   'credentialUpdates',
   'runtimeRollouts',
+  'runtimeObserverCleanup',
   'delegatedActionsBindings',
   'repositoryVariableOwnership',
   'serviceInstanceCreateHistory',
@@ -142,6 +143,7 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  if (Object.hasOwn(repoBindings, 'runtimeObserverCleanup')) throw new Error('Pending runtime observer cleanup is local only and cannot be imported.');
   const repoEngine = asRecord(repoBindings.engine);
   if (Object.hasOwn(repoEngine ?? {}, 'runtimeSecretGrantOrigins') || (Object.hasOwn(repoBindings, 'engine') && !repoEngine
     && Object.hasOwn(asRecord(existing.engine) ?? {}, 'runtimeSecretGrantOrigins'))) throw new Error('Runtime secret grant ownership is local only and cannot be imported.');
@@ -310,9 +312,7 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 }
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
-  // Pending local cleanup authorizes no observer in a repository checkout.
-  const { runtimeObserverCleanup: _cleanup, ...publicBindings } = raw;
-  const sanitized = sanitize(publicBindings) as Record<string, unknown>;
+  const sanitized = sanitize(raw) as Record<string, unknown>;
   if (raw.runtimeObserver) {
     const observer = runtimeObserverSchema.parse(raw.runtimeObserver);
     sanitized.runtimeObserver = observer;
