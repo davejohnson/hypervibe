@@ -10,6 +10,7 @@ import { createCommandContext } from '../context.js';
 import * as commands from '../commands.js';
 import * as engine from '../infrastructure-engine.js';
 import * as launch from '../launch.js';
+import * as promotionEvidence from '../engine-promotion.js';
 import { migrateEnvironment } from '../migrate.js';
 import * as backupEvidence from '../migration-database-backups.js';
 import * as bucketEvidence from '../cloud-bucket-backups.js';
@@ -106,6 +107,18 @@ it('preserves the staging gate when cloud backups are confirmed', async () => {
   const result = await f.migrate({ cutover: true, confirmCutover: true });
   expect(result).toMatchObject({ status: 'blocked', message: expect.stringMatching(/promotion.*staging/i) });
   expect(result).not.toMatchObject({ message: expect.stringMatching(/backup/i) });
+  expect(f.apply).not.toHaveBeenCalled();
+});
+
+it('requires the actual promoted image before the source is paused, then admits the matching release', async () => {
+  const f = fixture({ deploy: promotion }, { deploy: promotion });
+  f.actions(domainProof);
+  const check = vi.spyOn(promotionEvidence, 'observeEnginePromotion').mockResolvedValueOnce({ blocked: 'The staged digest is not running.' })
+    .mockResolvedValueOnce({ results: [{ service: 'web', status: 'released', message: 'Verified.' }] });
+  expect(await f.migrate({ cutover: true, confirmCutover: true })).toMatchObject({ status: 'blocked', message: expect.stringContaining('digest') });
+  expect(f.spec().environments.production!.maintenance?.enabled).not.toBe(true);
+  expect(await f.migrate({ cutover: true })).toMatchObject({ status: 'needs_cutover_approval', domain });
+  expect(check).toHaveBeenCalledTimes(2);
   expect(f.apply).not.toHaveBeenCalled();
 });
 

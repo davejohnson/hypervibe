@@ -32,6 +32,17 @@ and `hv_ci_status` to monitor the result. Verify service health after a successf
 release. Do not dispatch or inspect managed CI through a code-host connector,
 provider CLI, browser, or direct API to work around a Hypervibe blocker.
 
+For Google Cloud production protected by a managed Railway staging environment,
+set `deploy.strategy` to `branch`, select the GitHub default branch, set
+`autoDeploy` to `false`, and name the staging environment in `deploy.promoteFrom`.
+Use a separate Google Cloud project for production CI. `hv_launch` prepares the
+reviewed workflow and target bindings. Commit them together. `hv_deploy` on
+that environment dispatches the promotion. The manual workflow button uses the
+same staging artifact. Monitor with `hv_ci_status`, then check `hv_health`.
+A configured `deploy.promotionTests.workflow` must accept `commit_sha` and run
+the full suite at that commit. Google Cloud staging as a source and live
+qualification of the Railway-to-Google Cloud path remain open.
+
 ### Change a setting without releasing new code
 
 Save the value first, then apply it. Non-secret values go in the environment's

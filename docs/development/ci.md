@@ -135,6 +135,34 @@ workflow, branch and triggering-event combinations in the access preview.
 Production defaults to manual dispatch. GitHub environment protection rules
 apply to the release job. No credential is retired during this setup.
 
+### Promotion from Railway staging to Google Cloud
+
+A Cloud Run environment with explicit `deploy.promoteFrom` can consume a managed
+Railway staging release. Its generated manual workflow selects the latest staging
+attempt, validates its v4 artifact against the producing job and reviewed files,
+and verifies the application revision against the source branch. An earlier
+attempt's artifact, an in-progress or failed latest run, or missing evidence
+blocks release. The reusable `promotionTests.workflow`, when configured, must
+accept `commit_sha` under `workflow_call` and run the full suite for that revision.
+The production job reacquires the candidate after tests and environment approval.
+
+The protected workflow copies every staged image from this repository's GHCR
+package into its reviewed Artifact Registry destinations with Skopeo's
+`--all --preserve-digests` and checks the raw destination manifest. A failed copy
+stops before migrations. Production runs the bound release-command job using
+the promoted web image, then releases each workload under its etag and verifies
+its retained UID, image and rollout. Receipt creation follows the last check.
+The service names must match or have an unambiguous one-to-one match by workload
+kind. The managed Railway evidence requires the same digest on its complete
+source service set. [Skopeo copy contract](https://github.com/podman-container-tools/skopeo/blob/main/docs/skopeo-copy.1.md)
+
+The production release IAM role has project-wide reach. A protected target
+requires a Google Cloud project with no other environment's CI release workflow.
+The access plan grants that project only the named manual production workflow.
+Native Google Cloud, AWS and Azure staging are outside this implementation.
+Workflow, registry and Cloud Run behavior have offline coverage. Live
+qualification remains open. [#667](https://github.com/davejohnson/hypervibe/issues/667)
+
 ## Execution authority and rollback
 
 Observe the effective privileged CI configuration, including imports, and the

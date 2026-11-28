@@ -16,6 +16,9 @@ import { observeMigrationDatabaseBackups } from './migration-database-backups.js
 import { observeCloudBucketBackup } from './cloud-bucket-backups.js';
 import type { BackupResource } from '../domain/services/backup-policy.service.js';
 import { gcpDatabaseLocation } from './gcp-database-location.js';
+import { observeEnginePromotion } from './engine-promotion.js';
+import { createCommandContext } from './context.js';
+import { SpecStore } from '../domain/spec/spec.store.js';
 
 export interface CutoverBackupReview { id: string; notice: string }
 
@@ -95,10 +98,14 @@ async function cutoverProtection(project: Project, origin: Environment, source: 
   const staging = source.deploy?.promoteFrom;
   if (staging) {
     const tests = source.deploy?.promotionTests;
-    if (unsupported({ deploy: { strategy: 'branch', promoteFrom: staging, promotionTests: tests } })) {
+    if (unsupported({ deploy: { strategy: 'branch', trigger: 'ci', autoDeploy: false, promoteFrom: staging, promotionTests: tests } })) {
       problems.push(`The engine for ${targetName} cannot enforce promotion of the verified release from ${staging}${tests ? ' and its required test workflow' : ''}.`);
     } else if (target.deploy?.promoteFrom !== staging || tests && target.deploy.promotionTests?.workflow !== tests.workflow) {
       problems.push(`${targetName} needs verified release promotion from ${staging}${tests ? ' with the same required test workflow' : ''}.`);
+    } else if (isEngineManaged(target)) {
+      const spec = new SpecStore().getForInspection(project)?.spec;
+      const promotion = spec && await observeEnginePromotion(createCommandContext(), project, spec, destination);
+      if (!promotion || 'blocked' in promotion) problems.push(promotion?.blocked ?? `The engine could not verify release promotion from ${staging}.`);
     }
   }
   return { problems, backupReview };

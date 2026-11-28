@@ -33,7 +33,7 @@ export function previewCiReleaseAccess(gcpProjectId: string, repository: string,
     releaseIdentity: ciReleaseIdentity(gcpProjectId),
     repository,
     grants: [
-      ...releases.map(scope => `${repository}/.github/workflows/hypervibe-release-${scope.environmentName}.yml on ${scope.branch}, environment ${scope.environmentName} (${scope.autoDeploy ? 'push or manual' : 'manual only'}), may use ${ciReleaseIdentity(gcpProjectId)}`),
+      ...releases.map(scope => `${repository}/.github/workflows/hypervibe-release-${scope.environmentName}.yml on ${scope.branch}, environment ${scope.environmentName} (${scope.promotionSource ? `manual promotion from ${scope.promotionSource}` : scope.autoDeploy ? 'push or manual' : 'manual only'}), may use ${ciReleaseIdentity(gcpProjectId)}`),
       ...CI_RELEASE_PROJECT_ROLES.map((role) => `${ciReleaseIdentity(gcpProjectId)}: ${role}`),
       `${ciReleaseIdentity(gcpProjectId)} may deploy revisions that run as ${runtimeServiceAccountEmail}`,
     ],

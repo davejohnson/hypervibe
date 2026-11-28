@@ -3,7 +3,7 @@ import { buildGcpPreparationConfiguration } from './gcp-setup.backend.js';
 
 import { assertEngineCiIntent } from '../../../../domain/spec/engine-ci.js';
 
-export interface GcpCiReleaseScope { environmentName: string; branch: string; autoDeploy: boolean }
+export interface GcpCiReleaseScope { environmentName: string; branch: string; autoDeploy: boolean; promotionSource?: string }
 
 export const CI_RELEASE_ACCOUNT_ID = 'hypervibe-release';
 export const CI_POOL_ID = 'hypervibe-github';
@@ -38,7 +38,9 @@ export function buildCiReleaseConfiguration(input: {
     const ref = `refs/heads/${release.branch}`;
     const workflow = `${input.repository}/.github/workflows/hypervibe-release-${release.environmentName}.yml@${ref}`;
     const events = release.autoDeploy ? "(assertion.event_name == 'push' || assertion.event_name == 'workflow_dispatch')" : "assertion.event_name == 'workflow_dispatch'";
-    return `(assertion.environment == '${release.environmentName}' && assertion.ref == '${ref}' && assertion.workflow_ref == '${workflow}' && ${events})`;
+    if (release.promotionSource && (!/^[A-Za-z0-9_-]+$/.test(release.promotionSource) || release.autoDeploy)) throw new Error('Invalid manual promotion scope.');
+    const promotion = release.promotionSource ? ` && assertion.workflow == 'Promote ${release.promotionSource} to ${release.environmentName}'` : '';
+    return `(assertion.environment == '${release.environmentName}' && assertion.ref == '${ref}' && assertion.workflow_ref == '${workflow}' && ${events}${promotion})`;
   });
   const condition = `assertion.repository_id == '${input.repositoryId}' && assertion.repository == '${input.repository}' && (${scopes.join(' || ')})`;
   if (condition.length > 4096) throw new Error('The exact GitHub workflow restrictions exceed the Google identity provider condition limit.');

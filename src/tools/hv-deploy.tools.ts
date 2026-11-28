@@ -2,6 +2,7 @@ import { isEngineManaged, releaseEngineServices } from '../application/infrastru
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { localRepositoryFor } from '../application/local-repository.js';
+import { dispatchEnginePromotion } from '../application/engine-promotion.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -179,6 +180,15 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         const supplied = [envVars, envFile, includeEnvFile, secretRefs].some((value) => value !== undefined);
         if (supplied) {
           return commandError('VALIDATION', 'OpenTofu-managed environments take runtime configuration from the spec and Hypervibe-owned secrets, not deploy inputs.', { next: ['hv_spec'] });
+        }
+        if (envSpec.deploy?.promoteFrom) {
+          if (services !== undefined) return commandError('VALIDATION', 'Promote the whole verified staging release. Omit the service selection.');
+          try {
+            const promotion = await dispatchEnginePromotion(ctx, project, specResult.spec, environment);
+            return commandSuccess(promotion, { hint: 'Promotion was dispatched. Check hv_ci_status for the result.', next: ['hv_ci_status'] });
+          } catch (error) {
+            return commandError('VALIDATION', error instanceof Error ? error.message : 'The staging promotion could not be dispatched.', { next: ['hv_ci_status', 'hv_launch'] });
+          }
         }
         const sourceDirectory = localRepositoryFor(project, specResult.source);
         const released = await releaseEngineServices(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName, ...(services?.length ? { services } : {}), ...(sourceDirectory ? { sourceDirectory } : {}) });

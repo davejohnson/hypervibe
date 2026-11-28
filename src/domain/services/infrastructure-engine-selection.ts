@@ -1,4 +1,4 @@
-import type { EnvironmentSpec, ProjectSpec } from '../spec/spec.schema.js';
+import { effectiveBranchCiAutoDeploy, type EnvironmentSpec, type ProjectSpec } from '../spec/spec.schema.js';
 import { secretServiceScopeProblems } from './secret-service-scope.js';
 import { gcpSecretScopeProblems } from './gcp-secret-scope.js';
 import { gcpDatabaseAliasProblems } from './gcp-runtime-env.js';
@@ -37,7 +37,9 @@ export function commonEngineProblems(environment: EnvironmentSpec): string[] {
     ['backups', environment.backups?.mode === 'daily' ? environment.backups : undefined],
     ['email', environment.email?.enabled ? environment.email : undefined],
     ['deploy.trigger="native"', environment.deploy?.trigger === 'native' ? environment.deploy : undefined],
-    ['deploy.promoteFrom', environment.deploy?.promoteFrom], ['deploy.promotionTests', environment.deploy?.promotionTests],
+    ...(environment.hosting.provider === 'cloudrun' ? [] : [
+      ['deploy.promoteFrom', environment.deploy?.promoteFrom], ['deploy.promotionTests', environment.deploy?.promotionTests],
+    ] as Array<[string, unknown]>),
   ];
   for (const [field, value] of unsupported) {
     if (present(value)) problems.push(`${field} is not yet managed by the OpenTofu engine; this capability must be implemented before this environment can be deployed.`);
@@ -111,6 +113,35 @@ export function gcpRegistrarSpec(spec: EnvironmentSpec): EnvironmentSpec | strin
   return { ...spec, domainRegistration: { ...registration, accountId: dns.zone.accountId } };
 }
 
+/** Match complete sets of staged and target workloads. A shared Railway image covers each
+ * exact source resource, so one unambiguous web/worker pair may use different logical names. */
+export function gcpPromotionServiceSources(spec: ProjectSpec, targetName: string): Record<string, string> {
+  const target = spec.environments[targetName];
+  const sourceName = target?.deploy?.promoteFrom;
+  const source = sourceName && spec.environments[sourceName];
+  if (!target || target.hosting.provider !== 'cloudrun' || !source || source.hosting.provider !== 'railway') {
+    throw new Error('Google Cloud promotion needs a managed Railway staging workflow with verified immutable image evidence. Google Cloud, AWS and Azure staging receipts are not yet supported.');
+  }
+  if (target.deploy?.strategy !== 'branch' || target.deploy.trigger === 'native' || effectiveBranchCiAutoDeploy(targetName, target.deploy.autoDeploy)
+    || source.deploy?.strategy !== 'branch' || source.deploy.trigger === 'native') {
+    throw new Error('Google Cloud promotion needs a manual GitHub Actions target (branch strategy, autoDeploy=false) and a managed staging workflow.');
+  }
+  const services = Object.entries(target.services);
+  const available = new Map(Object.entries(source.services));
+  const mapping: Record<string, string> = {};
+  for (const [name, service] of services) {
+    if (available.get(name)?.workloadKind === service.workloadKind) { mapping[name] = name; available.delete(name); }
+  }
+  for (const [name, service] of services) {
+    if (Object.hasOwn(mapping, name)) continue;
+    const candidates = [...available].filter(([, stage]) => stage.workloadKind === service.workloadKind);
+    if (candidates.length !== 1) throw new Error(`Cannot identify the staging workload for ${name}. Use matching logical service names and workload kinds on staging and production.`);
+    mapping[name] = candidates[0]![0]; available.delete(mapping[name]!);
+  }
+  if (!services.length || available.size) throw new Error('Google Cloud promotion needs the same complete set of workload kinds on staging and production.');
+  return mapping;
+}
+
 /** Unsupported desired state must block planning instead of falling back to another engine. */
 export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: string): string[] {
   const environment = spec.environments[environmentName];
@@ -122,6 +153,9 @@ export function engineEnvironmentProblems(spec: ProjectSpec, environmentName: st
   const problems: string[] = [...scopeProblems, ...gcpSecretScopeProblems(spec, environmentName), ...gcpDatabaseAliasProblems(environment), ...sharedDatabaseSpecProblems(spec, environmentName)];
   if (!isEngineManaged(environment)) problems.push('The OpenTofu engine currently supports only hosting.provider="cloudrun".');
   problems.push(...commonEngineProblems(environment));
+  if (environment.deploy?.promoteFrom) {
+    try { gcpPromotionServiceSources(spec, environmentName); } catch (error) { problems.push((error as Error).message); }
+  }
   if (environment.domainRegistration?.register) {
     const registrar = gcpRegistrarSpec(environment);
     if (typeof registrar === 'string') problems.push(registrar);
