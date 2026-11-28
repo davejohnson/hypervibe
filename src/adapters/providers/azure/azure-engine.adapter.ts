@@ -118,6 +118,7 @@ providerRegistry.register({
     category: 'deployment',
     orchestration: { logs: { runtime: true } },
     credentialsSchema: AzureEngineCredentialsSchema,
+    credentials: { agentManagedKeys: ['monitoringResourceProviders'] },
     setupHelpUrl: 'https://portal.azure.com/',
     maturity: {
       lifecycle: {
