@@ -1,9 +1,15 @@
 import { browserApprovedRunActions } from './browser-approved-run.js';
 import { environmentDomains, sharedDatabaseSpecProblems } from '../domain/services/infrastructure-engine-selection.js';
-import { effectiveBranchCiAutoDeploy } from '../domain/spec/spec.schema.js';
 import { getGitHubAdapter } from '../domain/services/github-ops.service.js';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
-import { strictHealthCheck } from '../domain/services/release-health.js';
+import { ciReleaseCommand, ciReleaseTargets } from './gcp-ci-workloads.js';
+import { buildGcpPromotionWorkflow, gcpCiReleaseScopes, gcpPromotionContract, prepareGcpPromotionPolicy, projectGcpPromotionUids, promotionPublicationHead, type GcpPromotionIdentity } from './gcp-promotion-workflow.js';
+import { openTofuEngine } from './engine-shared.js';
+import { appliedCiPromotionPolicy, buildCiReleaseConfiguration } from '../adapters/providers/gcp/tofu/gcp-ci.backend.js';
+import { gcpSetupBackend } from '../adapters/providers/gcp/tofu/gcp-setup.backend.js';
+import { gcpEngineBackend } from '../adapters/providers/gcp/tofu/gcp-engine.backend.js';
+export { ciReleaseCommand, ciReleaseTargets } from './gcp-ci-workloads.js';
 import { firstProviderSpecValidationFailure } from '../domain/services/provider-spec-validation.js';
 import type { CommandContext } from './context.js';
 import { buildTokenKey, collectOutsideKeys } from './engine-secrets.js';
@@ -18,7 +24,7 @@ import { connectCloudflareInBrowser } from './local-connect-page.js';
 import { resolveDnsConnection } from '../adapters/dns-observation/connections.js';
 import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
 import { applyDnsPlan } from './dns-hosting.js';
-import { grantCiReleaseAccess, previewCiReleaseAccess, renderReleaseWorkflow, writeReleaseWorkflow } from './infrastructure-engine-ci.js';
+import { ciReleaseIdentity, ciWorkloadIdentityProvider, grantCiReleaseAccess, previewCiReleaseAccess, readCiProjectNumber, renderReleaseWorkflow, writeReleaseWorkflow } from './infrastructure-engine-ci.js';
 import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
 import { connectAzure } from './azure-connect.js';
 import { connectAws } from './aws-connect.js';
@@ -26,11 +32,13 @@ import { awsProfileFor, resolveAwsEngineContext } from './infrastructure-engine-
 import { azureProfileFor, resolveAzureConnection } from './infrastructure-engine-azure.js';
 import { azureCiSetupReady } from '../adapters/providers/azure/azure-setup.client.js';
 import { cloudEngineFor } from './cloud-engines.js';
+import { observeEnginePromotion } from './engine-promotion.js';
 import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import { parseEngineCiBinding } from '../domain/spec/engine-ci-binding.js';
 import { environmentDeploymentContractHashForApply } from '../domain/services/deployment-contract.service.js';
 import { generatedContainerDockerfile } from '../domain/services/generated-container.js';
 import { gcpEnvironmentBindingConflict } from '../domain/services/gcp-environment-target.js';
+import { writeRepoBindingsForEnvironment } from '../domain/spec/repo-bindings-file.js';
 import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import type { ProjectRuntime } from '../domain/spec/project-runtime.js';
 import { isCloudPreparedForRegion, isCloudPreparedForCache, isCloudPreparedForQueues, isCloudPreparedForStorage, isCloudPreparedForWorkerWake } from '../domain/services/cloud-prepare.js';
@@ -42,7 +50,6 @@ import {
   type InfrastructurePlanResult,
   isEngineManaged,
   planInfrastructureEngine,
-  releaseCommandFor,
   releaseEngineServices,
   resolveEngineContext,
   engineGcpAdapter,
@@ -346,20 +353,38 @@ async function runLaunch(ctx: CommandContext, params: {
   if (rounds === limit) return { status: 'blocked', message: 'Further infrastructure stages remain unverified. Run hv_launch again to review the next stage.' };
   if (params.stopAfter === 'infrastructure') return { status: 'ready', phase: 'infrastructure', infrastructureRounds: rounds };
 
-  // 3. Release the current code and verify it.
-  const released = await releaseEngineServices(ctx, {
-    project: params.project, spec: params.spec, specRevision: params.specRevision,
-    environmentName: params.environmentName, ...(params.revision ? { revision: params.revision } : {}),
-    ...(params.sourceDirectory ? { sourceDirectory: params.sourceDirectory } : {}),
-  });
+  let ciWorkflow: { path: string; changed: boolean; branch: string } | undefined;
+  const promotion = environmentSpec.deploy?.promoteFrom;
+  let released: { results: EngineReleaseResult[] } | { blocked: string };
+  if (promotion) {
+    const target = ctx.repos.environments.findByProjectAndName(params.project.id, params.environmentName);
+    if (!target) return { status: 'blocked', message: 'The applied promotion target could not be found.' };
+    released = await observeEnginePromotion(ctx, params.project, params.spec, target);
+    if ('blocked' in released && params.sourceDirectory) {
+      const ci = await ensureCiRelease(ctx, params, environmentSpec);
+      if ('status' in ci) return ci;
+      ciWorkflow = ci;
+      if (ci.changed) return { status: 'pending', receipts: [], message: 'Publish ' + ci.path + ' on ' + ci.branch
+        + ', then run hv_deploy to promote the verified release from ' + promotion + '.' };
+      const applied = ctx.repos.environments.findById(target.id);
+      if (applied && !isDeepStrictEqual(applied.platformBindings, target.platformBindings)) {
+        released = await observeEnginePromotion(ctx, params.project, params.spec, applied);
+      }
+    }
+  } else {
+    released = await releaseEngineServices(ctx, {
+      project: params.project, spec: params.spec, specRevision: params.specRevision,
+      environmentName: params.environmentName, ...(params.revision ? { revision: params.revision } : {}),
+      ...(params.sourceDirectory ? { sourceDirectory: params.sourceDirectory } : {}),
+    });
+  }
   if ('blocked' in released) return { status: 'blocked', message: released.blocked };
   const failedRelease = released.results.find((result) => result.status !== 'released');
   if (failedRelease) return { status: 'blocked', message: failedRelease.message, details: released.results };
   const urls: Record<string, string> = Object.fromEntries(released.results.filter((r) => r.url).map((r) => [r.service, r.url!]));
 
   // 4. Keyless CI releases on push, when the spec asks for branch deploys.
-  let ciWorkflow: { path: string; changed: boolean; branch: string } | undefined;
-  if (environmentSpec.deploy?.strategy === 'branch') {
+  if (environmentSpec.deploy?.strategy === 'branch' && !promotion) {
     const ci = await ensureCiRelease(ctx, params, environmentSpec);
     if ('status' in ci) return ci;
     ciWorkflow = ci;
@@ -574,36 +599,6 @@ async function scopedGcpProjectId(project: Project): Promise<string | undefined>
   return (await engineGcpAdapter(project))?.engineConnection().projectId;
 }
 
-/**
- * The release command step of a generated workflow. A declared command that cannot be
- * run (its job is not built yet) blocks generation: a workflow that silently skipped
- * migrations would release code against an unmigrated database.
- */
-export function ciReleaseCommand(environmentSpec: EnvironmentSpec, releaseJob: string | undefined, services: Array<{ name: string; kind: 'services' | 'jobs' | 'workerPools' }>): { job: string; service: string } | { blocked: string } | undefined {
-  if (!releaseCommandFor(environmentSpec)) return undefined;
-  // Same choice as the engine: the release command runs on the web service's image, or the first non-job service.
-  const migrationService = services.find((service) => environmentSpec.services[service.name]?.workloadKind === 'web') ?? services.find((service) => service.kind !== 'jobs');
-  if (!releaseJob || !migrationService) {
-    return { blocked: 'The release-command job does not exist yet, so the release workflow was not written: it would skip the release command. Run hv_plan scope="infrastructure" and hv_apply first.' };
-  }
-  return { job: releaseJob, service: migrationService.name };
-}
-
-/** What the release workflow updates: every bound service, scheduled job and worker pool. */
-export function ciReleaseTargets(environmentSpec: EnvironmentSpec, bindings: Record<string, { serviceId?: string; jobName?: string; workerPoolName?: string }> | undefined,
-  target: { region: string; gcpProjectId: string; environmentName: string }) {
-  return Object.entries(environmentSpec.services).flatMap(([name, service]) => {
-    const bound = bindings?.[name];
-    const resource = bound?.serviceId ?? bound?.jobName ?? bound?.workerPoolName;
-    const kind = bound?.serviceId ? 'services' as const : bound?.jobName ? 'jobs' as const : 'workerPools' as const;
-    return resource ? [{
-      name, resource, kind, ...(kind === 'services' && service.workloadKind !== 'worker' ? { healthPath: service.healthCheckPath ?? '/', ...(strictHealthCheck(service) ? { strictHealth: true } : {}) } : {}),
-      ...(kind !== 'jobs' && service.startCommand ? { startCommand: service.startCommand } : {}),
-      image: `${target.region}-docker.pkg.dev/${target.gcpProjectId}/hypervibe/${target.environmentName}-${name}`.toLowerCase(),
-    }] : [];
-  });
-}
-
 async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], environmentSpec: EnvironmentSpec): Promise<{ path: string; changed: boolean; branch: string } | LaunchResult> {
   const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec.gitRemoteUrl);
   if (!repository) return { status: 'blocked', message: 'CI releases need this project on GitHub (set gitRemoteUrl with hv_spec).' };
@@ -631,13 +626,66 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
   if (!observed || observed.full_name?.toLowerCase() !== repository.toLowerCase() || !Number.isSafeInteger(observed.id) || observed.id! <= 0) {
     return { status: 'blocked', message: 'GitHub could not verify the exact repository identity for CI access.' };
   }
+  if (environmentSpec.deploy?.promoteFrom && observed.default_branch !== (environmentSpec.deploy.branch ?? 'main')) {
+    return { status: 'blocked', message: 'The protected Google Cloud workflow must be on the verified GitHub default branch.' };
+  }
   const repositoryId = String(observed.id);
-  const releases = Object.entries(params.spec.environments).filter(([, env]) => env.hosting.provider === 'cloudrun' && env.deploy?.strategy === 'branch')
-    .sort(([a], [b]) => a.localeCompare(b)).map(([environmentName, env]) => ({
-      environmentName, branch: env.deploy!.branch ?? 'main', autoDeploy: effectiveBranchCiAutoDeploy(environmentName, env.deploy!.autoDeploy),
-    }));
+  const runtime = params.spec.runtime as ProjectRuntime | undefined;
+  // Each service gets its own generated Dockerfile, since web and workers start differently.
+  const services = ciReleaseTargets(environmentSpec, binding.services, { region: context.region, gcpProjectId: context.gcpProjectId, environmentName: params.environmentName })
+    .map((target) => {
+      if (!runtime) return target;
+      try { return { ...target, generatedDockerfile: generatedContainerDockerfile(runtime, environmentSpec.services[target.name]?.startCommand) }; } catch { return target; }
+    });
+  const branch = environmentSpec.deploy?.branch ?? 'main';
+  const packageTokenSecret = buildTokenKey(params.spec, params.environmentName);
+  const releaseCommand = ciReleaseCommand(environmentSpec, binding.engine?.releaseJob, services);
+  if (releaseCommand && 'blocked' in releaseCommand) return { status: 'blocked', message: releaseCommand.blocked };
+  let promotion: GcpPromotionIdentity | undefined;
+  let policySha: string | undefined;
+  let publishedBindings: Record<string, { platformBindings?: { engine?: EngineBinding; provider?: string; projectId?: string; environmentId?: string } }> | undefined;
+  let appliedPolicy: ((releases: ReturnType<typeof gcpCiReleaseScopes>) => Promise<boolean>) | undefined;
+  if (environmentSpec.deploy?.promoteFrom) {
+    try {
+      const tofu = await openTofuEngine();
+      if ('blocked' in tofu) return { status: 'blocked', message: tofu.blocked };
+      const checked = await tofu.inspectState({ backend: gcpEngineBackend, auth: context.auth, state: context.state, configuration: { files: {}, resources: {} },
+        project: raw => projectGcpPromotionUids(raw, context.gcpProjectId, context.region, services, releaseCommand?.job) });
+      if (!checked.ok || !checked.present) return { status: 'blocked', message: 'Cannot verify production workload identifiers in retained OpenTofu state. Preserve the state and reconcile infrastructure before promoting.' };
+      const publication = await promotionPublicationHead(github.adapter, repository, branch);
+      const tests = environmentSpec.deploy.promotionTests;
+      const testsFile = tests && await publication.file(tests.workflow, publication.head);
+      if (tests && !testsFile) return { status: 'blocked', message: `Publish the required reusable tests ${tests.workflow} on ${branch} before setting up production access.` };
+      promotion = { repositoryId, contractHash: environmentDeploymentContractHashForApply(params.spec, params.environmentName), uids: checked.value,
+        ...(releaseCommand && { copyVerificationKey: context.adapter.promotionCopyPublicKey(context.gcpProjectId) }),
+        ...(testsFile && { testsHash: createHash('sha256').update(testsFile).digest('hex') }) };
+      const number = await readCiProjectNumber(await context.adapter.engineAccessToken(), context.gcpProjectId);
+      const proposed = { repository, provider: ciWorkloadIdentityProvider(number), releaseIdentity: ciReleaseIdentity(context.gcpProjectId) };
+      const desired = gcpPromotionContract(params.project, params.spec, environment, proposed, promotion);
+      const prepared = await prepareGcpPromotionPolicy(desired, publication, params.sourceDirectory);
+      if ('blocked' in prepared) return { status: 'blocked', message: prepared.blocked };
+      policySha = prepared.policySha;
+      const remoteBindings = await publication.file('.hypervibe/bindings.json', publication.head);
+      if (remoteBindings) publishedBindings = JSON.parse(remoteBindings).environments;
+      appliedPolicy = async releases => {
+        const configuration = buildCiReleaseConfiguration({ projectId: context.gcpProjectId, projectNumber: number, repository, repositoryId,
+          releases, runtimeServiceAccountEmail: context.runtimeServiceAccountEmail });
+        const inspected = await tofu.inspectState({ backend: gcpSetupBackend, auth: context.auth,
+          state: { provider: 'gcp', projectId: params.project.id, environmentId: context.gcpProjectId, partition: 'project-shared' }, configuration,
+          project: state => appliedCiPromotionPolicy(state, configuration, proposed.provider) });
+        if (!inspected.ok) throw new Error('Cannot verify the private Google Cloud identity provider state. Reconcile the CI access plan before promoting.');
+        return inspected.present && inspected.value === true;
+      };
+    } catch (error) { return { status: 'blocked', message: (error as Error).message }; }
+  }
+  let releases: ReturnType<typeof gcpCiReleaseScopes>;
+  try { releases = gcpCiReleaseScopes(params.spec, params.environmentName, context.gcpProjectId, name => ctx.repos.environments.findByProjectAndName(params.project.id, name)?.platformBindings.projectId, policySha); }
+  catch (error) { return { status: 'blocked', message: (error as Error).message }; }
   const trust = createHash('sha256').update(JSON.stringify([repositoryId, repository, releases])).digest('hex');
-  if (!ci || ci.trust !== trust) {
+  let reuse = ci?.trust === trust;
+  try { if (reuse && appliedPolicy) reuse = await appliedPolicy(releases); }
+  catch (error) { return { status: 'blocked', message: (error as Error).message }; }
+  if (!ci || !reuse) {
     try {
       const browser = browserAccessPlan(params, 'ci-release');
       const confirm = Boolean(browser) || params.approveAccess?.includes('ci-release') === true;
@@ -651,23 +699,36 @@ async function ensureCiRelease(ctx: CommandContext, params: Parameters<typeof ru
         grants: { ...previewCiReleaseAccess(context.gcpProjectId, observed.full_name!, context.runtimeServiceAccountEmail, releases),
           gcpProjectId: context.gcpProjectId, planId: granted.planId, htmlPath: granted.htmlPath, actions: granted.actions },
       };
-      ci = { repository, trust, provider: granted.provider, releaseIdentity: granted.releaseIdentity };
+      if (appliedPolicy && !await appliedPolicy(releases)) return { status: 'blocked', message: 'Google Cloud has not confirmed the exact reviewed promotion workflow grant.' };
+      ci = { repository, trust, provider: granted.provider, releaseIdentity: granted.releaseIdentity, ...(policySha && { policySha }) };
     } catch (error) {
       return { status: 'blocked', message: error instanceof Error ? error.message : String(error) };
     }
-    ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...(binding.engine ?? {}), kind: 'opentofu', ci } });
+    if (!promotion) ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...(binding.engine ?? {}), kind: 'opentofu', ci } });
   }
-  const runtime = params.spec.runtime as ProjectRuntime | undefined;
-  // Each service gets its own generated Dockerfile, since web and workers start differently.
-  const services = ciReleaseTargets(environmentSpec, binding.services, { region: context.region, gcpProjectId: context.gcpProjectId, environmentName: params.environmentName })
-    .map((target) => {
-      if (!runtime) return target;
-      try { return { ...target, generatedDockerfile: generatedContainerDockerfile(runtime, environmentSpec.services[target.name]?.startCommand) }; } catch { return target; }
-    });
-  const branch = environmentSpec.deploy?.branch ?? 'main';
-  const packageTokenSecret = buildTokenKey(params.spec, params.environmentName);
-  const releaseCommand = ciReleaseCommand(environmentSpec, binding.engine?.releaseJob, services);
-  if (releaseCommand && 'blocked' in releaseCommand) return { status: 'blocked', message: releaseCommand.blocked };
+  if (promotion) {
+    const updated = ctx.repos.environments.updatePlatformBindings(environment.id, { engine: { ...binding.engine, ci, promotion } });
+    if (!updated) return { status: 'blocked', message: 'The promotion environment no longer exists.' };
+    const workflow = buildGcpPromotionWorkflow(params.project, params.spec, updated);
+    if ('blocked' in workflow) return { status: 'blocked', message: workflow.blocked };
+    const published = publishedBindings?.[environment.name]?.platformBindings?.engine;
+    const staging = publishedBindings?.[workflow.sourceEnvironment]?.platformBindings;
+    const localMigration = (updated.platformBindings.engine as EngineBinding).migration;
+    if (!isDeepStrictEqual(published?.promotion, promotion) || !isDeepStrictEqual(published?.ci, ci)
+      || published?.migration?.copyAttempt?.id !== localMigration?.copyAttempt?.id || published?.migration?.promotionCopySignature !== localMigration?.promotionCopySignature
+      || staging?.provider !== 'railway' || staging.projectId !== workflow.sourceTarget.scope.providerProjectId || staging.environmentId !== workflow.sourceTarget.scope.providerEnvironmentId) {
+      const source = ctx.repos.environments.findByProjectAndName(params.project.id, workflow.sourceEnvironment);
+      if (!source) return { status: 'blocked', message: 'Cannot export the reviewed staging identities.' };
+      for (const item of [source, updated]) {
+        if (!writeRepoBindingsForEnvironment(params.project, item, params.sourceDirectory, () => ctx.repos.components.findByEnvironmentId(item.id))) {
+          return { status: 'blocked', message: 'Open the repository configured for this project to export its reviewed .hypervibe/bindings.json, then run hv_launch again.' };
+        }
+      }
+      return { status: 'pending', receipts: [], message: 'Publish the updated .hypervibe/bindings.json on ' + branch
+        + ' so GitHub can verify the applied production identities and any signed database copy. Then promote the staging release with hv_deploy.' };
+    }
+    return { ...writeReleaseWorkflow(params.sourceDirectory, params.environmentName, workflow.content), branch };
+  }
   const content = renderReleaseWorkflow({
     environmentName: params.environmentName, branch, autoDeploy: environmentSpec.deploy?.autoDeploy, gcpProjectId: context.gcpProjectId, region: context.region,
     provider: ci.provider, releaseIdentity: ci.releaseIdentity, services,

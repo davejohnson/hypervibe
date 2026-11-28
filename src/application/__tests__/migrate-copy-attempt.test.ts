@@ -15,6 +15,7 @@ import * as access from '../../domain/services/database-access.service.js';
 import { createCommandContext } from '../context.js';
 import * as launch from '../launch.js';
 import * as engine from '../infrastructure-engine.js';
+import * as promotion from '../engine-promotion.js';
 import * as transfer from '../migration-transfer-gcp.js';
 import { migrateEnvironment } from '../migrate.js';
 import type { CommandEnvelope } from '../results.js';
@@ -84,14 +85,15 @@ function fixture(kind: 'database' | 'files' | 'both') {
       ...(hasFiles ? { storage: { files: { provider: 'gcs', type: 'bucket', region: 'us-central1', injectInto: [] } } } : {}),
     },
   } });
+  const signCopy = vi.fn(() => 'fixture-signature');
   vi.spyOn(engine, 'resolveEngineContext').mockImplementation(async () => ({
     environment: ctx.repos.environments.findById(target.id)!, gcpProjectId: 'fixture-project', region: 'us-central1',
-    runtimeServiceAccountEmail: 'fixture@fixture.invalid', adapter: { engineAccessToken: async () => 'fixture-token' },
+    runtimeServiceAccountEmail: 'fixture@fixture.invalid', adapter: { engineAccessToken: async () => 'fixture-token', signVerifiedPromotionCopy: signCopy },
   } as any));
   const current = () => (ctx.repos.environments.findById(target.id)!.platformBindings.engine as engine.EngineBinding).migration!;
   const migrate = (options: Partial<Parameters<typeof migrateEnvironment>[1]> = {}) => migrateEnvironment(ctx, { project, from: 'source', to: 'target', ...options });
   const releaseCalls = () => vi.mocked(launch.launchEnvironment).mock.calls.filter(([, params]) => !params.stopAfter);
-  return { ctx, project, target, current, migrate, releaseCalls };
+  return { ctx, project, target, current, migrate, releaseCalls, signCopy };
 }
 
 describe('backup consent at cutover', () => {
@@ -136,6 +138,40 @@ describe('backup consent at cutover', () => {
     vi.spyOn(commands, 'createCommandRegistry').mockReturnValue({ get: (name: string) => ({ execute: name === 'hv_apply' ? apply : plan }) } as never);
     return { ...f, run, sourceSpec, enableDaily, route, plan, apply };
   }
+
+  it('keeps the verified final restore while awaiting its staged migration and moves traffic without a second restore', async () => {
+    const f = cutover();
+    const deploy = { strategy: 'branch', trigger: 'ci', autoDeploy: false, promoteFrom: 'staging' };
+    new SpecStore().merge(f.project, { gitRemoteUrl: 'https://github.com/example/fixture', environments: {
+      staging: { hosting: { provider: 'railway' }, services: { web: { workloadKind: 'web' } }, deploy: { strategy: 'branch', trigger: 'ci' } },
+      source: { deploy }, target: { deploy, migrations: { mode: 'releaseCommand', command: 'npm run migrate' } },
+    } });
+    f.ctx.repos.environments.updatePlatformBindings(f.target.id, { engine: { ...f.target.platformBindings.engine as engine.EngineBinding, releaseJob: 'schema-job' } });
+    let promotedCopy: string | undefined;
+    vi.spyOn(promotion, 'observeEnginePromotion').mockImplementation(async () => f.current().copyAttempt?.id === promotedCopy
+      ? { results: [] } : { blocked: 'Promote the staged release against the current database copy.' });
+    expect(await f.run({ confirmCutover: true })).toMatchObject({ ok: false, error: { message: expect.stringMatching(/staged release/) } });
+    const copied = f.current();
+    expect(copied.finalCopy).toMatchObject({ copyAttemptId: copied.copyAttempt!.id });
+    expect(copied).toHaveProperty('promotionCopySignature', 'fixture-signature');
+    expect(f.signCopy).toHaveBeenCalledExactlyOnceWith({ repository: 'example/fixture', environment: 'target', gcpProjectId: 'fixture-project',
+      region: 'us-central1', job: 'schema-job', copyAttemptId: copied.copyAttempt!.id, copiedAt: copied.copiedAt });
+    expect(f.route.forwarded).toBe(false);
+    expect(await f.run({ confirmCutover: true })).toMatchObject({ ok: false });
+    promotedCopy = copied.copyAttempt!.id;
+    const planTraffic = f.plan.getMockImplementation()!;
+    f.plan.mockImplementationOnce(async () => {
+      const plan = await planTraffic();
+      promotedCopy = undefined;
+      return plan;
+    });
+    expect(await f.run({ confirmCutover: true })).toMatchObject({ ok: false, error: { message: expect.stringMatching(/staged release/) } });
+    expect(f.route.forwarded).toBe(false);
+    promotedCopy = copied.copyAttempt!.id;
+    expect(await f.run({ confirmCutover: true })).toMatchObject({ ok: true, data: { status: 'cut_over' } });
+    expect(transfer.runTransferJob).toHaveBeenCalledTimes(1);
+    expect(f.releaseCalls()).toHaveLength(0);
+  });
 
   function review(envelope: CommandEnvelope) {
     expect(envelope).toMatchObject({ ok: true, data: { status: 'needs_cutover_approval', backupReviewId: expect.any(String),

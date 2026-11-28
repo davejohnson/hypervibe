@@ -187,13 +187,17 @@ export interface EngineBinding {
   runtimeSecretGrantOrigins?: Record<string, Pick<ReviewedRuntimeSecretGrant, 'name' | 'createTime'>>;
   /** Non-secret credential metadata bound to an acknowledged exact Secret Manager version. */
   secretMetadata?: Record<string, { gcpProjectId: string; version: string; labels: Record<string, string> }>;
+  /** Safe identities projected from the applied engine state for an explicitly protected release. */
+  promotion?: import('./gcp-promotion-workflow.js').GcpPromotionIdentity;
   /** Keyless CI release trust granted for this exact repository. */
-  ci?: { repository: string; trust?: string; provider: string; releaseIdentity: string };
+  ci?: { repository: string; trust?: string; provider: string; releaseIdentity: string; policySha?: string };
   /** Current copy evidence is cleared before replacement; prior evidence is historical only. */
   migration?: MigrationCopyEvidence & {
     from: string;
     sourceMajor?: number;
     copyAttempt?: { id: string; startedAt: string; status: 'incomplete' | 'complete' };
+    /** Signed by the deployment connection after a verified database copy for protected CI. */
+    promotionCopySignature?: string;
     finalCopy?: import('./migration-cutover-readiness.js').FinalCopyReceipt;
     previousCopy?: MigrationCopyEvidence;
   };
@@ -2119,6 +2123,9 @@ export async function releaseEngineServices(ctx: CommandContext, params: {
 }): Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }> {
   const engine = cloudEngineFor(params.spec, params.environmentName);
   if (!engine) return { blocked: 'Environment is not managed by the OpenTofu engine.' };
+  if (params.spec.environments[params.environmentName]?.deploy?.promoteFrom) {
+    return { blocked: 'Use hv_deploy to promote the verified staging release. This target cannot build from a local checkout.' };
+  }
   return engine.release(ctx, params) as Promise<{ results: EngineReleaseResult[]; applyRunId: string; source?: ReleaseSource['summary'] } | { blocked: string }>;
 }
 

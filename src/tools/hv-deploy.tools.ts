@@ -2,6 +2,7 @@ import { isEngineManaged, releaseEngineServices } from '../application/infrastru
 import type { CommandRegistrar } from '../application/commands.js';
 import { z } from 'zod';
 import { localRepositoryFor } from '../application/local-repository.js';
+import { dispatchEnginePromotion } from '../application/engine-promotion.js';
 import { PlanService } from '../domain/plan/plan.service.js';
 import { deploymentPrerequisitePhase } from '../domain/plan/plan-stage.js';
 import { providerRegistry } from '../domain/registry/provider.registry.js';
@@ -114,7 +115,7 @@ function rollbackResponse(result: Awaited<ReturnType<typeof executeRollback>>, p
 export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandContext): void {
   commands.register(
     'hv_deploy',
-    'Deploy services to an environment (staging, production, etc.). Plan-gated direct/manual deploys build and immediately apply a plan; managed-CI environments must dispatch only through hv_ci_trigger after selecting the reviewed definition with hv_ci_status, never through gh or a direct CI/provider API. To apply saved settings on a managed-CI environment without releasing new commits, pass redeployCurrent=true: it redeploys the exact verified image already running. The planId and applyRunId are returned for the audit trail. Hypervibe-owned application secrets are generated and installed automatically. Externally owned secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override managed keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec). Protected environments require confirm=true.',
+    'Deploy services to an environment (staging, production, etc.). A Google Cloud target with deploy.promoteFrom dispatches the whole verified staging release and reports pending. Plan-gated direct/manual deploys build and immediately apply a plan. Other managed-CI environments dispatch only through hv_ci_trigger after selecting the reviewed definition with hv_ci_status, never through gh or a direct CI/provider API. To apply saved settings on a managed-CI environment without releasing new commits, pass redeployCurrent=true: it redeploys the exact verified image already running. The planId and applyRunId are returned for the audit trail. Hypervibe-owned application secrets are generated and installed automatically. Externally owned secret slots accept values only through secretRefs={KEY:"env:NAME"|"dotenv:/absolute/path/.env#KEY"|"file:/absolute/path"|"<manager>://..."}; values are resolved locally and encrypted into the plan. Ordinary envVars and env files cannot override managed keys. By default, .env.<env> then repo .env are considered as deploy input in envFile.mode="runtime". Requires a spec (hv_spec). Protected environments require confirm=true.',
     {
       project: projectField,
       env: envField,
@@ -179,6 +180,15 @@ export function registerHvDeployTools(commands: CommandRegistrar, ctx: CommandCo
         const supplied = [envVars, envFile, includeEnvFile, secretRefs].some((value) => value !== undefined);
         if (supplied) {
           return commandError('VALIDATION', 'OpenTofu-managed environments take runtime configuration from the spec and Hypervibe-owned secrets, not deploy inputs.', { next: ['hv_spec'] });
+        }
+        if (envSpec.deploy?.promoteFrom) {
+          if (services !== undefined) return commandError('VALIDATION', 'Promote the whole verified staging release. Omit the service selection.');
+          try {
+            const promotion = await dispatchEnginePromotion(ctx, project, specResult.spec, environment);
+            return commandSuccess(promotion, { hint: 'Promotion was dispatched. Check hv_ci_status for the result.', next: ['hv_ci_status'] });
+          } catch (error) {
+            return commandError('VALIDATION', error instanceof Error ? error.message : 'The staging promotion could not be dispatched.', { next: ['hv_ci_status', 'hv_launch'] });
+          }
         }
         const sourceDirectory = localRepositoryFor(project, specResult.source);
         const released = await releaseEngineServices(ctx, { project, spec: specResult.spec, specRevision: specResult.revision, environmentName: envName, ...(services?.length ? { services } : {}), ...(sourceDirectory ? { sourceDirectory } : {}) });

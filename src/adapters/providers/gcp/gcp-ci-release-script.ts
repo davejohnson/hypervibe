@@ -1,3 +1,15 @@
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const { runPromotionMigration } = createRequire(import.meta.url)(fileURLToPath(new URL('../../../../templates/managed-ci/gcp-promotion-migration.cjs', import.meta.url))) as { runPromotionMigration: Function };
+
+const readyModule = new URL('../../../../templates/managed-ci/gcp-promotion-ready.cjs', import.meta.url);
+export const { assertGcpPromotionWorkloadReady, assertGcpPromotionWorkloadIdentity } = createRequire(import.meta.url)(fileURLToPath(readyModule)) as {
+  assertGcpPromotionWorkloadIdentity(value: Record<string, unknown>, project: string, projectNumber: string, region: string,
+    kind: string, resource: string, uid: string): void;
+  assertGcpPromotionWorkloadReady(value: Record<string, unknown>, kind: 'services' | 'jobs' | 'workerPools'): void;
+};
+
 /**
  * The program a generated GitHub Actions release runs on Google Cloud: switch one
  * Cloud Run workload to a new image under its etag, wait for the rollout, and
@@ -5,15 +17,15 @@
  * the same guarantees; it is plain JavaScript because it runs in the workflow,
  * not in Hypervibe.
  */
-export const RELEASE_SCRIPT = String.raw`
+function releaseScript(promotion: boolean): string { return String.raw`
 const [resource, image, healthPath, kind = 'services', startCommand = '-'] = process.argv.slice(2);
 const token = process.env.GCP_TOKEN;
 const base = 'https://run.googleapis.com/v2/projects/' + process.env.GCP_PROJECT + '/locations/' + process.env.GCP_REGION + '/' + kind + '/' + resource;
 const call = async (url, init = {}) => fetch(url, { ...init, headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' } });
 const isJob = kind === 'jobs';
-const current = await (await call(base)).json();
+const current = await (await call(base)).json();${promotion ? GCP_IDENTITY_CHECK : ''}
 const containers = ((isJob ? current.template?.template?.containers : current.template?.containers) ?? []).map((c) => ({ ...c }));
-if (containers.length !== 1) throw new Error('Workload must have exactly one container.');
+if (containers.length !== 1) throw new Error('Workload must have exactly one container.');${promotion ? GCP_PREFLIGHT : ''}
 containers[0].image = image;
 // Services and workers get their start command with the image ('-' keeps what is there, '' means the image's own).
 if (!isJob && startCommand !== '-') {
@@ -30,10 +42,45 @@ if (!patch.ok) throw new Error('Cloud Run rejected the release (HTTP ' + patch.s
 let operation = await patch.json();
 for (let i = 0; i < 200 && !operation.done; i++) { await new Promise((r) => setTimeout(r, 3000)); operation = await (await call('https://run.googleapis.com/v2/' + operation.name)).json(); }
 if (!operation.done || operation.error) throw new Error('Rollout failed: ' + (operation.error?.message ?? 'did not finish'));
-const after = await (await call(base)).json();
+const after = await (await call(base)).json();${promotion ? '\nassertIdentity(after); assertGcpPromotionWorkloadReady(after, kind);' : ''}
 const running = isJob ? after.template?.template?.containers?.[0]?.image : after.template?.containers?.[0]?.image;
-if (running !== image || (!isJob && after.latestReadyRevision !== after.latestCreatedRevision)) throw new Error('The new image is not active.');
-// A release command (migrations) runs now on the new image and must succeed before any service is switched.
+if (running !== image${promotion ? '' : ' || (!isJob && after.latestReadyRevision !== after.latestCreatedRevision)'}) throw new Error('The new image is not active.');
+${promotion ? '' : LEGACY_JOB_EXECUTION}if (!isJob && healthPath) {
+  const response = await fetch(new URL(healthPath, after.uri));
+  // Mirrors healthCheckFailed in release-health.ts: a declared path on a public service must answer below 400.
+  if (response.status >= (process.env.HYPERVIBE_HEALTH_STRICT === '1' ? 400 : 500)) throw new Error(healthPath + ' returned HTTP ' + response.status);
+  console.log('Health ' + healthPath + ': HTTP ' + response.status);
+}
+console.log('Released ' + image + ' to ' + resource + (isJob ? ' (next scheduled run)' : after.uri ? ' at ' + after.uri : ''));
+`.trim(); }
+
+// These checks are opt-in so existing branch-release workflows retain their reviewed bytes.
+const GCP_IDENTITY_CHECK = String.raw`
+${assertGcpPromotionWorkloadIdentity.toString()}
+function assertIdentity(value) {
+  assertGcpPromotionWorkloadIdentity(value, process.env.GCP_PROJECT, process.env.GCP_PROJECT_NUMBER,
+    process.env.GCP_REGION, kind, resource, process.env.HYPERVIBE_RESOURCE_UID);
+}
+${assertGcpPromotionWorkloadReady.toString()}
+assertIdentity(current);
+assertGcpPromotionWorkloadReady(current, kind);
+`;
+const GCP_PREFLIGHT = String.raw`
+if (process.env.HYPERVIBE_MIGRATION_COMMAND && ((current.template?.taskCount ?? 1) !== 1 || current.template?.template?.maxRetries !== 0
+  || JSON.stringify(containers[0].command) !== JSON.stringify(['/bin/sh'])
+  || JSON.stringify(containers[0].args) !== JSON.stringify(['-lc', process.env.HYPERVIBE_MIGRATION_COMMAND]))) throw new Error('The applied job command differs from the reviewed production migration.');
+if (process.env.HYPERVIBE_VERIFY_IMAGE === '1') {
+  if (containers[0].image !== image) throw new Error('A workload changed before production release verification finished.');
+  process.exit(0);
+}
+if (process.env.HYPERVIBE_PREFLIGHT === '1') process.exit(0);
+if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
+  const runMigration = ${runPromotionMigration.toString()};
+  await runMigration({ current, base, call, image, resource, assertIdentity, assertReady: assertGcpPromotionWorkloadReady, env: process.env });
+  process.exit(0);
+}
+`;
+const LEGACY_JOB_EXECUTION = String.raw`// A release command (migrations) runs now on the new image and must succeed before any service is switched.
 if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
   // A run of this exact image that is still going (an earlier attempt of this workflow) is waited on, never doubled.
   const listed = await call(base + '/executions?pageSize=100');
@@ -57,11 +104,6 @@ if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
   console.log('Release command finished on ' + image);
   process.exit(0);
 }
-if (!isJob && healthPath) {
-  const response = await fetch(new URL(healthPath, after.uri));
-  // Mirrors healthCheckFailed in release-health.ts: a declared path on a public service must answer below 400.
-  if (response.status >= (process.env.HYPERVIBE_HEALTH_STRICT === '1' ? 400 : 500)) throw new Error(healthPath + ' returned HTTP ' + response.status);
-  console.log('Health ' + healthPath + ': HTTP ' + response.status);
-}
-console.log('Released ' + image + ' to ' + resource + (isJob ? ' (next scheduled run)' : after.uri ? ' at ' + after.uri : ''));
-`.trim();
+`;
+export const RELEASE_SCRIPT = releaseScript(false);
+export const GCP_PROMOTION_RELEASE_SCRIPT = releaseScript(true);

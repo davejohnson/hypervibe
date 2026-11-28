@@ -33,11 +33,21 @@ export function previewCiReleaseAccess(gcpProjectId: string, repository: string,
     releaseIdentity: ciReleaseIdentity(gcpProjectId),
     repository,
     grants: [
-      ...releases.map(scope => `${repository}/.github/workflows/hypervibe-release-${scope.environmentName}.yml on ${scope.branch}, environment ${scope.environmentName} (${scope.autoDeploy ? 'push or manual' : 'manual only'}), may use ${ciReleaseIdentity(gcpProjectId)}`),
+      ...releases.map(scope => `${repository}/.github/workflows/hypervibe-release-${scope.environmentName}.yml on ${scope.branch}, environment ${scope.environmentName} (${scope.promotionSource ? `manual promotion from ${scope.promotionSource} through hypervibe-promote-${scope.environmentName}.yml at ${scope.policySha}` : scope.autoDeploy ? 'push or manual' : 'manual only'}), may use ${ciReleaseIdentity(gcpProjectId)}`),
       ...CI_RELEASE_PROJECT_ROLES.map((role) => `${ciReleaseIdentity(gcpProjectId)}: ${role}`),
       `${ciReleaseIdentity(gcpProjectId)} may deploy revisions that run as ${runtimeServiceAccountEmail}`,
     ],
   };
+}
+
+export async function readCiProjectNumber(token: string, gcpProjectId: string): Promise<string> {
+  const response = await readGcpProject(token, gcpProjectId);
+  if (!response.ok) throw new Error(`Could not read the GCP project (HTTP ${response.status}).`);
+  const body = await response.json() as { name?: string; projectId?: string; state?: string };
+  if (!/^projects\/[0-9]+$/.test(body.name ?? '') || body.projectId !== gcpProjectId || body.state !== 'ACTIVE') {
+    throw new Error('The CI setup project identity could not be verified.');
+  }
+  return body.name!.slice('projects/'.length);
 }
 
 /** Plans or applies the exact reviewed CI identity configuration through OpenTofu. */
@@ -54,13 +64,7 @@ export async function grantCiReleaseAccess(params: {
   gcpSetupPlanId?: string;
   requireBrowserApproval?: boolean;
 }) {
-  const response = await readGcpProject(params.adminToken, params.gcpProjectId);
-  if (!response.ok) throw new Error(`Could not read the GCP project (HTTP ${response.status}).`);
-  const body = await response.json() as { name?: string; projectId?: string; state?: string };
-  if (!/^projects\/[0-9]+$/.test(body.name ?? '') || body.projectId !== params.gcpProjectId || body.state !== 'ACTIVE') {
-    throw new Error('The CI setup project identity could not be verified.');
-  }
-  const projectNumber = body.name!.slice('projects/'.length);
+  const projectNumber = await readCiProjectNumber(params.adminToken, params.gcpProjectId);
   const configuration = buildCiReleaseConfiguration({ ...params, projectId: params.gcpProjectId, projectNumber });
   const result = await runGcpProjectSetup({
     projectId: params.projectId, projectName: params.projectName, gcpProjectId: params.gcpProjectId,
@@ -200,7 +204,10 @@ export function releaseWorkflowPath(repositoryRoot: string, environmentName: str
 
 /** Writes the workflow into the local repository; returns whether the content changed. */
 export function writeReleaseWorkflow(repositoryRoot: string, environmentName: string, content: string): { path: string; changed: boolean } {
-  const target = releaseWorkflowPath(repositoryRoot, environmentName);
+  return writeManagedWorkflowFile(releaseWorkflowPath(repositoryRoot, environmentName), content);
+}
+
+export function writeManagedWorkflowFile(target: string, content: string): { path: string; changed: boolean } {
   const existing = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : undefined;
   if (existing === content) return { path: target, changed: false };
   fs.mkdirSync(path.dirname(target), { recursive: true });

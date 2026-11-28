@@ -52,6 +52,35 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
+/** Check both the recorded policy and the one in the checkout during a policy change. */
+export function hasProtectedCopyPolicy(spec: unknown, environmentName: string): boolean {
+  const environment = asRecord(asRecord(asRecord(spec)?.environments)?.[environmentName]);
+  return asRecord(environment?.hosting)?.provider === 'cloudrun' && !!asRecord(environment?.deploy)?.promoteFrom;
+}
+
+function hasPromotionBinding(engine: Record<string, unknown> | null): boolean {
+  return !!engine?.promotion || Object.hasOwn(asRecord(engine?.migration) ?? {}, 'promotionCopySignature');
+}
+
+function fields(record: Record<string, unknown> | null, keys: string[]): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record ?? {}).filter(([key]) => keys.includes(key)));
+}
+
+/** Only a local migration may establish a protected copy or mark a final restore complete. */
+export function retainProtectedMigration(existing: Record<string, unknown>, bindings: Record<string, unknown>,
+  protectedPolicy: boolean): Record<string, unknown> {
+  const localEngine = asRecord(existing.engine);
+  const incomingEngine = asRecord(bindings.engine);
+  if (!protectedPolicy && !hasPromotionBinding(localEngine) && !hasPromotionBinding(incomingEngine)) return bindings;
+  const local = asRecord(localEngine?.migration);
+  if (!local && !Object.hasOwn(incomingEngine ?? {}, 'migration')) return bindings;
+  const engine = { ...(incomingEngine ?? localEngine) };
+  const migration = local ?? fields(asRecord(engine.migration), ['from', 'sourceMajor', 'previousCopy']);
+  if (Object.keys(migration).length) engine.migration = migration;
+  else delete engine.migration;
+  return { ...bindings, engine };
+}
+
 function repoOmittedBindingKey(key: string): boolean {
   return LOCAL_ONLY_BINDING_KEYS.has(key)
     || SENSITIVE_KEY_PATTERN.test(key.replace(/[^a-z0-9]/gi, ''));
@@ -138,7 +167,8 @@ function retainDomainRecovery(
  */
 export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
-  repoBindings: Record<string, unknown>
+  repoBindings: Record<string, unknown>,
+  protectedCopyPolicy = false
 ): Record<string, unknown> {
   const repoEngine = asRecord(repoBindings.engine);
   if (Object.hasOwn(repoEngine ?? {}, 'runtimeSecretGrantOrigins') || (Object.hasOwn(repoBindings, 'engine') && !repoEngine
@@ -270,7 +300,7 @@ export function mergeRepoPlatformBindings(
   if (!parseServiceVolumeBindings({ platformBindings: merged })) {
     throw new Error('Malformed or duplicate merged service-volume identity; refusing to overwrite recovery state.');
   }
-  return merged;
+  return retainProtectedMigration(existing, merged, protectedCopyPolicy);
 }
 
 function sanitize(value: unknown): unknown {
@@ -401,7 +431,7 @@ export function readRepoBindingsFile(projectName?: string, startDir = primaryWor
 }
 
 export function writeRepoBindingsForEnvironment(project: Project, environment: Environment, startDir = primaryWorkspaceDirectory(),
-  loadComponents?: () => Component[]): string | null {
+  loadComponents?: () => Component[], loadRecordedSpec?: () => unknown): string | null {
   if (!repoSpecEnabled()) {
     return null;
   }
@@ -420,13 +450,31 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
 
   const file = bindingsPath(root);
   const raw = readExistingBindingsFile(file);
-  const current = raw === null
-    ? { version: 1 as const, project: project.name, environments: {} }
+  const current: RepoBindingsFile = raw === null
+    ? { version: 1, project: project.name, environments: {} }
     : parseDocument(parseBindingsJson(raw, file), file, project.name);
 
   const platformBindings = presentStorageInstanceScopes(
     sanitizePlatformBindings(environment.platformBindings)
   );
+  const engine = asRecord(platformBindings.engine);
+  const publishedEngine = asRecord(current.environments[environment.name]?.platformBindings.engine);
+  const local = asRecord(engine?.migration);
+  const published = asRecord(publishedEngine?.migration);
+  if (engine && (local || published) && (hasPromotionBinding(engine) || hasPromotionBinding(publishedEngine)
+    || hasProtectedCopyPolicy(spec, environment.name) || hasProtectedCopyPolicy(loadRecordedSpec?.(), environment.name))) {
+    // A fresh collaborator can publish ordinary binding changes without erasing the workflow's reference.
+    // That reference is never imported as a current local receipt. A new local attempt always supersedes it.
+    const copy = local && ['copyAttempt', 'copiedAt', 'database', 'storage', 'finalCopy', 'promotionCopySignature']
+      .some(key => Object.hasOwn(local, key)) ? local : published;
+    const database = asRecord(copy?.database);
+    const migration = { ...fields(local ?? published, ['from', 'sourceMajor', 'previousCopy']),
+      ...fields(copy, ['copiedAt', 'promotionCopySignature']),
+      ...(copy && Object.hasOwn(copy, 'copyAttempt') && { copyAttempt: fields(asRecord(copy.copyAttempt), ['id', 'startedAt', 'status']) }),
+      ...(database && { database: { match: database.match === true } }) };
+    if (Object.keys(migration).length) engine.migration = migration;
+    else delete engine.migration;
+  }
   const backupPolicy = spec?.environments[environment.name]?.backups;
   if (Object.keys(platformBindings).length && backupPolicy?.mode === 'daily' && backupPolicy.runnerImage) {
     if (!loadComponents) throw new Error('Managed backup bindings require a fresh component inventory.');

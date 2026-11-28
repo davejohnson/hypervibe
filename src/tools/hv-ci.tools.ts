@@ -19,6 +19,7 @@ import { normalizeGitRemoteIdentity } from '../lib/git-remote.js';
 import type { CiOperationsPort, CodeRepositoryIdentity } from '../domain/ports/devops.port.js';
 import { ignoredOptionWarnings } from '../application/command-options.js';
 import { pendingCredentialUpdate } from '../domain/services/credential-lifecycle.service.js';
+import { dispatchIfEnginePromotion } from '../application/engine-promotion.js';
 
 type ConnectedGitHubAdapter = Extract<
   ReturnType<typeof getGitHubAdapter>,
@@ -586,6 +587,12 @@ export function registerHvCiTools(commands: CommandRegistrar, ctx: CommandContex
       }
       const selectedDefinition = definition ?? workflow;
       if (!selectedDefinition) throw new HvError('VALIDATION', 'definition is required.');
+      try {
+        const promotion = await dispatchIfEnginePromotion(ctx, project, { definition: selectedDefinition, repo: repoOverride, ref, sha, inputs });
+        if (promotion) return commandSuccess(promotion, { hint: 'Promotion was dispatched. Check hv_ci_status for the result.', next: ['hv_ci_status'] });
+      } catch (error) {
+        throw new HvError('VALIDATION', error instanceof Error ? error.message : 'The staging promotion could not be dispatched.');
+      }
       const canonical = await canonicalCiContextOrNull(ctx, projectRef, repoOverride);
       if (canonical) {
         const selectedRef = ref ?? canonical.repository.defaultBranch;

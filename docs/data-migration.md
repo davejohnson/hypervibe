@@ -51,6 +51,15 @@ Cutover requires an active daily backup with a completed copy from the past
 recovery points. Service volumes and retained databases still need their own
 coverage. The source's verified staging release requirement still applies.
 
+When production promotes from staging and has a database migration command,
+the command must succeed against the final database copy. The cutover saves the
+verified copy and the matching Railway maintenance state together. Publish the
+updated `.hypervibe/bindings.json` on the target release branch and promote
+with `hv_deploy`. After the promotion succeeds, resume `hv_migrate` with
+`cutover: true`. Hypervibe checks the copy, pause and release again before
+sending traffic to Google Cloud. Railway stays in maintenance throughout this
+step, and a retry reuses the same verified copy.
+
 When the cutover review includes a `backupReviewId`, return it with
 `confirmCutover: true` after the user approves the displayed steps. A resumed
 traffic move can reuse the accepted review while its backup terms match.

@@ -21,6 +21,7 @@ import { CommandRegistry } from '../commands.js';
 import { registerHvLaunchTools } from '../../tools/hv-launch.tools.js';
 import { projectSpecSchema } from '../../domain/spec/spec.schema.js';
 import * as infrastructure from '../infrastructure-engine.js';
+import * as promotion from '../engine-promotion.js';
 import * as dnsHosting from '../dns-hosting.js';
 import * as engineSecrets from '../engine-secrets.js';
 import * as cloudPrepare from '../../domain/services/cloud-prepare.js';
@@ -249,6 +250,24 @@ describe('launch exact saved-plan approval', () => {
     expect(result).toMatchObject({ status: 'ready', phase: 'infrastructure' });
     expect(f.apply).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('recognizes an already verified promotion during launch without rebuilding or generating a local workflow', async () => {
+    const f = fixture();
+    const spec = projectSpecSchema.parse({ ...f.spec, gitRemoteUrl: 'https://github.com/example/saved-launch', environments: {
+      tested: { hosting: { provider: 'railway' }, deploy: { strategy: 'branch' }, services: { web: {} } },
+      staging: { ...f.spec.environments.staging, deploy: { strategy: 'branch', autoDeploy: false, promoteFrom: 'tested' } },
+    } });
+    f.plan.mockResolvedValue({ ...f.saved('applied'), actions: [], confirmActions: [] });
+    const current = vi.spyOn(promotion, 'observeEnginePromotion').mockResolvedValue({ results: [
+      { service: 'web', url: 'https://example.run.app', status: 'released', message: 'Verified.' },
+    ] });
+    const build = vi.spyOn(infrastructure, 'releaseEngineServices');
+    const result = await launchEnvironment(f.ctx, { project: f.project, environmentName: 'staging', specRevision: 1, spec });
+    expect(result).toMatchObject({ status: 'live', urls: { web: 'https://example.run.app' } });
+    expect(current).toHaveBeenCalledTimes(1);
+    expect(build).not.toHaveBeenCalled();
+    expect(f.apply).not.toHaveBeenCalled();
   });
 
 

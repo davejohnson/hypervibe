@@ -43,6 +43,7 @@ import { CommandRegistry } from '../../application/commands.js';
 import { parseCliInvocation } from '../../interfaces/cli/parser.js';
 import { createToolContext } from '../../application/context.js';
 import { registerHvDeployTools } from '../hv-deploy.tools.js';
+import * as engineRelease from '../../application/infrastructure-engine.js';
 
 // Synthetic hosting isolates orchestration safety from removed cloud resource CRUD.
 const fixtureHostingMetadata = providerRegistry.getMetadata('railway')!;
@@ -305,6 +306,23 @@ describe('hv_deploy', () => {
     expect(result.error.code).toBe('NOT_FOUND');
     expect(result.hint).toContain('hv_spec');
     await t.close();
+  });
+
+  it('never builds locally or releases a subset when a cloud target takes its image from staging', async () => {
+    const project = new ProjectRepository().create({ name: 'promoted-app', gitRemoteUrl: 'https://github.com/example/promoted-app' });
+    new EnvironmentRepository().create({ projectId: project.id, name: 'production' });
+    new SpecStore().replace(project, { version: 1, project: project.name, gitRemoteUrl: project.gitRemoteUrl, environments: {
+      staging: { hosting: { provider: 'railway' }, deploy: { strategy: 'branch', trigger: 'ci' }, services: { web: {} } },
+      production: { hosting: { provider: 'cloudrun' }, deploy: { strategy: 'branch', trigger: 'ci', autoDeploy: false, promoteFrom: 'staging' }, services: { web: {} } },
+    } });
+    const build = vi.spyOn(engineRelease, 'releaseEngineServices').mockResolvedValue({ blocked: 'Local build invoked' });
+    const t = await makeClient();
+    try {
+      const result = await t.call('hv_deploy', { project: project.name, env: 'production', confirm: true, services: ['web'] });
+      expect(result.ok).toBe(false);
+      expect(result.error.message).toMatch(/whole.*staging|entire.*staging/i);
+      expect(build).not.toHaveBeenCalled();
+    } finally { await t.close(); }
   });
 
   it.each([['railway', 'production'], ['railway', 'staging']])('routes %s %s deploy guidance through the reviewed branch default', async (provider, environmentName) => {
