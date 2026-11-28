@@ -275,9 +275,6 @@ export function mergeRepoPlatformBindings(
       throw new Error('Conflicting completed service instance identity.');
     merged.services = { ...asRecord(merged.services), [name]:localService };
   }
-  if (!parseServiceVolumeBindings({ platformBindings: merged })) {
-    throw new Error('Malformed or duplicate merged service-volume identity; refusing to overwrite recovery state.');
-  }
   const released = asRecord(existing.edgeDomainReleased);
   if (typeof released?.hostname === 'string') {
     // Export can lag the atomic move. Keep a stale source checkout from reclaiming the target's live hostname or DNS state.
@@ -288,6 +285,9 @@ export function mergeRepoPlatformBindings(
     const service = typeof released.sourceService === 'string' ? asRecord(services?.[released.sourceService]) : null;
     if (services && service && Array.isArray(service.customDomains)) merged.services = { ...services,
       [String(released.sourceService)]: { ...service, customDomains: service.customDomains.filter(name => name !== released.hostname) } };
+  }
+  if (!parseServiceVolumeBindings({ platformBindings: merged })) {
+    throw new Error('Malformed or duplicate merged service-volume identity; refusing to overwrite recovery state.');
   }
   return merged;
 }
