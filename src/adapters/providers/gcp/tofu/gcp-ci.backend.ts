@@ -1,9 +1,10 @@
+import { isDeepStrictEqual } from 'node:util';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { buildGcpPreparationConfiguration } from './gcp-setup.backend.js';
 
 import { assertEngineCiIntent } from '../../../../domain/spec/engine-ci.js';
 
-export interface GcpCiReleaseScope { environmentName: string; branch: string; autoDeploy: boolean; promotionSource?: string }
+export interface GcpCiReleaseScope { environmentName: string; branch: string; autoDeploy: boolean; promotionSource?: string; policySha?: string }
 
 export const CI_RELEASE_ACCOUNT_ID = 'hypervibe-release';
 export const CI_POOL_ID = 'hypervibe-github';
@@ -38,8 +39,11 @@ export function buildCiReleaseConfiguration(input: {
     const ref = `refs/heads/${release.branch}`;
     const workflow = `${input.repository}/.github/workflows/hypervibe-release-${release.environmentName}.yml@${ref}`;
     const events = release.autoDeploy ? "(assertion.event_name == 'push' || assertion.event_name == 'workflow_dispatch')" : "assertion.event_name == 'workflow_dispatch'";
-    if (release.promotionSource && (!/^[A-Za-z0-9_-]+$/.test(release.promotionSource) || release.autoDeploy)) throw new Error('Invalid manual promotion scope.');
-    const promotion = release.promotionSource ? ` && assertion.workflow == 'Promote ${release.promotionSource} to ${release.environmentName}'` : '';
+    if (release.promotionSource && (!/^[A-Za-z0-9_-]+$/.test(release.promotionSource) || release.autoDeploy || !/^[a-f0-9]{40}$/.test(release.policySha ?? ''))) {
+      throw new Error('Protected CI access requires the exact published reusable workflow commit.');
+    }
+    const reusable = `${input.repository}/.github/workflows/hypervibe-promote-${release.environmentName}.yml@${release.policySha}`;
+    const promotion = release.promotionSource ? ` && assertion.job_workflow_ref == '${reusable}' && assertion.job_workflow_sha == '${release.policySha}'` : '';
     return `(assertion.environment == '${release.environmentName}' && assertion.ref == '${ref}' && assertion.workflow_ref == '${workflow}' && ${events}${promotion})`;
   });
   const condition = `assertion.repository_id == '${input.repositoryId}' && assertion.repository == '${input.repository}' && (${scopes.join(' || ')})`;
@@ -79,4 +83,20 @@ export function buildCiReleaseConfiguration(input: {
     depends_on: ['google_service_account.ci_release', 'google_iam_workload_identity_pool_provider.ci_github'],
   }, `GitHub release access for ${input.repository}`);
   return { files: { ...shared.files, 'ci-release.tf.json': { resource } }, resources: { ...shared.resources, ...resources } };
+}
+
+/** Public repository bindings cannot establish that Google accepted this policy. Check the private provider state. */
+export function appliedCiPromotionPolicy(state: unknown, configuration: EngineConfiguration, provider: string): boolean {
+  type Policy = { name?: string; project?: string; disabled?: boolean; attribute_condition?: string; attribute_mapping?: unknown;
+    oidc?: Array<{ issuer_uri?: string; allowed_audiences?: string[]; jwks_json?: string }> };
+  type Row = { mode?: string; type?: string; address?: string; tainted?: boolean; values?: Policy };
+  const type = 'google_iam_workload_identity_pool_provider';
+  const rows = (state as { values?: { root_module?: { resources?: Row[] } } })?.values?.root_module?.resources;
+  const matches = rows?.filter(row => row.mode === 'managed' && row.type === type && row.address === type + '.ci_github' && !row.tainted);
+  const live = matches?.length === 1 && matches[0]?.values;
+  const desired = (configuration.files['ci-release.tf.json'] as { resource?: Record<string, Record<string, Policy>> })?.resource?.[type]?.ci_github;
+  return !!desired?.attribute_condition && !!live && live.name === provider && live.project === desired.project && !live.disabled
+    && live.attribute_condition === desired.attribute_condition && isDeepStrictEqual(live.attribute_mapping, desired.attribute_mapping)
+    && live.oidc?.length === 1 && live.oidc[0]?.issuer_uri === 'https://token.actions.githubusercontent.com'
+    && !live.oidc[0].allowed_audiences?.length && !live.oidc[0].jwks_json;
 }

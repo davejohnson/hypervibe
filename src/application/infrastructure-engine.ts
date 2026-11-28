@@ -190,12 +190,14 @@ export interface EngineBinding {
   /** Safe identities projected from the applied engine state for an explicitly protected release. */
   promotion?: import('./gcp-promotion-workflow.js').GcpPromotionIdentity;
   /** Keyless CI release trust granted for this exact repository. */
-  ci?: { repository: string; trust?: string; provider: string; releaseIdentity: string };
+  ci?: { repository: string; trust?: string; provider: string; releaseIdentity: string; policySha?: string };
   /** Current copy evidence is cleared before replacement; prior evidence is historical only. */
   migration?: MigrationCopyEvidence & {
     from: string;
     sourceMajor?: number;
     copyAttempt?: { id: string; startedAt: string; status: 'incomplete' | 'complete' };
+    /** Signed by the deployment connection after a verified database copy for protected CI. */
+    promotionCopySignature?: string;
     finalCopy?: import('./migration-cutover-readiness.js').FinalCopyReceipt;
     previousCopy?: MigrationCopyEvidence;
   };

@@ -37,11 +37,15 @@ function promote(contract, candidate, env) {
         throw new Error('The promoted registry manifest differs from staging. No workloads were switched.');
       }
     }
-    if (job) run(job, { HYPERVIBE_RUN_JOB: '1' });
+    const migrationReceipt = join(temporary, 'migration.json');
+    if (job) run(job, { HYPERVIBE_RUN_JOB: '1', HYPERVIBE_MIGRATION_RECEIPT: migrationReceipt,
+      HYPERVIBE_MIGRATION_CONTEXT: JSON.stringify({ repository: contract.repository, environment: contract.environment,
+        copyAttemptId: candidate.copyAttemptId, copiedAt: candidate.copiedAt }) });
     for (const item of targets) run(item);
     for (const item of targets) run(item, { HYPERVIBE_VERIFY_IMAGE: '1' });
     const receipt = { version: 1, repository: contract.repository, environment: contract.environment, workflowSha: env.GITHUB_SHA,
       runId: Number(env.GITHUB_RUN_ID), runAttempt: Number(env.GITHUB_RUN_ATTEMPT), source: candidate.source, gcpProjectId: contract.gcpProjectId, region: contract.region,
+      ...(job && { migration: JSON.parse(readFileSync(migrationReceipt, 'utf8')) }),
       services: targets.map(({ name, resource, kind, image, uid }) => ({ name, resource, kind, image, uid })) };
     writeFileSync(join(env.RUNNER_TEMP, 'promotion.json'), JSON.stringify(receipt) + '\n', { mode: 0o600 });
   } finally { rmSync(temporary, { recursive: true, force: true }); }

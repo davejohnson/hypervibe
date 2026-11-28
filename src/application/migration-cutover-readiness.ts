@@ -95,9 +95,9 @@ async function cutoverProtection(project: Project, origin: Environment, source: 
       problems.push(`${targetName} needs the source's managed daily backup policy.`);
     }
   }
-  const staging = source.deploy?.promoteFrom;
+  const staging = source.deploy?.promoteFrom ?? target.deploy?.promoteFrom;
   if (staging) {
-    const tests = source.deploy?.promotionTests;
+    const tests = source.deploy?.promoteFrom ? source.deploy.promotionTests : target.deploy?.promotionTests;
     if (unsupported({ deploy: { strategy: 'branch', trigger: 'ci', autoDeploy: false, promoteFrom: staging, promotionTests: tests } })) {
       problems.push(`The engine for ${targetName} cannot enforce promotion of the verified release from ${staging}${tests ? ' and its required test workflow' : ''}.`);
     } else if (target.deploy?.promoteFrom !== staging || tests && target.deploy.promotionTests?.workflow !== tests.workflow) {
@@ -125,8 +125,8 @@ export interface FinalCopyReceipt {
 }
 
 export function finalCopyReceipt(source: Environment, target: Environment, domain: string, targetService: string,
-  pauseFingerprint: string | undefined, backupReviewId?: string): FinalCopyReceipt | undefined {
-  const migration = (target.platformBindings.engine as EngineBinding | undefined)?.migration;
+  pauseFingerprint: string | undefined, backupReviewId?: string,
+  migration = (target.platformBindings.engine as EngineBinding | undefined)?.migration): FinalCopyReceipt | undefined {
   if (!pauseFingerprint || migration?.from !== source.name || migration.copyAttempt?.status !== 'complete' || !migration.copiedAt) return undefined;
   return { sourceEnvironmentId: source.id, targetEnvironmentId: target.id, domain, targetService, pauseFingerprint,
     copyAttemptId: migration.copyAttempt.id, copiedAt: migration.copiedAt, ...(backupReviewId && { backupReviewId }),
@@ -153,6 +153,14 @@ function observedPause(source: Environment, spec: EnvironmentSpec, domain: strin
       && action.metadata.serviceId === snapshot.serviceId && action.metadata.workloadKind === service.workloadKind)) return undefined;
   }
   return canonicalJsonSha256({ source: source.id, updatedAt: binding.updatedAt, edge: binding.edge, workloads: binding.workloads ?? {} });
+}
+
+/** Seal the restored database to an independently observed pause before its new release can run. */
+export async function currentSourcePause(project: Project, source: Environment, spec: EnvironmentSpec, domain: string) {
+  if (spec.domain !== domain || !spec.maintenance?.enabled || spec.maintenance.mode !== 'application'
+    || spec.maintenance.page === 'off' || spec.domainTarget) return undefined;
+  const plan = await new PlanService().plan(project, source.name, { scope: 'full' });
+  return 'error' in plan || plan.blocked?.length ? undefined : observedPause(source, spec, domain, plan.actions);
 }
 
 export async function migrationCutoverReadiness(project: Project, environment: Environment, source: EnvironmentSpec,

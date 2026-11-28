@@ -1,5 +1,7 @@
 import { ProjectRepository } from '../adapters/db/repositories/project.repository.js';
+import { ProjectSpecRepository } from '../adapters/db/repositories/spec.repository.js';
 import { statSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { EnvironmentRepository } from '../adapters/db/repositories/environment.repository.js';
 import { ServiceRepository } from '../adapters/db/repositories/service.repository.js';
@@ -15,7 +17,7 @@ import type { Environment } from '../domain/entities/environment.entity.js';
 import { resolveProject } from '../domain/services/resolve-project.js';
 import { detectGitRemoteUrl, parseGitHubRepoFromRemote } from '../lib/git-remote.js';
 import { findRepoRoot, readRepoSpecFile } from '../domain/spec/repo-spec-file.js';
-import { mergeRepoPlatformBindings, readRepoBindingsFile } from '../domain/spec/repo-bindings-file.js';
+import { hasProtectedCopyPolicy, mergeRepoPlatformBindings, readRepoBindingsFile, retainProtectedMigration } from '../domain/spec/repo-bindings-file.js';
 import { HvError } from './results.js';
 import { currentWorkspaceDirectories, selectWorkspaceDirectory } from '../lib/workspace-context.js';
 
@@ -102,13 +104,17 @@ export function createCommandContext(): CommandContext {
     // When the file was last written is read once, before anything is saved: saving rewrites the file, and a file made
     // fresh by this very load must not vouch for itself.
     const fileTime = writtenAt(bindings.path);
+    const checkoutSpec = readRepoSpecFile(dirname(bindings.path))?.spec;
+    const recordedSpec = new ProjectSpecRepository().findLatest(project.id)?.document;
     const take: Array<() => void> = [];
     for (const [envName, entry] of Object.entries(bindings.document.environments)) {
       const existing = repos.environments.findByProjectAndName(project.id, envName);
       const platformBindings = entry.platformBindings;
+      const protectedCopy = checkoutSpec?.project === project.name && hasProtectedCopyPolicy(checkoutSpec, envName)
+        || hasProtectedCopyPolicy(recordedSpec, envName);
       if (readOnly) {
         if (!existing || !isDeepStrictEqual(existing.platformBindings,
-          mergeRepoPlatformBindings(existing.platformBindings, platformBindings))) {
+          mergeRepoPlatformBindings(existing.platformBindings, platformBindings, protectedCopy))) {
           throw new HvError('VALIDATION', 'Repository bindings differ from recorded environment state.', {
             hint: 'Reconcile the reviewed bindings before read-only inspection; preview does not adopt provider identities or create environments.',
           });
@@ -116,11 +122,12 @@ export function createCommandContext(): CommandContext {
         continue;
       }
       if (!existing) {
-        take.push(() => { repos.environments.create({ projectId: project.id, name: envName, platformBindings }); });
+        const initial = retainProtectedMigration({}, platformBindings, protectedCopy);
+        take.push(() => { repos.environments.create({ projectId: project.id, name: envName, platformBindings: initial }); });
         continue;
       }
       if (JSON.stringify(existing.platformBindings) !== JSON.stringify(platformBindings)) {
-        const merged = mergeRepoPlatformBindings(existing.platformBindings, platformBindings);
+        const merged = mergeRepoPlatformBindings(existing.platformBindings, platformBindings, protectedCopy);
         // A file that would change what is saved is taken in only if it was written after the saved bindings last
         // changed (a pull, an edit). One written before that is an older copy, as a checkout that was never updated
         // holds: taking it in would put back provider identities Hypervibe has replaced since. The whole file is then
@@ -130,7 +137,13 @@ export function createCommandContext(): CommandContext {
             hint: 'If this checkout is behind, run git pull, then run this again. If the checkout is up to date and the saved bindings are the ones to keep, delete that file and run this again; Hypervibe writes it afresh.',
           });
         }
-        take.push(() => { repos.environments.update(existing.id, { platformBindings: merged }); });
+        take.push(() => {
+          // A migration on another process can commit a newer copy after the checkout was read.
+          if (!repos.environments.replacePlatformBindingsIfUnchanged(existing, merged)) {
+            throw new HvError('VALIDATION', 'The saved environment bindings changed while the repository was being read. Retry with the current bindings.');
+          }
+          repos.environments.syncRepoBindingsForId(existing.id);
+        });
       }
     }
     for (const save of take) save();

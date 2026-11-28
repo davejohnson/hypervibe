@@ -16,7 +16,8 @@ import { adapterFactory } from '../domain/services/adapter.factory.js';
 import { acquireManagedDatabaseAccess, type DatabaseAccessLease } from '../domain/services/database-access.service.js';
 import { databaseEnvAliasKeys } from '../domain/services/database-env.js';
 import { parsePostgresDatabaseIdentity } from '../domain/services/postgres-database-identity.js';
-import { finalCopyReceipt, forwardedCutover, migrationCutoverReadiness, protectForwardingTarget, reviewCutover, targetWriteRecovery, verifiedFinalCopy,
+import { parseGitHubRepoFromRemote } from '../lib/git-remote.js';
+import { currentSourcePause, finalCopyReceipt, forwardedCutover, migrationCutoverReadiness, protectForwardingTarget, reviewCutover, targetWriteRecovery, verifiedFinalCopy,
   type CutoverBackupReview, type FinalCopyReceipt } from './migration-cutover-readiness.js';
 import { desiredDomainServiceName } from '../domain/services/domain-attach-policy.js';
 import { migrationVersionReceiptSchema, type MigrationSourceInventory } from '../domain/plan/migration-version.contract.js';
@@ -25,11 +26,13 @@ import { migrationDatabaseBindingConflict } from './migration-database-binding.j
 import { readHostingEnvVars } from '../domain/services/hosting-env.service.js';
 import { bucketSummaries, compareMigrationBucket, hasVerifiedBuckets, missingDeployedBucket, prepareMigrationBuckets, selectMigrationBuckets } from './migration-storage.js';
 import { launchEnvironment, type LaunchResult } from './launch.js';
+import { observeEnginePromotion } from './engine-promotion.js';
 import {
   ENGINE_DATABASE_URL_KEY,
   engineSecretId,
   observeSecret,
   resolveEngineContext,
+  releaseCommandFor,
   writeSecretVersion,
   type EngineBinding,
   type MigrationCopyEvidence,
@@ -340,8 +343,17 @@ export async function migrateEnvironment(ctx: CommandContext, params: MigratePar
   }
 }
 
+interface ProtectedFinalRestore {
+  domain: string;
+  web: string;
+  pauseFingerprint: string;
+  revision: number;
+  backupReviewId?: string;
+}
+
 async function runMigration(ctx: CommandContext, params: MigrateParams, lease: MigrationTargetLease,
-  suppliedPlan = params.planId ? new ConvergeExecutor().loadPlan(params.planId) : undefined): Promise<MigrateResult> {
+  suppliedPlan = params.planId ? new ConvergeExecutor().loadPlan(params.planId) : undefined,
+  finalRestore?: ProtectedFinalRestore): Promise<MigrateResult> {
   if (suppliedPlan && 'error' in suppliedPlan) return { status: 'blocked', message: suppliedPlan.error };
   const store = new SpecStore();
   const source = selectMigrationSource(ctx, params, store);
@@ -653,13 +665,18 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     const change = selectionProblem();
     if (change) return { status: 'blocked', message: change };
     const expected = environment();
+    const protectsDatabase = !!(sourceSpec.database && targetSpec.deploy?.promoteFrom && releaseCommandFor(targetSpec));
+    const copyRepository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? spec.gitRemoteUrl);
+    const releaseJob = (expected.platformBindings.engine as EngineBinding | undefined)?.releaseJob;
+    if (protectsDatabase && (!copyRepository || !releaseJob)) return { status: 'blocked',
+      message: 'Apply the Google Cloud release-command job and verify its GitHub repository before copying the protected database.' };
     const prior = migration();
     const previousCopy = prior?.copiedAt
       ? { copiedAt: prior.copiedAt, ...(prior.database ? { database: prior.database } : {}), ...(prior.storage ? { storage: prior.storage } : {}) }
       : prior?.previousCopy;
     const copyAttempt = { id: randomUUID(), startedAt: new Date().toISOString(), status: 'incomplete' as const };
     if (!persistCopy(expected, { ...prior, from: params.from, copyAttempt,
-      copiedAt: undefined, finalCopy: undefined, database: undefined, storage: undefined, ...(previousCopy ? { previousCopy } : {}) })) {
+      copiedAt: undefined, finalCopy: undefined, promotionCopySignature: undefined, database: undefined, storage: undefined, ...(previousCopy ? { previousCopy } : {}) })) {
       return { status: 'blocked', message: 'Migration state changed before copying started. Review the latest migration state before retrying.' };
     }
     const superseded = () => migration()?.copyAttempt?.id !== copyAttempt.id || migration()?.copyAttempt?.status !== 'incomplete' || !!selectionProblem();
@@ -706,9 +723,30 @@ async function runMigration(ctx: CommandContext, params: MigrateParams, lease: M
     const currentMigration = (current.platformBindings as { engine?: EngineBinding }).engine?.migration;
     if (currentMigration?.from !== params.from || currentMigration.copyAttempt?.id !== copyAttempt.id
       || currentMigration.copyAttempt.status !== 'incomplete') return supersededResult;
-    const completed = { ...currentMigration, copyAttempt: { ...copyAttempt, status: 'complete' as const },
+    const completed: NonNullable<EngineBinding['migration']> = { ...currentMigration, copyAttempt: { ...copyAttempt, status: 'complete' as const },
       copiedAt: new Date().toISOString(), ...(database ? { database } : {}), storage };
+    if (finalRestore) {
+      const saved = store.get(params.project);
+      const origin = ctx.repos.environments.findById(sourceEnvironment.id);
+      const source = saved?.spec.environments[params.from];
+      const target = saved?.spec.environments[params.to];
+      const pause = saved?.revision === finalRestore.revision && origin && source && target
+        && desiredDomainServiceName(target) === finalRestore.web ? await currentSourcePause(params.project, origin, source, finalRestore.domain) : undefined;
+      const receipt = origin && finalCopyReceipt(origin, current, finalRestore.domain, finalRestore.web, pause, finalRestore.backupReviewId, completed);
+      if (!database?.match || !receipt || receipt.pauseFingerprint !== finalRestore.pauseFingerprint
+        || store.get(params.project)?.revision !== finalRestore.revision) return { status: 'blocked',
+        message: 'The final database copy or the source pause could not be verified. Keep the source paused and review the current copy.' };
+      // A restart after this single write can resume without overwriting the database again.
+      completed.finalCopy = receipt;
+    }
+    if (protectsDatabase && database?.match && copyRepository && releaseJob) {
+      if ((current.platformBindings.engine as EngineBinding | undefined)?.releaseJob !== releaseJob) return supersededResult;
+      completed.promotionCopySignature = context.adapter.signVerifiedPromotionCopy({ repository: copyRepository, environment: params.to,
+        gcpProjectId: context.gcpProjectId, region: context.region, job: releaseJob, copyAttemptId: copyAttempt.id, copiedAt: completed.copiedAt! });
+    }
     if (!evidenceMatchesSelection(completed) || !persistCopy(current, completed) || !copyIsCurrent(completed)) return supersededResult;
+    if (finalRestore) return { status: 'verified', target: params.to, dataCopiedAt: completed.copiedAt, database,
+      storage: bucketSummaries(storage).map(bucket => ({ ...bucket, differences: 0 })), message: 'Verified the final copy against the paused source.' };
 
     // 6. Release the app on the target and verify it.
     const released = await launchEnvironment(ctx, launchParams);
@@ -832,7 +870,7 @@ async function removeRailwayExports(token: () => Promise<string>, bucket: string
 
 /** Plans and applies the source environment, accepting only pause and traffic changes. */
 async function applySourceStage(ctx: CommandContext, project: Project, environmentName: string, confirmActions: string[] | undefined,
-  stage: string, revision: number, planId?: string): Promise<'done' | MigrateResult> {
+  stage: string, revision: number, planId?: string, checkRelease?: () => Promise<string | undefined>): Promise<'done' | MigrateResult> {
   const registry = createCommandRegistry(ctx);
   type SourcePlan = { planId: string; blocked?: unknown[]; actions: Array<{ id: string; type: string; reason?: string; requiresConfirm?: boolean; billable?: boolean; dataBearing?: boolean; metadata?: { operation?: string } }> };
   let reviewed: SourcePlan | undefined;
@@ -873,6 +911,11 @@ async function applySourceStage(ctx: CommandContext, project: Project, environme
     const exactApproval = usingReviewedPlan && JSON.stringify([...(confirmActions ?? [])].sort()) === JSON.stringify([...required].sort());
     if (required.length && !exactApproval) {
       return { status: 'needs_confirmation', planId: plan.planId, confirmActions: required, changes: changes.map((action) => ({ id: action.id, change: action.reason ?? action.type })), estimatedMonthlyCost: [] };
+    }
+    if (checkRelease) {
+      const problem = await checkRelease();
+      if (problem) return { status: 'blocked', message: problem };
+      if (new SpecStore().get(project)?.revision !== revision) return { status: 'blocked', message: 'The cutover configuration changed while verifying the release. Review the current traffic move again.' };
     }
     const applied = await registry.get('hv_apply')!.execute({ project: project.id, planId: plan.planId, ...(required.length ? { confirmActions: required } : {}) });
     const result = applied.data as { applied?: boolean; error?: string } | undefined;
@@ -926,8 +969,16 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
     const routeRevision = routed ? revision : store.merge(params.project, { environments: { [params.from]: {
       domainTarget: { environment: params.to, service: web }, maintenance: { enabled: true, mode: 'application', page: 'off' },
     } } }).revision;
+    const checkRelease = target.deploy?.promoteFrom ? async () => {
+      const dest = environment(params.to);
+      const spec = store.get(params.project)!.spec;
+      const live = await observeEnginePromotion(ctx, params.project, spec, dest);
+      if ('blocked' in live) return live.blocked;
+      const current = verifiedFinalCopy(environment(params.from), environment(params.to), domain, web, receipt.pauseFingerprint);
+      if (current?.copyAttemptId !== receipt.copyAttemptId) return 'The verified final copy changed during promotion. Keep the source paused and review the latest copy before moving traffic.';
+    } : undefined;
     const moved = await applySourceStage(ctx, params.project, params.from, routed ? params.confirmActions : undefined,
-      'traffic move', routeRevision, routed ? params.planId : undefined);
+      'traffic move', routeRevision, routed ? params.planId : undefined, checkRelease);
     if (moved !== 'done') return moved;
     const latest = store.get(params.project)!.spec;
     const destinationNow = environment(params.to);
@@ -940,10 +991,12 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
   const saved = verifiedFinalCopy(environment(params.from), initialDestination, domain, web, readiness.pauseFingerprint);
   if (saved) return moveTraffic(initialDestination, saved, readiness.backupReview);
   if (routed) return { status: 'blocked', message: `Traffic to ${params.to} needs a verified final copy made during the current source pause. Keep the source paused. Reconcile any writes accepted on the target before reviewing a new final copy under the maintenance page.` };
+  const needsPostCopyPromotion = !!(source.database && target.database && target.deploy?.promoteFrom && releaseCommandFor(target));
   const reviewBeforeCopy = (backups?: CutoverBackupReview, paused = false) => reviewCutover(params.from, params.to, domain, web, backups, [
     paused ? `Keep ${params.from} paused behind its maintenance page while making the final copy.`
       : `Pause ${params.from} so ${domain} shows a maintenance page (HTTP 503) and its web and worker services are suspended. Let running jobs and uploads finish first.`,
     `Copy the ${params.from} database and files to ${params.to} again, replacing the earlier copy, and verify every table and file.${needsSourceValue ? ` ${TRANSFER_SECRET_NOTICE}` : ''}`,
+    ...(needsPostCopyPromotion ? [`Publish the verified copy record on the configured release branch and use hv_deploy to promote from ${target.deploy!.promoteFrom} against the restored database. ${domain} stays in maintenance until that release succeeds.`] : []),
     ...(Object.keys(retarget).length ? [`Set ${Object.keys(retarget).join(', ')} on ${params.to} to ${sourceOrigin}, so links and logins use ${domain}.`] : []),
   ]);
   if (!params.confirmCutover || readiness.backupReview?.id !== approvedBackupReviewId) return reviewBeforeCopy(readiness.backupReview, !!readiness.pauseFingerprint);
@@ -969,8 +1022,10 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
   if (Object.keys(retarget).length) store.merge(params.project, { environments: { [params.to]: { envVars: retarget } } });
   const prior = params.planId ? new ConvergeExecutor().loadPlan(params.planId) : undefined;
   const sourceApprovalConsumed = prior && !('error' in prior) && prior.document.environmentName === params.from;
-  const copied = await runMigration(ctx, { ...params, ...(sourceApprovalConsumed ? { planId: undefined, confirmActions: undefined } : {}), cutover: false, confirmCutover: false, copyData: true, refreshData: true }, lease);
-  if (copied.status !== 'migrated') return copied;
+  const finalRestore = needsPostCopyPromotion ? { domain, web, pauseFingerprint: pausedReadiness.pauseFingerprint,
+    revision: store.get(params.project)!.revision, backupReviewId: approvedBackupReviewId } : undefined;
+  const copied = await runMigration(ctx, { ...params, ...(sourceApprovalConsumed ? { planId: undefined, confirmActions: undefined } : {}), cutover: false, confirmCutover: false, copyData: true, refreshData: true }, lease, undefined, finalRestore);
+  if (copied.status !== 'migrated' && !(finalRestore && copied.status === 'verified')) return copied;
   // The copy is proven by its own check: the paused source's checksums against the restored
   // target, taken before the target app can write. A later comparison would race the live target.
   if (copied.database && !copied.database.match) {
@@ -988,9 +1043,10 @@ async function cutoverEnvironment(ctx: CommandContext, params: MigrateParams, le
   if (finalReadiness.problems.length) return { status: 'blocked', message: finalReadiness.problems.join(' ') };
   if (store.get(params.project)?.revision !== current.revision) return { status: 'blocked', message: 'The cutover configuration changed before traffic moved. Review the current cutover again.' };
   const destination = environment(params.to);
-  const receipt = finalCopyReceipt(environment(params.from), destination, domain, web, finalReadiness.pauseFingerprint, approvedBackupReviewId);
+  const receipt = finalRestore ? verifiedFinalCopy(environment(params.from), destination, domain, web, finalReadiness.pauseFingerprint)
+    : finalCopyReceipt(environment(params.from), destination, domain, web, finalReadiness.pauseFingerprint, approvedBackupReviewId);
   if (!receipt || receipt.copyAttemptId === previousAttempt || receipt.pauseFingerprint !== pausedReadiness.pauseFingerprint
-    || !saveFinalCopy(ctx, destination, receipt)) return { status: 'blocked', message: 'The final copy or source pause changed before traffic moved. Keep the source paused and verify the current copy.' };
+    || !finalRestore && !saveFinalCopy(ctx, destination, receipt)) return { status: 'blocked', message: 'The final copy or source pause changed before traffic moved. Keep the source paused and verify the current copy.' };
   const observed = await moveTraffic(destination, receipt, finalReadiness.backupReview);
   return observed.status === 'cut_over' && copied.database ? { ...observed, database: copied.database } : observed;
 }

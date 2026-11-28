@@ -1,3 +1,6 @@
+import { createPrivateKey, createPublicKey, sign } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { createCloudRunRegistryCredentialLifecycle } from './cloudrun-registry-credential.js';
 import { z } from 'zod';
 import type {
@@ -391,6 +394,15 @@ interface ServiceAccountCredentials {
   token_uri: string;
 }
 
+export interface GcpPromotionCopy {
+  repository: string; environment: string; gcpProjectId: string; region: string; job: string; copyAttemptId: string; copiedAt: string;
+}
+const { copyPayload, verifyCopy } = createRequire(import.meta.url)(fileURLToPath(new URL('../../../../templates/managed-ci/gcp-promotion-copy.cjs', import.meta.url))) as {
+  copyPayload(receipt: GcpPromotionCopy): Buffer;
+  verifyCopy(receipt: GcpPromotionCopy, spki: string, signature: unknown): void;
+};
+export const verifyGcpPromotionCopy = verifyCopy;
+
 export class CloudRunAdapter implements
   IProviderAdapter,
   IWorkloadMaintenanceAdapter,
@@ -465,6 +477,24 @@ export class CloudRunAdapter implements
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     const { projectId, credentials, runtimeServiceAccountEmail } = this.credentials;
     return { projectId, credentials, ...(runtimeServiceAccountEmail ? { runtimeServiceAccountEmail } : {}) };
+  }
+
+  private promotionCopySigningKey(project: string) {
+    if (this.credentials?.projectId !== project || this.serviceAccountCreds?.type !== 'service_account') throw new Error('The promotion copy must use the connected Google Cloud deployment identity for this project.');
+    try {
+      const key = createPrivateKey(this.serviceAccountCreds.private_key);
+      if (key.asymmetricKeyType !== 'rsa' || (key.asymmetricKeyDetails?.modulusLength ?? 0) < 2048) throw new Error();
+      return key;
+    } catch { throw new Error('The Google Cloud deployment connection cannot sign a promotion copy receipt.'); }
+  }
+
+  promotionCopyPublicKey(project: string): string {
+    return createPublicKey(this.promotionCopySigningKey(project)).export({ format: 'der', type: 'spki' }).toString('base64');
+  }
+
+  /** Called only after a verified database copy. No private key leaves this connection. */
+  signVerifiedPromotionCopy(receipt: GcpPromotionCopy): string {
+    return sign('RSA-SHA256', copyPayload(receipt), this.promotionCopySigningKey(receipt.gcpProjectId)).toString('base64');
   }
 
   /** OpenTofu engine integration only: short-lived token for retained operational calls. */

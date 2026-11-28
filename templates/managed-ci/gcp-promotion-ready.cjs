@@ -1,4 +1,12 @@
 'use strict';
+function assertGcpPromotionWorkloadIdentity(value, project, projectNumber, region, kind, resource, uid) {
+  const path = '/locations/' + region + '/' + kind + '/' + resource;
+  const byId = value.name === 'projects/' + project + path;
+  const byNumber = /^[1-9][0-9]*$/.test(projectNumber) && value.name === 'projects/' + projectNumber + path;
+  if ((!byId && !byNumber) || !uid || value.uid !== uid || !value.etag || value.deleteTime) {
+    throw new Error('The live Cloud Run resource differs from its applied identity.');
+  }
+}
 // Cloud Run v2 returns either short revision names or scoped revision paths. Resolve both inside this workload.
 function assertGcpPromotionWorkloadReady(value, kind) {
   if (!value.generation || value.observedGeneration !== value.generation || value.reconciling || value.terminalCondition?.state !== 'CONDITION_SUCCEEDED') throw new Error('Cloud Run has not confirmed a successful rollout.');
@@ -14,4 +22,4 @@ function assertGcpPromotionWorkloadReady(value, kind) {
   const allocation = kind === 'services' ? 'TRAFFIC_TARGET_ALLOCATION_TYPE_LATEST' : 'INSTANCE_SPLIT_ALLOCATION_TYPE_LATEST';
   if (!Array.isArray(splits) || splits.length !== 1 || splits[0].type !== allocation || splits[0].percent !== 100 || revisionId(splits[0].revision) !== latest) throw new Error('Cloud Run has not assigned the full rollout to the latest revision.');
 }
-module.exports = { assertGcpPromotionWorkloadReady };
+module.exports = { assertGcpPromotionWorkloadIdentity, assertGcpPromotionWorkloadReady };

@@ -5,6 +5,7 @@ import { parseJsonColumn } from '../json.codec.js';
 import { platformBindingsColumnSchema } from '../column.schemas.js';
 import type { Environment, CreateEnvironmentInput } from '../../../domain/entities/environment.entity.js';
 import { ProjectRepository } from './project.repository.js';
+import { ProjectSpecRepository } from './spec.repository.js';
 import { writeRepoBindingsForEnvironment } from '../../../domain/spec/repo-bindings-file.js';
 import { ComponentRepository } from './component.repository.js';
 
@@ -130,7 +131,8 @@ export class EnvironmentRepository {
       // malformed or unwritable repository export must fail the operation;
       // the SQLite mutation has already retained the exact identity for retry.
       writeRepoBindingsForEnvironment(project, environment, undefined,
-        () => new ComponentRepository().findByEnvironmentId(environment.id));
+        () => new ComponentRepository().findByEnvironmentId(environment.id),
+        () => new ProjectSpecRepository().findLatest(environment.projectId)?.document);
     }
   }
 }

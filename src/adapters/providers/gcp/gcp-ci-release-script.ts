@@ -1,8 +1,12 @@
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 
+const { runPromotionMigration } = createRequire(import.meta.url)(fileURLToPath(new URL('../../../../templates/managed-ci/gcp-promotion-migration.cjs', import.meta.url))) as { runPromotionMigration: Function };
+
 const readyModule = new URL('../../../../templates/managed-ci/gcp-promotion-ready.cjs', import.meta.url);
-export const { assertGcpPromotionWorkloadReady } = createRequire(import.meta.url)(fileURLToPath(readyModule)) as {
+export const { assertGcpPromotionWorkloadReady, assertGcpPromotionWorkloadIdentity } = createRequire(import.meta.url)(fileURLToPath(readyModule)) as {
+  assertGcpPromotionWorkloadIdentity(value: Record<string, unknown>, project: string, projectNumber: string, region: string,
+    kind: string, resource: string, uid: string): void;
   assertGcpPromotionWorkloadReady(value: Record<string, unknown>, kind: 'services' | 'jobs' | 'workerPools'): void;
 };
 
@@ -41,31 +45,7 @@ if (!operation.done || operation.error) throw new Error('Rollout failed: ' + (op
 const after = await (await call(base)).json();${promotion ? '\nassertIdentity(after); assertGcpPromotionWorkloadReady(after, kind);' : ''}
 const running = isJob ? after.template?.template?.containers?.[0]?.image : after.template?.containers?.[0]?.image;
 if (running !== image${promotion ? '' : ' || (!isJob && after.latestReadyRevision !== after.latestCreatedRevision)'}) throw new Error('The new image is not active.');
-// A release command (migrations) runs now on the new image and must succeed before any service is switched.
-if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
-  // A run of this exact image that is still going (an earlier attempt of this workflow) is waited on, never doubled.
-  const listed = await call(base + '/executions?pageSize=100');
-  if (!listed.ok) throw new Error('Earlier release command runs could not be read (HTTP ' + listed.status + '), so nothing was started. Re-run this workflow. No service was switched.');
-  const going = ${promotion ? 'await checkRunningCommands(listed)' : '((await listed.json()).executions ?? []).find((e) => !e.completionTime && e.template?.containers?.[0]?.image === image)'};
-  if (going) {
-    let execution = going;
-    for (let i = 0; i < 360 && !execution.completionTime; i++) { await new Promise((r) => setTimeout(r, Number(process.env.HYPERVIBE_POLL_MS ?? 5000))); const polled = await call('https://run.googleapis.com/v2/' + going.name); if (polled.ok) execution = await polled.json(); }
-    if (!execution.completionTime) throw new Error('The release command did not finish within 30 minutes. No service was switched.');
-    if (!(execution.succeededCount > 0) || execution.failedCount > 0 || execution.cancelledCount > 0) throw new Error('The release command failed: see the job logs in Cloud Run. No service was switched.');
-    console.log('Release command (already running) finished on ' + image);
-    process.exit(0);
-  }
-  const started = await call(base + ':run', { method: 'POST', body: ${promotion ? 'JSON.stringify({ etag: after.etag })' : "'{}'"} });
-  if (!started.ok) throw new Error('The release command could not start (HTTP ' + started.status + '): ' + ((await started.json().catch(() => ({}))).error?.message ?? 'no details') + '. No service was switched.');
-  let run = await started.json();
-  for (let i = 0; i < 360 && !run.done; i++) { await new Promise((r) => setTimeout(r, 5000)); const polled = await call('https://run.googleapis.com/v2/' + run.name); if (polled.ok) run = await polled.json(); }
-  if (!run.done) throw new Error('The release command did not finish within 30 minutes. No service was switched.');
-  if (run.error || (run.response?.failedCount ?? 0) > 0) throw new Error('The release command failed: ' + (run.error?.message ?? 'see the job logs in Cloud Run') + '. No service was switched.');
-  ${promotion ? "if (!run.response?.name?.startsWith(after.name + '/executions/') || run.response.template?.containers?.[0]?.image !== image || JSON.stringify(run.response.template.containers[0].args) !== JSON.stringify(['-lc', process.env.HYPERVIBE_MIGRATION_COMMAND]) || JSON.stringify(run.response.template.containers[0].command) !== JSON.stringify(['/bin/sh']) || !run.response.completionTime || run.response.cancelledCount > 0) throw new Error('The completed migration execution does not prove the exact promoted image.');\n  " : ''}if (!((run.response?.succeededCount ?? 0) > 0)) throw new Error('The release command did not report a successful run. No service was switched.');
-  console.log('Release command finished on ' + image);
-  process.exit(0);
-}
-if (!isJob && healthPath) {
+${promotion ? '' : LEGACY_JOB_EXECUTION}if (!isJob && healthPath) {
   const response = await fetch(new URL(healthPath, after.uri));
   // Mirrors healthCheckFailed in release-health.ts: a declared path on a public service must answer below 400.
   if (response.status >= (process.env.HYPERVIBE_HEALTH_STRICT === '1' ? 400 : 500)) throw new Error(healthPath + ' returned HTTP ' + response.status);
@@ -76,34 +56,53 @@ console.log('Released ' + image + ' to ' + resource + (isJob ? ' (next scheduled
 
 // These checks are opt-in so existing branch-release workflows retain their reviewed bytes.
 const GCP_IDENTITY_CHECK = String.raw`
+${assertGcpPromotionWorkloadIdentity.toString()}
 function assertIdentity(value) {
-  const name = 'projects/' + process.env.GCP_PROJECT + '/locations/' + process.env.GCP_REGION + '/' + kind + '/' + resource;
-  const numberName = 'projects/' + process.env.GCP_PROJECT_NUMBER + name.slice(name.indexOf('/locations/'));
-  if ((value.name !== name && value.name !== numberName) || !process.env.HYPERVIBE_RESOURCE_UID || value.uid !== process.env.HYPERVIBE_RESOURCE_UID || !value.etag || value.deleteTime) throw new Error('The live Cloud Run resource differs from its applied identity.');
+  assertGcpPromotionWorkloadIdentity(value, process.env.GCP_PROJECT, process.env.GCP_PROJECT_NUMBER,
+    process.env.GCP_REGION, kind, resource, process.env.HYPERVIBE_RESOURCE_UID);
 }
 ${assertGcpPromotionWorkloadReady.toString()}
 assertIdentity(current);
 assertGcpPromotionWorkloadReady(current, kind);
 `;
 const GCP_PREFLIGHT = String.raw`
-if (process.env.HYPERVIBE_MIGRATION_COMMAND && (JSON.stringify(containers[0].command) !== JSON.stringify(['/bin/sh'])
+if (process.env.HYPERVIBE_MIGRATION_COMMAND && ((current.template?.taskCount ?? 1) !== 1 || current.template?.template?.maxRetries !== 0
+  || JSON.stringify(containers[0].command) !== JSON.stringify(['/bin/sh'])
   || JSON.stringify(containers[0].args) !== JSON.stringify(['-lc', process.env.HYPERVIBE_MIGRATION_COMMAND]))) throw new Error('The applied job command differs from the reviewed production migration.');
 if (process.env.HYPERVIBE_VERIFY_IMAGE === '1') {
   if (containers[0].image !== image) throw new Error('A workload changed before production release verification finished.');
   process.exit(0);
 }
 if (process.env.HYPERVIBE_PREFLIGHT === '1') process.exit(0);
-async function checkRunningCommands(response) {
-  const seen = new Set();
-  for (;;) {
-    if (!response.ok) throw new Error('Cannot verify earlier migration executions.');
-    const page = await response.json();
-    if (!page || typeof page !== 'object' || Array.isArray(page) || (page.executions !== undefined && !Array.isArray(page.executions))
-      || (page.executions ?? []).some(job => !job?.completionTime)) throw new Error('An earlier migration execution is unfinished or unknown. Check it before retrying.');
-    if (!page.nextPageToken) return undefined;
-    if (typeof page.nextPageToken !== 'string' || seen.has(page.nextPageToken) || seen.size >= 100) throw new Error('Cannot verify the complete migration execution history.');
-    seen.add(page.nextPageToken); response = await call(base + '/executions?pageSize=100&pageToken=' + encodeURIComponent(page.nextPageToken));
+if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
+  const runMigration = ${runPromotionMigration.toString()};
+  await runMigration({ current, base, call, image, resource, assertIdentity, assertReady: assertGcpPromotionWorkloadReady, env: process.env });
+  process.exit(0);
+}
+`;
+const LEGACY_JOB_EXECUTION = String.raw`// A release command (migrations) runs now on the new image and must succeed before any service is switched.
+if (isJob && process.env.HYPERVIBE_RUN_JOB === '1') {
+  // A run of this exact image that is still going (an earlier attempt of this workflow) is waited on, never doubled.
+  const listed = await call(base + '/executions?pageSize=100');
+  if (!listed.ok) throw new Error('Earlier release command runs could not be read (HTTP ' + listed.status + '), so nothing was started. Re-run this workflow. No service was switched.');
+  const going = ((await listed.json()).executions ?? []).find((e) => !e.completionTime && e.template?.containers?.[0]?.image === image);
+  if (going) {
+    let execution = going;
+    for (let i = 0; i < 360 && !execution.completionTime; i++) { await new Promise((r) => setTimeout(r, Number(process.env.HYPERVIBE_POLL_MS ?? 5000))); const polled = await call('https://run.googleapis.com/v2/' + going.name); if (polled.ok) execution = await polled.json(); }
+    if (!execution.completionTime) throw new Error('The release command did not finish within 30 minutes. No service was switched.');
+    if (!(execution.succeededCount > 0) || execution.failedCount > 0 || execution.cancelledCount > 0) throw new Error('The release command failed: see the job logs in Cloud Run. No service was switched.');
+    console.log('Release command (already running) finished on ' + image);
+    process.exit(0);
   }
+  const started = await call(base + ':run', { method: 'POST', body: '{}' });
+  if (!started.ok) throw new Error('The release command could not start (HTTP ' + started.status + '): ' + ((await started.json().catch(() => ({}))).error?.message ?? 'no details') + '. No service was switched.');
+  let run = await started.json();
+  for (let i = 0; i < 360 && !run.done; i++) { await new Promise((r) => setTimeout(r, 5000)); const polled = await call('https://run.googleapis.com/v2/' + run.name); if (polled.ok) run = await polled.json(); }
+  if (!run.done) throw new Error('The release command did not finish within 30 minutes. No service was switched.');
+  if (run.error || (run.response?.failedCount ?? 0) > 0) throw new Error('The release command failed: ' + (run.error?.message ?? 'see the job logs in Cloud Run') + '. No service was switched.');
+  if (!((run.response?.succeededCount ?? 0) > 0)) throw new Error('The release command did not report a successful run. No service was switched.');
+  console.log('Release command finished on ' + image);
+  process.exit(0);
 }
 `;
 export const RELEASE_SCRIPT = releaseScript(false);

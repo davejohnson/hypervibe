@@ -17,7 +17,7 @@ async function workflowHash(github, repo, paths, sha) {
 
 // Select by deployment order inside the one reviewed workflow, not by the head SHA of its dispatch.
 // Listing runs in pages avoids one API request per retained artifact. An older retry can be newest.
-async function select({ github, context, contract, provenance, attempts, validator }) {
+async function select({ github, context, contract, provenance, attempts, validator, copyProof }) {
   const repo = context.repo;
   if (context.eventName !== 'workflow_dispatch' || context.ref !== 'refs/heads/' + contract.branch || contract.repository.toLowerCase() !== (repo.owner + '/' + repo.repo).toLowerCase()) throw new Error('Promotion requires the reviewed manual dispatch and target branch.');
   const { data: info } = await github.rest.repos.get(repo);
@@ -31,6 +31,7 @@ async function select({ github, context, contract, provenance, attempts, validat
     || stagingSpec?.hosting?.provider !== 'railway' || stagingSpec.deploy?.strategy !== 'branch' || (stagingSpec.deploy.branch ?? 'main') !== contract.sourceBranch || stagingSpec.deploy.trigger === 'native') {
     throw new Error('The committed staging source, target or required tests changed. Reconcile the promotion workflow.');
   }
+  if (contract.tests && hash(await file(github, repo, contract.tests.workflow, context.sha)) !== contract.tests.hash) throw new Error('The required tests changed. Run hv_launch to review the updated promotion policy.');
   const bindings = JSON.parse(await file(github, repo, '.hypervibe/bindings.json', context.sha)).environments;
   const target = bindings?.[contract.environment]?.platformBindings; const source = bindings?.[contract.sourceEnvironment]?.platformBindings;
   const marker = target?.engine?.promotion;
@@ -39,6 +40,20 @@ async function select({ github, context, contract, provenance, attempts, validat
     || target.engine.ci?.provider !== contract.provider || target.engine.ci?.releaseIdentity !== contract.releaseIdentity || target.engine.ci?.repository !== contract.repository
     || source?.provider !== 'railway' || source.projectId !== contract.sourceTarget.scope.providerProjectId || source.environmentId !== contract.sourceTarget.scope.providerEnvironmentId
     || source.ci?.deployBranch?.[contract.sourceWorkflow]?.contentHash !== contract.sourceWorkflowHash) throw new Error('The committed spec or release bindings differ from the reviewed promotion. Run hv_launch and commit the reviewed files.');
+  const migration = target.engine.migration;
+  const attempt = migration?.copyAttempt;
+  const command = contract.releaseCommand;
+  if (command?.requiresCopy && (!attempt || !migration?.database)) throw new Error('Publish the signed verified database copy for the migration target before promoting.');
+  if ((attempt && (attempt.status !== 'complete' || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(attempt.id ?? '')
+      || !Number.isFinite(Date.parse(migration.copiedAt)) || !Number.isFinite(Date.parse(attempt.startedAt)) || Date.parse(attempt.startedAt) > Date.parse(migration.copiedAt)))
+    || (migration?.finalCopy && (!attempt || migration.finalCopy.copyAttemptId !== attempt.id || migration.finalCopy.copiedAt !== migration.copiedAt))) {
+    throw new Error('Publish the completed migration copy identity from Hypervibe before promoting.');
+  }
+  if (command && (migration?.database || attempt)) {
+    if (migration?.database?.match !== true || !attempt) throw new Error('A completed matching database copy is required for this promotion.');
+    copyProof.verifyCopy({ repository: contract.repository, environment: contract.environment, gcpProjectId: contract.gcpProjectId,
+      region: contract.region, job: command.job, copyAttemptId: attempt.id, copiedAt: migration.copiedAt }, command.copyVerificationKey, migration.promotionCopySignature);
+  }
   for (const item of contract.services) {
     const field = { services: 'serviceId', workerPools: 'workerPoolName', jobs: 'jobName' }[item.kind];
     if (target.services?.[item.name]?.[field] !== item.resource || marker.uids?.[item.kind + '/' + item.resource] !== item.uid) throw new Error('A production workload binding changed.');
@@ -70,7 +85,7 @@ async function select({ github, context, contract, provenance, attempts, validat
   const sourceSpec = JSON.parse(await file(github, repo, '.hypervibe/spec.json', sha));
   const deploymentContract = validator.deploymentContractFingerprint(sourceSpec, contract.sourceEnvironment);
   attempts.assertSameReleaseAttempt(run, (await github.rest.actions.getWorkflowRun({ ...repo, run_id: run.id })).data, 'refs/heads/' + contract.sourceBranch);
-  return { environment: contract.sourceEnvironment, sha, runId: run.id, runAttempt: run.run_attempt, artifactId: artifact.id, deploymentContract };
+  return { environment: contract.sourceEnvironment, sha, runId: run.id, runAttempt: run.run_attempt, artifactId: artifact.id, deploymentContract, ...(attempt && { copyAttemptId: attempt.id, copiedAt: migration.copiedAt }) };
 }
 
 function verifyEvidence(contract, selection, evidence, validator) {
@@ -87,7 +102,7 @@ function verifyEvidence(contract, selection, evidence, validator) {
     if (typeof sourceImage !== 'string' || !sourceImage.startsWith(prefix) || !/^sha256:[a-f0-9]{64}$/.test(sourceImage.slice(prefix.length))) throw new Error('Staged image must be the immutable GHCR image for the reviewed repository.');
     return { name: service.name, sourceImage, image: service.image + '@' + sourceImage.slice(prefix.length) };
   });
-  const { deploymentContract, ...sourceRun } = selection;
-  return { source: sourceRun, deployments };
+  const { deploymentContract, copyAttemptId, copiedAt, ...sourceRun } = selection;
+  return { source: sourceRun, deployments, ...(copyAttemptId && { copyAttemptId, copiedAt }) };
 }
 module.exports = { select, verifyEvidence };

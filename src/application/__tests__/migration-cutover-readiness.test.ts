@@ -110,8 +110,8 @@ it('preserves the staging gate when cloud backups are confirmed', async () => {
   expect(f.apply).not.toHaveBeenCalled();
 });
 
-it('requires the actual promoted image before the source is paused, then admits the matching release', async () => {
-  const f = fixture({ deploy: promotion }, { deploy: promotion });
+it.each([true, false])('requires the target promoted image before pausing, including when only the target opts in (source gate %s)', async sourceGate => {
+  const f = fixture(sourceGate ? { deploy: promotion } : {}, { deploy: promotion });
   f.actions(domainProof);
   const check = vi.spyOn(promotionEvidence, 'observeEnginePromotion').mockResolvedValueOnce({ blocked: 'The staged digest is not running.' })
     .mockResolvedValueOnce({ results: [{ service: 'web', status: 'released', message: 'Verified.' }] });
