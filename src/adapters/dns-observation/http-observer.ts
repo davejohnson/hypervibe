@@ -1,4 +1,7 @@
+import { providerObject as object } from '../providers/provider-response.js';
 import type { DnsObservation, DnsObservedRecord, DnsRecordType, DnsZoneIdentity, DnsZoneObservation } from '../../domain/ports/dns.port.js';
+
+export { object };
 
 export interface DnsObserver {
   observeZone(): Promise<DnsObservation<DnsZoneObservation>>;
@@ -9,10 +12,6 @@ type Json = Record<string, unknown>;
 const PAGE_CAP = 100;
 export const dnsName = (name: string) => name.toLowerCase().replace(/\.$/, '');
 export function unknown(reason = 'DNS provider observation failed.'): DnsObservation<never> { return { status: 'unknown', reason }; }
-export function object(value: unknown): Json {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid provider object.');
-  return value as Json;
-}
 export function strings(value: unknown): string[] {
   if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) throw new Error('Invalid provider values.');
   return value as string[];

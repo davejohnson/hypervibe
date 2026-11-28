@@ -2,7 +2,7 @@ import { observeObserverRepository } from './observer-repository.js';
 import type { ObserverRepository } from '../domain/spec/runtime-observation.js';
 import { projectAwsDatabaseQuerySecret } from '../adapters/providers/aws/aws-database-query-secret.js';
 import { runtimeObservationIntent } from '../domain/spec/runtime-observation.js';
-import { clearRuntimeObserver, recordRuntimeObserver } from './runtime-observer-bindings.js';
+import { beginRuntimeObserverApply, clearRuntimeObserver, previousRuntimeObserverServices, recordRuntimeObserver } from './runtime-observer-bindings.js';
 import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
@@ -255,8 +255,10 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
     for (const key of Object.keys(storage)) if (key in environmentSpec.envVars) throw new Error(`Environment variable ${key} conflicts with storage ${buckets[0]}.`);
     return { ...Object.fromEntries(Object.entries(environmentSpec.envVars).filter(([key]) => !isBuildTokenKey(key))), ...storage };
   };
+  const previousObserverServices = previousRuntimeObserverServices(context.environment.platformBindings, 'aws');
   return {
     accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
+    ...(previousObserverServices ? { previousObserverServices } : {}),
     ...(context.observerRepository ? { observation: { ...runtimeObservationIntent(spec, environmentName)!, ...context.observerRepository } } : {}),
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     environmentId: context.environment.id, parameterPath: context.parameterPath,
@@ -659,6 +661,9 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     ctx.repos.environments.updatePlatformBindings(context.environment.id, { aws: { ...awsBinding(context.environment), naming: 2 } });
   }
   const access = awsAccess(context);
+  const monitored = params.spec.environments[environmentName]?.runtimeObservation;
+  const observerServices = monitored ? Object.keys(params.spec.environments[environmentName]!.services) : undefined;
+  let observerApplyStarted = false;
   const result = await executor.execute({
     planRunId: params.planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
     handler: async (action) => {
@@ -744,13 +749,17 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
       const target = [reviewed.build, reviewed.shared].find((entry) => entry && segment.id === `opentofu:${entry.planId}`) ?? { planId: reviewed.planId, state: context.state };
+      if (target.planId === reviewed.planId) {
+        beginRuntimeObserverApply(ctx, context.environment, 'aws', observerServices);
+        observerApplyStarted = true;
+      }
       const outcome = await engine.apply({ backend: awsEngineBackend, auth: context.auth, state: target.state, planId: target.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses });
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
   // A rejected or stale apply has not changed the cloud. Keep its prior observer evidence intact.
-  if (result.applyRunId && params.spec.environments[environmentName]?.runtimeObservation) clearRuntimeObserver(ctx, context.environment);
+  if (result.applyRunId && monitored && !observerApplyStarted) beginRuntimeObserverApply(ctx, context.environment, 'aws', observerServices);
   // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
   // A teardown owns binding removal separately; never resurrect its identities.
   if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {

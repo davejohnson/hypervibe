@@ -69,13 +69,21 @@ it('charts the Cloud Run job result, request status and worker instances with an
   expect(alarms.filter(v => v.includes('prod-web') && v.includes('5xx'))).toHaveLength(1);
 });
 
+it('leaves a never-enrolled AWS or Azure plan free of observer ownership mappings', () => {
+  for (const config of [buildAwsConfiguration(awsInput), buildAzureEnvironmentConfiguration(fullEnvironmentInput)]) {
+    expect(Object.values(config.resources).filter(mapping => mapping.actionId === 'identity:runtime-observer' || mapping.actionId.startsWith('monitor:'))).toEqual([]);
+    expect(config.files['observer.tf.json']).toBeUndefined();
+    expect(config.files[file]).toBeUndefined();
+  }
+});
+
 it('keeps an unchanged app free of monitoring resources and routes opt-in costs and opt-out deletes through exact plan review', () => {
   const gcp = buildGcpObserverConfiguration(google, key, observation.repositoryId);
   const disabledGcp = disableGcpObserverConfiguration(gcp, key);
   retainObserverRemovals(disabledGcp, gcp);
   const cases: Array<[string, EngineConfiguration, EngineConfiguration, string]> = [
-    ['aws', buildAwsConfiguration({ ...awsInput, observation }), buildAwsConfiguration(awsInput), file],
-    ['azure', buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, observation: azureObservation }), buildAzureEnvironmentConfiguration(fullEnvironmentInput), file],
+    ['aws', buildAwsConfiguration({ ...awsInput, observation }), buildAwsConfiguration({ ...awsInput, previousObserverServices: ['web', 'nightly'] }), file],
+    ['azure', buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, observation: azureObservation }), buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, previousObserverServices: [...fullEnvironmentInput.services ?? [], ...fullEnvironmentInput.workers ?? [], ...fullEnvironmentInput.jobs ?? []].map(w => w.logicalName) }), file],
     ['gcp', gcp, disabledGcp, googleFile],
   ];
   for (const [provider, enabled, disabled, name] of cases) {

@@ -13,7 +13,8 @@ import { azureObserverLogCondition, addAzureObserverConfiguration } from '../../
 import { addAwsObserverConfiguration, awsObserverPolicies } from '../../adapters/providers/aws/tofu/aws-observer.config.js';
 import { appBoundaryDocument } from '../../adapters/providers/aws/aws-setup.client.js';
 import { appRoleAssignmentCondition } from '../../adapters/providers/azure/azure-setup.client.js';
-import { projectRuntimeObserverState } from '../runtime-observer-bindings.js';
+import type { Environment } from '../../domain/entities/environment.entity.js';
+import { beginRuntimeObserverApply, clearRuntimeObserver, previousRuntimeObserverServices, projectRuntimeObserverState } from '../runtime-observer-bindings.js';
 import { engineCiCommitInputs } from '../engine-ci-execution.js';
 import { awsKey } from '../../adapters/providers/aws/tofu/aws-engine.config.js';
 import { runtimeObserverAccess } from '../../adapters/runtime-observer-auth.js';
@@ -43,6 +44,25 @@ const input = { spec, environmentName: 'prod', provider: 'aws' as const, context
   observerRepository: { ownerId: federation.ownerId, repositoryId: federation.repositoryId } } } as Parameters<typeof projectRuntimeObserverState>[1];
 
 describe('scheduled runtime observer enrollment', () => {
+  it('keeps prior and newly approved workload removals available across a partial apply until cleanup succeeds', () => {
+    const environment: Environment = { id: envId, name: 'prod', projectId: 'project', createdAt: new Date(), updatedAt: new Date(),
+      platformBindings: { services: { unrelated: {} } } };
+    const update = vi.fn((_id: string, patch: Record<string, unknown>) => Object.assign(environment.platformBindings, patch));
+    const ctx = { repos: { environments: { findById: () => environment, updatePlatformBindings: update } } } as unknown as Parameters<typeof beginRuntimeObserverApply>[0];
+    beginRuntimeObserverApply(ctx, environment, 'aws');
+    expect(update).not.toHaveBeenCalled();
+    environment.platformBindings.runtimeObserver = projectRuntimeObserverState(native(), input);
+    expect(previousRuntimeObserverServices(environment.platformBindings, 'aws')).toEqual(['api']);
+    beginRuntimeObserverApply(ctx, environment, 'aws', ['worker']);
+    expect(environment.platformBindings.runtimeObserver).toBeNull();
+    expect(previousRuntimeObserverServices(environment.platformBindings, 'aws')).toEqual(['api', 'worker']);
+    expect(previousRuntimeObserverServices(environment.platformBindings, 'azure')).toBeUndefined();
+    beginRuntimeObserverApply(ctx, environment, 'aws');
+    expect(previousRuntimeObserverServices(environment.platformBindings, 'aws')).toEqual(['api', 'worker']);
+    clearRuntimeObserver(ctx, environment);
+    expect(previousRuntimeObserverServices(environment.platformBindings, 'aws')).toBeUndefined();
+  });
+
   it('publishes the workflow from the committed opt-in and applied state without enabling branch deployment', async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'hv-observer-')); temp.push(dir);
     vi.stubEnv('HYPERVIBE_DISABLE_REPO_SPEC', '0');
@@ -52,8 +72,9 @@ describe('scheduled runtime observer enrollment', () => {
     const now = new Date(); const project = { id: 'project', name: 'app', gitRemoteUrl: rawSpec.gitRemoteUrl, defaultPlatform: 'aws', policies: {}, createdAt: now, updatedAt: now };
     const saved = projectRuntimeObserverState(native(), input);
     const environment = { id: envId, name: 'prod', projectId: project.id, createdAt: now, updatedAt: now,
-      platformBindings: { provider: 'aws', projectId: accountId, environmentId: region, runtimeObserver: saved, services: saved.services } };
+      platformBindings: { provider: 'aws', projectId: accountId, environmentId: region, runtimeObserver: saved, services: saved.services, runtimeObserverCleanup: { provider: 'aws', services: ['attempted'] } } };
     writeRepoBindingsForEnvironment(project, environment, dir);
+    expect(readFileSync(path.join(dir, '.hypervibe/bindings.json'), 'utf8')).not.toContain('runtimeObserverCleanup');
     const workflowPath = path.join(dir, '.github/workflows/hypervibe-observe-prod.yml');
     const workflow = YAML.parse(readFileSync(workflowPath, 'utf8'));
     expect(workflow.on).toEqual({ schedule: [{ cron: '*/5 * * * *' }], workflow_dispatch: {} });

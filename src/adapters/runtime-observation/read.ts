@@ -1,7 +1,10 @@
+import { providerObject as object } from '../providers/provider-response.js';
 import { createHash } from 'node:crypto';
 import { isErrorLike } from '../../domain/services/log-severity.js';
 import { redactEngineOutput } from '../engine/opentofu/runner.js';
 import type { LogSeverity, RuntimeWindow } from './types.js';
+
+export { object };
 
 /** Safe messages only. Provider response bodies and SDK exceptions can contain secrets. */
 export class ReadGap extends Error {}
@@ -12,10 +15,6 @@ export function capacity(condition: unknown, message: string): asserts condition
 }
 export function check(condition: unknown, message = 'The provider returned incomplete or inconsistent workload evidence.'): asserts condition {
   if (!condition) throw new ReadGap(message);
-}
-export function object(value: unknown): Record<string, unknown> {
-  check(value !== null && typeof value === 'object' && !Array.isArray(value));
-  return value as Record<string, unknown>;
 }
 export function timestamp(value: unknown): string {
   check(typeof value === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value)));

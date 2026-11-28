@@ -527,8 +527,10 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   }
   if (Object.keys(jobs).length) files['jobs.tf.json'] = { resource: { azurerm_container_app_job: jobs } };
   addAzureCiConfiguration(input, files, resources);
-  addAzureObserverConfiguration(input, files, resources);
-  addAzureMonitoring(input, files, resources);
+  if (input.observation || input.previousObserverServices) {
+    addAzureObserverConfiguration(input, files, resources);
+    addAzureMonitoring(input, files, resources);
+  }
 
   files['outputs.tf.json'] = { output: {
     runtime_identity_client_id: { value: '${azurerm_user_assigned_identity.runtime.client_id}' },

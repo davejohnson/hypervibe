@@ -310,7 +310,9 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 }
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
-  const sanitized = sanitize(raw) as Record<string, unknown>;
+  // Pending local cleanup authorizes no observer in a repository checkout.
+  const { runtimeObserverCleanup: _cleanup, ...publicBindings } = raw;
+  const sanitized = sanitize(publicBindings) as Record<string, unknown>;
   if (raw.runtimeObserver) {
     const observer = runtimeObserverSchema.parse(raw.runtimeObserver);
     sanitized.runtimeObserver = observer;

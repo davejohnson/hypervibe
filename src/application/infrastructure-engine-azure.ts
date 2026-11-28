@@ -1,8 +1,8 @@
 import { observeObserverRepository } from './observer-repository.js';
 import type { ObserverRepository } from '../domain/spec/runtime-observation.js';
 import { createHash } from 'node:crypto';
-import { runtimeObservationIntent, runtimeObserverSchema } from '../domain/spec/runtime-observation.js';
-import { clearRuntimeObserver, recordRuntimeObserver } from './runtime-observer-bindings.js';
+import { runtimeObservationIntent } from '../domain/spec/runtime-observation.js';
+import { beginRuntimeObserverApply, clearRuntimeObserver, previousRuntimeObserverServices, recordRuntimeObserver } from './runtime-observer-bindings.js';
 import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
@@ -298,16 +298,12 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
   const command = (startCommand?: string) => startCommand ? { command: ['sh', '-c', startCommand] } : {};
   const secretServices = azureSecretServices(spec, environmentName);
   const observation = runtimeObservationIntent(spec, environmentName);
-  const platform = context.environment.platformBindings;
-  const previous = runtimeObserverSchema.safeParse(platform?.runtimeObserver);
-  // Workload bindings survive interrupted applies which must clear their observer marker.
-  const historicalServices = platform?.services && typeof platform.services === 'object' ? Object.keys(platform.services) : [];
-  const previousObserverServices = [...new Set([...historicalServices, ...(previous.success ? Object.keys(previous.data.services) : [])])];
+  const previousObserverServices = previousRuntimeObserverServices(context.environment.platformBindings, 'azure');
   return {
     kind: 'environment', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     ...(observation && context.observerRepository ? { observation: { ...observation, ...context.observerRepository, workspaceResourceId: `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/${context.shared.prefix}-logs` } } : {}),
-    ...(previousObserverServices.length ? { previousObserverServices } : {}),
+    ...(previousObserverServices ? { previousObserverServices } : {}),
     location: azureLocationFor(spec, environmentName, context.connection), prefix: context.prefix, environmentId: context.environment.id, environmentName,
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer, appsEnvironmentId: context.shared.appsEnvironmentId },
     ...(azureBinding(context.environment as Environment).buildRegistry ? { buildRegistry: azureBinding(context.environment as Environment).buildRegistry! } : {}),
@@ -824,6 +820,9 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
   clearEngineCiBinding(ctx, context.environment);
   const engine = await engineFor();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
+  const monitored = params.spec.environments[environmentName]?.runtimeObservation;
+  const observerServices = monitored ? Object.keys(params.spec.environments[environmentName]!.services) : undefined;
+  let observerApplyStarted = false;
   const result = await executor.execute({
     planRunId: params.planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
     handler: async (action) => {
@@ -839,6 +838,10 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
       const target = reviewed.shared && segment.id === `opentofu:${reviewed.shared.planId}` ? reviewed.shared : reviewed.build && segment.id === `opentofu:${reviewed.build.planId}` ? reviewed.build : { planId: reviewed.planId, state: context.state };
+      if (target.planId === reviewed.planId) {
+        beginRuntimeObserverApply(ctx, context.environment, 'azure', observerServices);
+        observerApplyStarted = true;
+      }
       const outcome = await engine.apply({ backend: azureEngineBackend, auth: context.auth, state: target.state, planId: target.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses });
       if (!reviewed.teardown && reviewed.build?.planId === target.planId && (engineCiIntent(params.spec, environmentName) || azureBinding(context.environment).buildRegistry)) {
@@ -858,7 +861,7 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
     },
   });
   // A rejected or stale apply has not changed the cloud. Keep its prior observer evidence intact.
-  if (result.applyRunId && params.spec.environments[environmentName]?.runtimeObservation) clearRuntimeObserver(ctx, context.environment);
+  if (result.applyRunId && monitored && !observerApplyStarted) beginRuntimeObserverApply(ctx, context.environment, 'azure', observerServices);
   // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
   // A teardown owns binding removal separately; never resurrect its identities.
   if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {

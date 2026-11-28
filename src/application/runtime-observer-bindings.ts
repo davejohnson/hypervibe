@@ -91,8 +91,30 @@ export function projectRuntimeObserverState(state: unknown, input: Inputs, share
   return runtimeObserverSchema.parse({ ...common, provider: 'azure', azure: { tenantId, subscriptionId, resourceGroup, clientId: identity.client_id }, services });
 }
 
+type ObserverProvider = 'aws' | 'azure';
+
+export function previousRuntimeObserverServices(platform: Environment['platformBindings'] | undefined, provider: ObserverProvider): string[] | undefined {
+  const binding = runtimeObserverSchema.safeParse(platform?.runtimeObserver);
+  const applied = binding.success && binding.data.provider === provider ? Object.keys(binding.data.services) : undefined;
+  const pending = platform?.runtimeObserverCleanup as { provider?: unknown; services?: unknown } | undefined;
+  const attempted = pending?.provider === provider && Array.isArray(pending.services) && pending.services.every(name => typeof name === 'string')
+    ? pending.services as string[] : undefined;
+  return applied || attempted ? [...new Set([...(applied ?? []), ...(attempted ?? [])])] : undefined;
+}
+
+/** Preserve removal mappings before a managed apply can leave partially created resources. */
+export function beginRuntimeObserverApply(ctx: CommandContext, environment: Environment, provider: ObserverProvider, services?: string[]): void {
+  const previous = previousRuntimeObserverServices(environment.platformBindings, provider);
+  if (!services && !previous) return;
+  ctx.repos.environments.updatePlatformBindings(environment.id, { runtimeObserver: null,
+    runtimeObserverCleanup: { provider, services: [...new Set([...(previous ?? []), ...(services ?? [])])] } });
+}
+
 export function clearRuntimeObserver(ctx: CommandContext, environment: Environment) {
-  if (environment.platformBindings.runtimeObserver) ctx.repos.environments.updatePlatformBindings(environment.id, { runtimeObserver: null });
+  const current = ctx.repos.environments.findById(environment.id) ?? environment;
+  if (current.platformBindings.runtimeObserver || current.platformBindings.runtimeObserverCleanup) {
+    ctx.repos.environments.updatePlatformBindings(current.id, { runtimeObserver: null, runtimeObserverCleanup: null });
+  }
 }
 
 export async function recordRuntimeObserver(ctx: CommandContext, engine: Pick<OpenTofuEngine, 'inspectState'>, input: Inputs) {
@@ -118,5 +140,5 @@ export async function recordRuntimeObserver(ctx: CommandContext, engine: Pick<Op
   const observed = await engine.inspectState({ ...common, backend: input.provider === 'aws' ? awsEngineBackend : azureEngineBackend,
     state: input.context.state, project: state => projectRuntimeObserverState(state, input, shared) });
   if (!observed.ok || !observed.present) throw new Error('The applied observer access and workload identities could not be verified. Reconcile the environment with hv_plan and hv_apply before enabling its scheduled workflow.');
-  ctx.repos.environments.updatePlatformBindings(input.context.environment.id, { runtimeObserver: observed.value });
+  ctx.repos.environments.updatePlatformBindings(input.context.environment.id, { runtimeObserver: observed.value, runtimeObserverCleanup: null });
 }
