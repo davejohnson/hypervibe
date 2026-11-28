@@ -29,6 +29,19 @@ export interface EngineStateIdentity {
   partition: 'environment' | 'project-shared';
 }
 
+export type EngineRetirementScope =
+  | { provider: 'aws'; accountId: string; region: string; prefix: string }
+  | { provider: 'azure'; subscriptionId: string; resourceGroup: string; prefix: string };
+
+export interface AppliedEngineDeclaration {
+  address: string;
+  planId: string;
+  configurationDigest: string;
+  actionId: string;
+  kind: PlanResourceKind;
+  name: string;
+}
+
 export function engineStateKey(identity: EngineStateIdentity): string {
   for (const part of [identity.provider, identity.projectId, identity.environmentId]) {
     if (!/^[A-Za-z0-9_-]{1,128}$/.test(part)) {
@@ -125,6 +138,8 @@ export interface EngineActionSegment {
   providerVersions: Record<string, string>;
   /** Engine addresses this PlanAction authorizes. */
   addresses: string[];
+  /** Per-address changes when a group both deletes and retains resources. */
+  operations?: Record<string, EngineChangeAction>;
 }
 
 export function engineSegmentOf(action: PlanAction): EngineActionSegment | undefined {

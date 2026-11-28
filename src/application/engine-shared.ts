@@ -133,7 +133,8 @@ export const ENGINE_PLAN_SCOPE = 'infrastructure-engine';
 export async function openTofuEngine(options: { timeoutMs?: number } = {}): Promise<OpenTofuEngine | { blocked: string }> {
   const binary = await ensureEngineBinary();
   if (!binary.ok) return { blocked: binary.error };
-  return new OpenTofuEngine({ binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) });
+  return new OpenTofuEngine({ appliedDeclarations: (state, scope, addresses) => new RunRepository().appliedEngineDeclarations(state, scope, addresses),
+    binary: binary.binary, cipher: getSecretStore(), pluginCacheDir: enginePluginCacheDir(), ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) });
 }
 
 /** A plan stops on missing outside keys with the one command that collects them all. */

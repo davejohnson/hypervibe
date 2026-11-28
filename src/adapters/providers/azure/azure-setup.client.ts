@@ -1,3 +1,4 @@
+import { OBSERVER_ARM_READER, OBSERVER_LOG_READER } from './tofu/azure-observer.config.js';
 import { responseFields } from '../../../lib/provider-response-fields.js';
 import { azureCiRoleDefinitions } from './azure-ci-roles.js';
 import { azureDeployToken, type AzureEngineCredentials } from './azure-engine.adapter.js';
@@ -31,6 +32,9 @@ const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 export const AZURE_RESOURCE_PROVIDERS = ['Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.DBforPostgreSQL', 'Microsoft.KeyVault',
   'Microsoft.ManagedIdentity', 'Microsoft.Network', 'Microsoft.OperationalInsights', 'Microsoft.Storage'] as const;
 
+const monitoringProviders = ['Microsoft.Portal', 'Microsoft.Insights'];
+const requiredProviders = (monitoring?: boolean) => monitoring ? [...AZURE_RESOURCE_PROVIDERS, ...monitoringProviders] : AZURE_RESOURCE_PROVIDERS;
+
 /** Built-in role ids (identical in every tenant). */
 export const AZURE_ROLES = {
   contributor: 'b24988ac-6180-42a0-ab88-20f7382dd24c',
@@ -53,8 +57,8 @@ export const azureDeployAppName = (project: string) => `hypervibe-deploy-${slug(
  * add or remove only the app roles, and only for service principals (managed
  * identities are service principals).
  */
-export function appRoleAssignmentCondition(ciRoleIds: string[] = [], bucketBackupReader = false): string {
-  const roles = [...AZURE_APP_ROLES, ...(bucketBackupReader ? [AZURE_ROLES.storageBlobDataReader] : []), ...ciRoleIds].join(', ');
+export function appRoleAssignmentCondition(ciRoleIds: string[] = [], bucketBackupReader = false, runtimeObservation = false): string {
+  const roles = [...AZURE_APP_ROLES, ...(bucketBackupReader ? [AZURE_ROLES.storageBlobDataReader] : []), ...ciRoleIds, ...(runtimeObservation ? [OBSERVER_ARM_READER, OBSERVER_LOG_READER] : [])].join(', ');
   const constrain = (source: 'Request' | 'Resource') =>
     `@${source}[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {${roles}} AND @${source}[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {'ServicePrincipal'}`;
   return `((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (${constrain('Request')})) AND ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})) OR (${constrain('Resource')}))`;
@@ -63,13 +67,13 @@ export function appRoleAssignmentCondition(ciRoleIds: string[] = [], bucketBacku
 export interface AzureRoleGrant { role: string; label: string; condition?: string }
 
 /** Every role the deploy identity holds, all on the project's resource group. */
-export function deployRoleGrants(ciRoleIds: string[] = [], bucketBackupReader = false): AzureRoleGrant[] {
+export function deployRoleGrants(ciRoleIds: string[] = [], bucketBackupReader = false, runtimeObservation = false): AzureRoleGrant[] {
   return [
     { role: AZURE_ROLES.contributor, label: 'Contributor' },
     { role: AZURE_ROLES.keyVaultSecretsOfficer, label: 'Key Vault Secrets Officer' },
     // Teardown empties storage before deleting it; accounts have no shared keys.
     { role: AZURE_ROLES.storageBlobDataContributor, label: 'Storage Blob Data Contributor' },
-    { role: AZURE_ROLES.roleBasedAccessControlAdministrator, label: `Role Based Access Control Administrator (only app data roles${bucketBackupReader ? ', including Storage Blob Data Reader for scheduled file backups' : ''}${ciRoleIds.length ? ' and the two fixed CI roles' : ''}, only for service principals)`, condition: appRoleAssignmentCondition(ciRoleIds, bucketBackupReader) },
+    { role: AZURE_ROLES.roleBasedAccessControlAdministrator, label: `Role Based Access Control Administrator (only app data roles${bucketBackupReader ? ', including Storage Blob Data Reader for scheduled file backups' : ''}${ciRoleIds.length ? ' and the two fixed CI roles' : ''}${runtimeObservation ? ', Reader and Log Analytics Data Reader for the observer' : ''}, only for service principals)`, condition: appRoleAssignmentCondition(ciRoleIds, bucketBackupReader, runtimeObservation) },
   ];
 }
 
@@ -135,7 +139,10 @@ export async function listAzureSubscriptions(session: AzureSignInSession, fetchI
 
 export interface AzureSetupChange { id: string; change: string; state: 'create' | 'update' | 'ok' }
 export interface AzureSetupPlan {
+  /** Register the monitoring namespaces only when this owner setup reviewed them. */
+  monitoringResourceProviders?: true;
   bucketBackupReader?: true;
+  runtimeObservation?: true;
   tenantId: string;
   subscriptionId: string;
   subscriptionName: string;
@@ -152,7 +159,9 @@ export interface AzureSetupPlan {
 }
 
 export interface AzureSetupTarget {
+  monitoringResourceProviders?: true;
   bucketBackupReader?: true;
+  runtimeObservation?: true;
   subscription: AzureSubscription;
   project: string;
   location: string;
@@ -182,8 +191,19 @@ function sameCiRole(observed: unknown, expected: ReturnType<typeof azureCiRoleDe
   try { return !!value && normalized({ roleName: value.roleName, description: value.description, type: value.type, permissions: value.permissions, assignableScopes: value.assignableScopes }) === normalized(expected); } catch { return false; }
 }
 
+export async function azureMonitoringSetupReady(connection: AzureEngineCredentials, fetchImpl: Fetch = fetch): Promise<boolean> {
+  const token = await azureDeployToken(connection, fetchImpl);
+  for (const namespace of monitoringProviders) {
+    const response = await rest(fetchImpl, token, 'GET', `${ARM}/subscriptions/${connection.subscriptionId}/providers/${namespace}?api-version=2021-04-01`);
+    // A group-scoped deploy principal may lack subscription-wide read access. Owner setup recorded registration.
+    if (response.status === 403 && connection.monitoringResourceProviders) continue;
+    if (response.status !== 200 || response.body.registrationState !== 'Registered') return false;
+  }
+  return true;
+}
+
 /** Read-only upgrade detection; a missing or unverifiable grant cannot authorize branch releases. */
-export async function azureCiSetupReady(connection: AzureEngineCredentials, fetchImpl: Fetch = fetch): Promise<boolean> {
+export async function azureCiSetupReady(connection: AzureEngineCredentials, fetchImpl: Fetch = fetch, runtimeObservation = false): Promise<boolean> {
   const token = await azureDeployToken(connection, fetchImpl);
   const roles = Object.values(azureCiRoleDefinitions(connection.subscriptionId, connection.resourceGroup));
   for (const role of roles) {
@@ -197,7 +217,7 @@ export async function azureCiSetupReady(connection: AzureEngineCredentials, fetc
     const p = entry.properties;
     return p?.principalId?.toLowerCase() === connection.deployPrincipalId.toLowerCase() && p.scope?.toLowerCase() === scope.toLowerCase()
       && p.roleDefinitionId?.toLowerCase().endsWith(AZURE_ROLES.roleBasedAccessControlAdministrator)
-      && [false, true].some(reader => p.condition === appRoleAssignmentCondition(roles.map(role => role.guid), reader)) && p.conditionVersion === '2.0';
+      && [false, true].some(reader => [true, runtimeObservation].some(observer => p.condition === appRoleAssignmentCondition(roles.map(role => role.guid), reader, observer))) && p.conditionVersion === '2.0';
   });
 }
 
@@ -210,7 +230,7 @@ export async function azureBucketBackupAccessReady(connection: AzureEngineCreden
   const ci = Object.values(azureCiRoleDefinitions(connection.subscriptionId, connection.resourceGroup)).map(role => role.guid);
   return response.status === 200 && String(p?.principalId).toLowerCase() === connection.deployPrincipalId.toLowerCase() && String(p?.scope).toLowerCase() === scope.toLowerCase() &&
     String(p?.roleDefinitionId).toLowerCase() === roleDefinition(connection.subscriptionId, AZURE_ROLES.roleBasedAccessControlAdministrator).toLowerCase() &&
-    p?.conditionVersion === '2.0' && [[], ci].some(ids => p.condition === appRoleAssignmentCondition(ids, true));
+    p?.conditionVersion === '2.0' && [[], ci].some(ids => [true, false].some(observer => p.condition === appRoleAssignmentCondition(ids, true, observer)));
 }
 
 /** Read-only: what setup would create or update in this subscription. */
@@ -222,7 +242,7 @@ export async function planAzureSetup(session: AzureSignInSession, target: AzureS
   const changes: AzureSetupChange[] = [];
 
   const unregistered: string[] = [];
-  for (const namespace of AZURE_RESOURCE_PROVIDERS) {
+  for (const namespace of requiredProviders(target.monitoringResourceProviders || target.runtimeObservation)) {
     const provider = ensure(await rest(fetchImpl, tokens.arm, 'GET', `${ARM}/subscriptions/${subscriptionId}/providers/${namespace}?api-version=2021-04-01`), `Reading ${namespace}`, [200]);
     if (provider.body.registrationState !== 'Registered') unregistered.push(namespace);
   }
@@ -272,19 +292,25 @@ export async function planAzureSetup(session: AzureSignInSession, target: AzureS
     change: 'Two fixed CI roles: read and update existing apps/jobs; upload and run builds in the assigned registry. The deploy identity may assign these roles but cannot change their permissions.' });
   const ciRoleIds = ciRoles.map(role => role.guid);
   let withReader = target.bucketBackupReader === true;
-  let grants = deployRoleGrants(ciRoleIds, withReader);
+  let withObserver = target.runtimeObservation === true;
+  let grants = deployRoleGrants(ciRoleIds, withReader, withObserver);
   let rolesState: AzureSetupChange['state'] = 'create';
   if (principal?.status === 200 && existingGroup.status === 200) {
     const listed = ensure(await rest(fetchImpl, tokens.arm, 'GET', `${ARM}${scope}/providers/Microsoft.Authorization/roleAssignments?api-version=2022-04-01&$filter=${encodeURIComponent(`principalId eq '${String(principal.body.id)}'`)}`), 'Reading role assignments', [200]);
     const held = ((listed.body.value ?? []) as Array<{ properties?: { roleDefinitionId?: string; scope?: string; condition?: string } }>)
       .filter((entry) => entry.properties?.scope?.toLowerCase() === scope.toLowerCase());
     // Retain a previously approved ceiling when an unrelated setup request omits backup intent.
-    if (held.some(entry => entry.properties?.roleDefinitionId?.toLowerCase().endsWith(AZURE_ROLES.roleBasedAccessControlAdministrator) &&
-        [[], Object.values(azureCiRoleDefinitions(subscriptionId, group)).map(role => role.guid)]
-          .some(ids => entry.properties?.condition === appRoleAssignmentCondition(ids, true)))) {
-      withReader = true;
-      grants = deployRoleGrants(ciRoleIds, true);
+    for (const entry of held) {
+      if (!entry.properties?.roleDefinitionId?.toLowerCase().endsWith(AZURE_ROLES.roleBasedAccessControlAdministrator)) continue;
+      for (const ids of [[], ciRoleIds]) {
+        for (const reader of [false, true]) for (const observer of [false, true]) {
+          if (entry.properties.condition === appRoleAssignmentCondition(ids, reader, observer)) {
+            withReader ||= reader; withObserver ||= observer;
+          }
+        }
+      }
     }
+    grants = deployRoleGrants(ciRoleIds, withReader, withObserver);
     const matches = grants.every((grant) => held.some((entry) => entry.properties?.roleDefinitionId?.toLowerCase().endsWith(grant.role)
       && (entry.properties.condition ?? undefined) === grant.condition));
     rolesState = matches ? 'ok' : 'update';
@@ -295,7 +321,7 @@ export async function planAzureSetup(session: AzureSignInSession, target: AzureS
     change: `A client secret for ${appName}, valid one year: lets this computer deploy; stored encrypted here and never shown` });
   return {
     tenantId, subscriptionId, subscriptionName: target.subscription.displayName, location: target.location, signedInAs: session.username,
-    resourceGroup: group, appName, vaultName, ...(withReader ? { bucketBackupReader: true as const } : {}), ...(target.repository ? { repository: target.repository } : {}), environments: target.environments,
+    resourceGroup: group, appName, vaultName, ...(target.monitoringResourceProviders || target.runtimeObservation ? { monitoringResourceProviders: true as const } : {}), ...(withReader ? { bucketBackupReader: true as const } : {}), ...(withObserver ? { runtimeObservation: true as const } : {}), ...(target.repository ? { repository: target.repository } : {}), environments: target.environments,
     changes, ready: changes.every((change) => change.state === 'ok'),
   };
 }
@@ -317,9 +343,20 @@ export async function applyAzureSetup(session: AzureSignInSession, plan: AzureSe
   const delay = options.retryDelayMs ?? 5000;
   const tokens = await tokensFor(session, plan.tenantId, fetchImpl);
   const { subscriptionId } = plan;
-  for (const namespace of AZURE_RESOURCE_PROVIDERS) {
+  for (const namespace of requiredProviders(plan.monitoringResourceProviders)) {
     // Registration finishes in the background within minutes; plans check it before building.
     ensure(await rest(fetchImpl, tokens.arm, 'POST', `${ARM}/subscriptions/${subscriptionId}/providers/${namespace}/register?api-version=2021-04-01`), `Turning on ${namespace}`, [200, 202]);
+  }
+  if (plan.monitoringResourceProviders) {
+    for (const namespace of monitoringProviders) {
+      const url = `${ARM}/subscriptions/${subscriptionId}/providers/${namespace}?api-version=2021-04-01`;
+      for (let attempt = 0; ; attempt++) {
+        const response = ensure(await rest(fetchImpl, tokens.arm, 'GET', url), `Verifying ${namespace} registration`, [200]);
+        if (response.body.registrationState === 'Registered') break;
+        if (attempt >= 23) throw new Error(`Azure is still registering ${namespace}. Retry the same setup after registration completes.`);
+        await new Promise(done => setTimeout(done, delay));
+      }
+    }
   }
   const scope = groupScope(subscriptionId, plan.resourceGroup);
   ensure(await rest(fetchImpl, tokens.arm, 'PUT', `${ARM}${scope}?api-version=2021-04-01`, { location: plan.location, tags: { 'managed-by': 'hypervibe' } }),
@@ -363,7 +400,7 @@ export async function applyAzureSetup(session: AzureSignInSession, plan: AzureSe
       if (!sameCiRole(verified.body.properties, role.properties)) throw new Error('The new CI role permissions could not be verified; no dependent assignment was granted.');
     }
   }
-  for (const grant of deployRoleGrants(ciRoles.map((role) => role.guid), plan.bucketBackupReader)) {
+  for (const grant of deployRoleGrants(ciRoles.map((role) => role.guid), plan.bucketBackupReader, plan.runtimeObservation)) {
     const url = `${ARM}${scope}/providers/Microsoft.Authorization/roleAssignments/${roleAssignmentName(scope, servicePrincipalId, grant.role)}?api-version=2022-04-01`;
     const body = { properties: {
       roleDefinitionId: roleDefinition(subscriptionId, grant.role), principalId: servicePrincipalId, principalType: 'ServicePrincipal',

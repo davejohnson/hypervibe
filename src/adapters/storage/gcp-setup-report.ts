@@ -17,6 +17,7 @@ interface ReportSource {
   bucketCopy?: PlanReport['bucketCopy'];
   bootstrapConnection?: PlanReport['bootstrapConnection'];
   ciReleaseAccess?: PlanReport['ciReleaseAccess'];
+  runtimeObservationAccess?: PlanReport['runtimeObservationAccess'];
   projectName?: string;
   createdAt?: string;
   planned: { actions: unknown; blockers?: unknown };
@@ -49,7 +50,7 @@ export function setupReport(scope: SetupScope, source: ReportSource): PlanReport
     target: scope.gcpProjectId, cloudTarget: { provider: 'gcp', projectId: scope.gcpProjectId },
     scope: 'Google Cloud project setup', createdAt: source.createdAt,
     actions: source.planned.actions, blocked: source.planned.blockers, approval: 'whole-plan',
-    setupPurpose: source.setupPurpose, bucketCopy: source.bucketCopy, bootstrapConnection: source.bootstrapConnection, ciReleaseAccess: source.ciReleaseAccess,
+    setupPurpose: source.setupPurpose, bucketCopy: source.bucketCopy, bootstrapConnection: source.bootstrapConnection, ciReleaseAccess: source.ciReleaseAccess, runtimeObservationAccess: source.runtimeObservationAccess,
   });
   if (report.actions.length !== source.planned.actions.length) throw new Error('The saved Google Cloud setup actions could not be read.');
 
@@ -156,6 +157,7 @@ export function findSavedSetupReport(projectId: string, gcpProjectId: string, pl
       bootstrapConnection: typeof connection.scope === 'string' && typeof connection.deploymentAccount === 'string'
         ? { scope: connection.scope, deploymentAccount: connection.deploymentAccount } : undefined,
       bucketCopy: reportBucketCopy(saved.bucketCopy),
+      runtimeObservationAccess: Array.isArray(saved.runtimeObservationAccess) ? saved.runtimeObservationAccess.filter((grant): grant is string => typeof grant === 'string') : undefined,
       ciReleaseAccess: Array.isArray(saved.ciReleaseAccess) ? saved.ciReleaseAccess.filter((grant): grant is string => typeof grant === 'string') : undefined,
       configuration: saved.configuration, projectName: typeof saved.projectName === 'string' ? saved.projectName : undefined,
       createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : fs.statSync(file).mtime.toISOString(),

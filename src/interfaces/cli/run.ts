@@ -24,6 +24,27 @@ export async function runCli(
   options: CliRunOptions = {}
 ): Promise<number> {
   const io = options.io ?? createProcessCliIo();
+  if (argv[0] === 'ci' && ['observe', 'deliver-observations'].includes(argv[1])) {
+    if (argv.length !== 4 || argv[2] !== '--env') {
+      io.writeErr(`Usage: hypervibe ci ${argv[1]} --env <environment>\n`);
+      return 2;
+    }
+    try {
+      const { runObserve, deliverObservations } = await import('../../ci/observe.js');
+      if (argv[1] === 'deliver-observations') {
+        const count = await deliverObservations(argv[3]);
+        io.writeOut(`Delivered ${count} runtime observations to the hosted review.\n`);
+        return 0;
+      }
+      const report = await runObserve(argv[3]);
+      io.writeOut(`Checked ${report.environment}. ${report.observations.length} observations recorded.\n`);
+      return 0;
+    } catch {
+      if (argv[1] === 'deliver-observations') io.writeErr('Hosted review delivery failed. Check the project’s GitHub connection and environment. The next poll can retry.\n');
+      else io.writeErr('Runtime observation could not finish. Check the workflow identity, applied bindings and previous checkpoint.\n');
+      return 1;
+    }
+  }
   if (argv[0] === 'reviews') {
     const { runReviews } = await import('./reviews.js');
     return runReviews(argv.slice(1), io);

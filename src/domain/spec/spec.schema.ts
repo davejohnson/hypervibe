@@ -1669,6 +1669,12 @@ export const environmentSpecSchema = z.preprocess((environment) => withDefaultDa
   }),
   services: z.record(z.string().min(1), serviceSpecSchema).default({}),
   database: databaseSpecSchema.optional(),
+  /** A scheduled, read-only observer for this environment on the repository's default branch. */
+  runtimeObservation: z.object({
+    hostedReview: z.boolean().optional(),
+    intervalMinutes: z.union([z.literal(5), z.literal(10), z.literal(15), z.literal(30)]).optional(),
+    branch: z.string().regex(/^[a-zA-Z0-9_-][a-zA-Z0-9._/-]*$/).refine(branch => !branch.includes('..') && !branch.endsWith('/')),
+  }).strict().optional(),
   /** Optional backup intent. Ordinary deployments never require this policy or recovery evidence. */
   backups: z.discriminatedUnion('mode', [
     z.object({ mode: z.literal('daily'),
@@ -2273,6 +2279,13 @@ export const projectSpecSchema = z.object({
   ).default({}),
   environments: z.record(z.string().min(1), environmentSpecSchema),
 }).strict().superRefine((spec, ctx) => {
+  for (const [environmentName, env] of Object.entries(spec.environments)) {
+    if (env.runtimeObservation && (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(environmentName)
+      || !['cloudrun', 'aws', 'azure'].includes(env.hosting.provider))) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'runtimeObservation'],
+        message: 'Runtime monitoring requires Cloud Run, AWS or Azure and a lowercase environment name using letters, digits and hyphens.' });
+    }
+  }
   for (const [key, slot] of Object.entries(spec.secrets)) for (const [index, check] of (slot.credential?.verification ?? []).entries()) {
     if (!spec.environments[check.environment]?.services[check.service]) ctx.addIssue({ code: z.ZodIssueCode.custom,
       path: ['secrets', key, 'credential', 'verification', index], message: 'Credential operation checks must target a declared environment and service.' });

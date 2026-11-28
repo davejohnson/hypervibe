@@ -48,3 +48,23 @@ it('repairs bindings from existing state and preserves recovery identities on un
   update.mockClear(); engine.inspectState.mockResolvedValue({ ok: false, error: 'secret' } as never);
   expect(await recordEngineWorkloadBindings(ctx, engine as never, params)).toMatchObject({ ok: false }); expect(update).not.toHaveBeenCalled();
 });
+it('retires a removed engine workload only after a complete apply to the same target', async () => {
+  const previous = { serviceId: ecs + ':service/historical/removed', resourceType: 'ecs-service', workloadKind: 'worker', region };
+  const other = { admin: 'external' };
+  const environment = { id: 'env', platformBindings: { provider: 'aws', projectId: accountId, environmentId: region, engine: { kind: 'opentofu' },
+    services: { old: previous, desired: previous, external: other } } };
+  const update = vi.fn();
+  const ctx = { repos: { environments: { findById: () => environment, updatePlatformBindings: update } } } as never;
+  const engine = { inspectState: vi.fn().mockResolvedValue({ ok: true, present: true, value: {} }) };
+  const params = { environment, backend: {}, auth: { env: {}, redact: [] }, state: {}, provider: 'aws', projectId: accountId, environmentId: region, project: () => ({}) };
+  for (const target of [{ ...params }, { ...params, projectId: '000011112222', desiredServices: ['desired'] }]) {
+    await recordEngineWorkloadBindings(ctx, engine as never, target as never);
+    expect(update.mock.lastCall![1].services).toEqual(environment.platformBindings.services);
+  }
+  await recordEngineWorkloadBindings(ctx, engine as never, { ...params, desiredServices: ['desired'] } as never);
+  expect(update.mock.lastCall![1].services).toEqual({ desired: previous, external: other });
+  update.mockClear();
+  engine.inspectState.mockResolvedValue({ ok: true, present: false });
+  await recordEngineWorkloadBindings(ctx, engine as never, { ...params, desiredServices: [] } as never);
+  expect(update).not.toHaveBeenCalled();
+});

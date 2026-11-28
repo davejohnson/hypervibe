@@ -5,6 +5,7 @@ import { getDb } from '../sqlite.adapter.js';
 import { parseJsonColumn } from '../json.codec.js';
 import { runPlanColumnSchema, runReceiptsColumnSchema } from '../column.schemas.js';
 import type { Run, CreateRunInput, RunStatus, RunReceipt } from '../../../domain/entities/run.entity.js';
+import { engineSegmentOf, type AppliedEngineDeclaration, type EngineRetirementScope, type EngineStateIdentity } from '../../../domain/ports/infrastructure-engine.port.js';
 import type { PlanAction } from '../../../domain/plan/plan.types.js';
 
 export interface ReserveApplyInput {
@@ -31,7 +32,72 @@ function isSavedPlan(run: Run): boolean {
   return run.type === 'plan' && 'kind' in run.plan && run.plan.kind === 'hv_plan';
 }
 
+/** A grouped action can remove one address while creating or updating another. */
+function retainedAfterApply(action: PlanAction, address: string): boolean {
+  const segment = engineSegmentOf(action);
+  if (!segment || new Set(segment.addresses).size !== segment.addresses.length
+    || (action.type === 'destroy' && segment.addresses.length === 1)) return false;
+  if (segment.operations !== undefined) {
+    const operation = segment.operations?.[address];
+    return operation === 'create' || operation === 'update' || operation === 'replace' || operation === 'import';
+  }
+  if (action.type === 'create' || action.type === 'update' || segment.addresses.length === 1) return true;
+
+  // Older plans recorded the individual operations in their generated review sentence.
+  // Require an exact clause for every segment address, in the same order, before using it.
+  const prefix = 'OpenTofu will ';
+  if (typeof action.reason !== 'string' || !action.reason.startsWith(prefix) || !action.reason.endsWith('.')) return false;
+  const clauses = action.reason.slice(prefix.length, -1).split(', ');
+  if (clauses.length !== segment.addresses.length) return false;
+  const operations = clauses.map((clause, index) => {
+    const match = /^(create|update|replace|delete|adopt the explicitly selected existing) (\S+)$/.exec(clause);
+    return match?.[2] === segment.addresses[index] ? match?.[1] : undefined;
+  });
+  return operations.every(Boolean) && (action.type !== 'destroy' || operations.includes('delete'))
+    && operations[segment.addresses.indexOf(address)] !== 'delete';
+}
+
 export class RunRepository {
+  /** Only the latest attempt that could have changed the resource can prove ownership. */
+  appliedEngineDeclarations(state: EngineStateIdentity, scope: EngineRetirementScope, addresses: string[]): AppliedEngineDeclaration[] {
+    if (!addresses.length || state.partition !== 'environment' || state.provider !== scope.provider) return [];
+    const rows = getDb().prepare(`
+      WITH history AS (
+        SELECT o.key AS address, o.value AS outcome, p.plan AS document, a.value AS action,
+          r.value AS receipt, ROW_NUMBER() OVER (PARTITION BY o.key ORDER BY u.rowid DESC, r.key DESC) AS latest
+        FROM runs u JOIN runs p ON p.id = json_extract(u.plan, '$.planRunId')
+        JOIN json_each(u.receipts) r JOIN json_each(r.value, '$.result.outcomes') o
+        JOIN json_each(p.plan, '$.actions') a ON json_extract(a.value, '$.id') = json_extract(r.value, '$.step')
+        WHERE u.project_id = ? AND u.environment_id = ? AND u.type = 'apply'
+          AND p.project_id = u.project_id AND p.environment_id = u.environment_id AND p.type = 'plan'
+          AND o.key IN (SELECT value FROM json_each(?))
+          AND o.value IS NOT 'not_started'
+          AND json_extract(r.value, '$.result.engineSegment') = 'opentofu:' || json_extract(p.plan, '$.engine.planId')
+      )
+      SELECT address, json_extract(document, '$.engine.planId') AS planId,
+        json_extract(action, '$.metadata.engineSegment.configurationDigest') AS configurationDigest,
+        json_extract(action, '$.id') AS actionId, json_extract(action, '$.resource.kind') AS kind,
+        json_extract(action, '$.resource.name') AS name, json_extract(document, ?) AS target, action
+      FROM history
+      WHERE latest = 1 AND outcome = 'succeeded'
+        AND json_extract(document, '$.kind') = 'hv_plan' AND json_extract(document, '$.scope') = 'infrastructure-engine'
+        AND json_extract(document, '$.engine.teardown') IS NOT 1
+        AND json_extract(document, '$.engine.state.provider') = ?
+        AND json_extract(document, '$.engine.state.partition') = 'environment'
+        AND json_extract(document, '$.engine.state.projectId') = ? AND json_extract(document, '$.engine.state.environmentId') = ?
+        AND json_extract(action, '$.resource.provider') = ? AND json_extract(action, '$.verified') = 1
+        AND json_extract(action, '$.type') IN ('create', 'update', 'replace', 'destroy')
+        AND json_extract(action, '$.metadata.engineSegment.id') = json_extract(receipt, '$.result.engineSegment')
+        AND address IN (SELECT value FROM json_each(action, '$.metadata.engineSegment.addresses'))
+    `).all(state.projectId, state.environmentId, JSON.stringify(addresses), '$.engine.' + scope.provider,
+      scope.provider, state.projectId, state.environmentId, scope.provider) as Array<AppliedEngineDeclaration & { target: string | null; action: string }>;
+    return rows.flatMap(({ target: rawTarget, action, ...proof }) => {
+      const target = JSON.parse(rawTarget ?? 'null') as Record<string, unknown> | null;
+      if (!target || !Object.entries(scope).every(([key, value]) => key === 'provider' || target[key] === value)) return [];
+      return retainedAfterApply(JSON.parse(action) as PlanAction, proof.address) ? [proof] : [];
+    });
+  }
+
   create(input: CreateRunInput): Run {
     if (input.type === 'apply') {
       throw new Error('Apply runs must be created with RunRepository.reserveApply().');

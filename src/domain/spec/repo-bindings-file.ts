@@ -3,6 +3,8 @@ import path from 'path';
 import { serviceInstanceIntentsSchema } from '../ports/service-instance.port.js';
 import { serviceInstanceHistory, serviceInstanceIntentFingerprint } from '../services/service-instance-recovery.js';
 import { canonicalJsonSha256 } from '../../lib/canonical-json.js';
+import { reconcileRuntimeObservationWorkflow } from '../services/runtime-observation-workflow.js';
+import { runtimeObservationIntent, runtimeObserverSchema } from './runtime-observation.js';
 import { repoBindingsFileSchema } from './repo-bindings.schema.js';
 import type { Environment } from '../entities/environment.entity.js';
 import type { Project } from '../entities/project.entity.js';
@@ -39,6 +41,7 @@ const LOCAL_ONLY_BINDING_KEYS = new Set([
   'delegatedEnvBindings',
   'credentialUpdates',
   'runtimeRollouts',
+  'runtimeObserverCleanup',
   'delegatedActionsBindings',
   'repositoryVariableOwnership',
   'serviceInstanceCreateHistory',
@@ -140,6 +143,7 @@ export function mergeRepoPlatformBindings(
   existing: Record<string, unknown>,
   repoBindings: Record<string, unknown>
 ): Record<string, unknown> {
+  if (Object.hasOwn(repoBindings, 'runtimeObserverCleanup')) throw new Error('Pending runtime observer cleanup is local only and cannot be imported.');
   const repoEngine = asRecord(repoBindings.engine);
   if (Object.hasOwn(repoEngine ?? {}, 'runtimeSecretGrantOrigins') || (Object.hasOwn(repoBindings, 'engine') && !repoEngine
     && Object.hasOwn(asRecord(existing.engine) ?? {}, 'runtimeSecretGrantOrigins'))) throw new Error('Runtime secret grant ownership is local only and cannot be imported.');
@@ -309,6 +313,22 @@ function presentStorageInstanceScopes(platformBindings: Record<string, unknown>)
 
 function sanitizePlatformBindings(raw: Record<string, unknown>): Record<string, unknown> {
   const sanitized = sanitize(raw) as Record<string, unknown>;
+  if (raw.runtimeObserver) {
+    const observer = runtimeObserverSchema.parse(raw.runtimeObserver);
+    sanitized.runtimeObserver = observer;
+    const original = asRecord(raw.services); const services = asRecord(sanitized.services) ?? {};
+    // A secret-shaped logical service name may be omitted by generic export.
+    // Preserve only the existing native identities which match the verified observer.
+    for (const [name, service] of Object.entries(observer.services)) {
+      if (Object.hasOwn(services, name) || !original || !Object.hasOwn(original, name)) continue;
+      const source = asRecord(original[name]);
+      if (observer.provider === 'gcp') {
+        const field = service.workloadKind === 'cron' ? 'jobName' : service.workloadKind === 'worker' ? 'workerPoolName' : 'serviceId';
+        if (source && source[field] === service.serviceId.split('/').at(-1)) services[name] = { [field]: source[field] };
+      } else if (source && Object.entries(service).every(([key, value]) => source[key] === value)) services[name] = service;
+    }
+    sanitized.services = services;
+  }
   if (raw.serviceInstanceCreates !== undefined) sanitized.serviceInstanceCreates = Object.fromEntries(
     Object.entries(serviceInstanceIntentsSchema.parse(raw.serviceInstanceCreates)).filter(([, intent]) => intent.completed !== true));
   if (raw.recoveryDatabases !== undefined) sanitized.recoveryDatabases = recoveryDatabaseBindings(raw.recoveryDatabases);
@@ -424,6 +444,19 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
     ? { version: 1 as const, project: project.name, environments: {} }
     : parseDocument(parseBindingsJson(raw, file), file, project.name);
 
+  const previousObserver = current.environments[environment.name]?.platformBindings.runtimeObserver;
+  const observation = spec?.environments[environment.name]?.runtimeObservation;
+  const binding = environment.platformBindings.runtimeObserver;
+  const hasWorkloads = Object.keys(spec?.environments[environment.name]?.services ?? {}).length > 0;
+  if (binding && spec && observation && hasWorkloads) {
+    const intent = runtimeObservationIntent(spec, environment.name)!;
+    const saved = runtimeObserverSchema.parse(binding);
+    if (saved.repository === intent.repository && saved.branch === intent.branch && saved.environmentName === environment.name) {
+      reconcileRuntimeObservationWorkflow(root, environment.name, { ...intent, hostedReview: observation.hostedReview, intervalMinutes: observation.intervalMinutes });
+    }
+  } else if (spec && (previousObserver || binding === null) && (!observation || !hasWorkloads) && !binding) {
+    reconcileRuntimeObservationWorkflow(root, environment.name);
+  }
   const platformBindings = presentStorageInstanceScopes(
     sanitizePlatformBindings(environment.platformBindings)
   );

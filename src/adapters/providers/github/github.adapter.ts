@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { GitHubPullRequestSummary, GitHubWorkflowPublicationPort } from '../../../domain/ports/github-workflow-publication.port.js';
 export type { GitHubPullRequestSummary } from '../../../domain/ports/github-workflow-publication.port.js';
 import { createRequire } from 'module';
-import { readBoundedArtifactBody, readReleaseArtifactFilesZip } from './github-artifact.js';
+import { readBoundedArtifactBody, readReleaseArtifactFilesZip, RELEASE_ARTIFACT_LIMIT } from './github-artifact.js';
 import { readGitHubSourceArchive } from './github-source.js';
 import { githubPackageReadCredentialUpdate } from './github-credential-update.js';
 import {
@@ -269,6 +269,7 @@ export class GitHubAdapter implements GitHubWorkflowPublicationPort, RollbackHis
 
   async getRepository(owner: string, repo: string): Promise<{
     id?: number;
+    owner?: { id?: number };
     full_name?: string;
     default_branch: string;
     html_url?: string;
@@ -987,7 +988,7 @@ export class GitHubAdapter implements GitHubWorkflowPublicationPort, RollbackHis
   }
 
   /** Authenticated redirect discovery, then credential-free bounded ZIP read. */
-  async readArtifactFiles(owner: string, repo: string, artifactId: number): Promise<Record<string, string>> {
+  async readArtifactFiles(owner: string, repo: string, artifactId: number, kind?: 'runtime-report'): Promise<Record<string, string>> {
     if (!this.credentials) throw new Error('Not connected. Call connect() first.');
     if (!Number.isSafeInteger(artifactId) || artifactId <= 0) throw new Error('Invalid artifact id.');
     const signal = AbortSignal.timeout(15_000);
@@ -1017,11 +1018,13 @@ export class GitHubAdapter implements GitHubWorkflowPublicationPort, RollbackHis
       throw new Error('Could not download the release artifact.');
     }
     if (body.status !== 200) throw new Error(`Artifact body unavailable (${body.status}).`);
-    return readReleaseArtifactFilesZip(await readBoundedArtifactBody(body, signal));
+    const expandedLimit = kind === 'runtime-report' ? 8 * 1024 * 1024 : RELEASE_ARTIFACT_LIMIT;
+    const archive = await readBoundedArtifactBody(body, signal, { maxBytes: expandedLimit + 65_536, name: kind ? 'Observation report' : 'Release artifact' });
+    return readReleaseArtifactFilesZip(archive, expandedLimit);
   }
 
-  async readJsonArtifact(owner: string, repo: string, artifactId: number, filename: string): Promise<unknown> {
-    const files = await this.readArtifactFiles(owner, repo, artifactId);
+  async readJsonArtifact(owner: string, repo: string, artifactId: number, filename: string, kind?: 'runtime-report'): Promise<unknown> {
+    const files = await this.readArtifactFiles(owner, repo, artifactId, kind);
     try {
       if (Object.keys(files).length !== 1 || !Object.hasOwn(files, filename)) throw new Error();
       return JSON.parse(files[filename]);

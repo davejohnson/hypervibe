@@ -1,4 +1,9 @@
+import { observeObserverRepository } from './observer-repository.js';
+import type { ObserverRepository } from '../domain/spec/runtime-observation.js';
 import { projectAwsDatabaseQuerySecret } from '../adapters/providers/aws/aws-database-query-secret.js';
+import { runtimeMonitoringCoverage } from '../domain/plan/runtime-monitoring-coverage.js';
+import { runtimeObservationIntent } from '../domain/spec/runtime-observation.js';
+import { beginRuntimeObserverApply, clearRuntimeObserver, previousRuntimeObserverServices, recordRuntimeObserver } from './runtime-observer-bindings.js';
 import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
@@ -79,6 +84,7 @@ export interface AwsEngineBinding {
 }
 
 export interface AwsEngineContext {
+  observerRepository?: ObserverRepository;
   connection: AwsEngineCredentials;
   auth: EngineAuthentication;
   environment: Environment;
@@ -197,9 +203,12 @@ export async function resolveAwsEngineContext(ctx: CommandContext, project: Proj
 }
 
 /** Desired state the AWS engine cannot manage yet; listed problems block planning instead of being ignored. */
-export function awsEngineProblems(spec: ProjectSpec, environmentName: string): string[] {
+export function awsEngineProblems(spec: ProjectSpec, environmentName: string, previous?: AwsEngineBinding): string[] {
   const environment = spec.environments[environmentName]!;
   const problems: string[] = [...commonEngineProblems(environment), ...secretServiceScopeProblems(spec, environmentName)];
+  if (!environment.database && previous?.kind === 'opentofu' && previous.sharedDatabase && (previous.databaseLoginAt || previous.database)) {
+    problems.push('This environment still owns a database on its shared Aurora cluster. Restore the database declaration to preserve it. To retire the entire environment, review hv_plan with scope="teardown", including its separate database removal action.');
+  }
   if (environment.database && awsProfileFor(environmentName) === 'production') {
     problems.push(`${environmentName} uses the production profile (RDS db.t4g.micro), which the AWS engine does not build yet. Testing environments (Aurora that pauses when idle) are supported.`);
   }
@@ -225,7 +234,7 @@ export function awsResourceName(prefix: string, service: string): string {
   return `${prefix}-${service}`.slice(0, 60);
 }
 
-export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'connection' | 'prefix' | 'parameterPath' | 'environment' | 'shared' | 'database'>, extra: {
+export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'observerRepository' | 'connection' | 'prefix' | 'parameterPath' | 'environment' | 'shared' | 'database'>, extra: {
   secretKeys: string[];
   /** The image the plan builds first, when the environment has none yet. */
   image?: string;
@@ -250,8 +259,13 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
     for (const key of Object.keys(storage)) if (key in environmentSpec.envVars) throw new Error(`Environment variable ${key} conflicts with storage ${buckets[0]}.`);
     return { ...Object.fromEntries(Object.entries(environmentSpec.envVars).filter(([key]) => !isBuildTokenKey(key))), ...storage };
   };
+  const previousObserverServices = previousRuntimeObserverServices(context.environment.platformBindings, 'aws');
   return {
     accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
+    ...(previousObserverServices ? { previousObserverServices } : {}),
+    ...(environmentSpec.runtimeObservation ? { nativeMonitoring: true } : {}),
+    ...(environmentSpec.runtimeObservation && services.length && context.observerRepository
+      ? { observation: { ...runtimeObservationIntent(spec, environmentName)!, ...context.observerRepository } } : {}),
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     environmentId: context.environment.id, parameterPath: context.parameterPath,
     ...(environmentSpec.database ? { database: { clusterArn: context.shared.clusterArn, name: context.database.name } } : {}),
@@ -464,11 +478,17 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
 }): Promise<InfrastructurePlanResult | { blocked: string[]; missingOutsideKeys?: string[] }> {
   const { project, spec, environmentName } = params;
   const environmentSpec = spec.environments[environmentName]!;
-  const problems = awsEngineProblems(spec, environmentName);
+  const existing = ctx.repos.environments.findByProjectAndName(project.id, environmentName);
+  const problems = awsEngineProblems(spec, environmentName, existing ? awsBinding(existing) : undefined);
   if (problems.length) return { blocked: problems };
   const context = await resolveAwsEngineContext(ctx, project, environmentName, spec);
   if ('blocked' in context) return { blocked: [context.blocked] };
-  const setup = await awsAccessCurrent(context.credentials, context.connection.accountId);
+  const observerIntent = Object.keys(environmentSpec.services).length ? runtimeObservationIntent(spec, environmentName) : undefined;
+  if (observerIntent) {
+    try { context.observerRepository = await observeObserverRepository(observerIntent); }
+    catch { return { blocked: ['Hypervibe could not verify the GitHub repository ID and default branch for the scheduled observer. Check gitRemoteUrl, the configured branch and the GitHub connection.'] }; }
+  }
+  const setup = await awsAccessCurrent(context.credentials, context.connection.accountId, Boolean(observerIntent));
   if (setup === 'outdated') {
     return { blocked: ['This version of Hypervibe needs a small update to its AWS access (one sign-in, then approve on the page): run hv_connections provider="aws" action="connect".'] };
   }
@@ -550,9 +570,15 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   }] : [];
   // 3. Everything else.
   const planId = crypto.randomUUID();
-  const planned = await engine.plan({ backend: awsEngineBackend, configuration, auth: context.auth, state: context.state, planId });
+  const planned = await engine.plan({ backend: awsEngineBackend, configuration, auth: context.auth, state: context.state, planId,
+    retirementScope: { provider: 'aws', accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
-  if (planned.blockers.length) return { blocked: planned.blockers };
+  if (planned.blockers.length) {
+    const bucketDeletion = planned.unmanagedDeletes.some(address => address.startsWith('aws_s3_bucket.'));
+    return { blocked: [...planned.blockers, ...(bucketDeletion ? [
+      'Removing or renaming an S3 bucket could remove its access protections while data or old versions remain. Restore its original storage entry to keep it protected. To retire the entire environment and its data, restore the entry and review hv_plan with scope="teardown", including its separate bucket-emptying action.',
+    ] : [])] };
+  }
 
   // Earlier bindings have no Dockerfile provenance. An unrelated/no-op plan needs no new image evidence.
   if (!commit && previous.imageUri && previous.imageHasDockerfile !== true && planned.actions.some(action =>
@@ -602,12 +628,13 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   const actions = [...secretActions, ...sharedActions, ...buildPlanned.actions, ...imageActions, ...appLoginActions, ...engineActions, ...laterLoginActions];
   const warnings = [
     `AWS ${context.connection.region}, ${awsProfileFor(environmentName)} profile.`,
+    ...runtimeMonitoringCoverage(spec, environmentName, actions),
     ...(environmentSpec.database ? [`Testing environments share one Aurora Serverless cluster (${context.shared.clusterIdentifier}); ${environmentName} gets its own database and logins on it.`] : []),
     ...(environmentSpec.database?.automatedBackups ? ['Aurora automatically backs up the whole cluster. A new cluster starts with one day of retention. An existing cluster keeps its retention window.'] : []),
     ...(!binding.imageUri && !commit && workloads ? ['Hypervibe could not find this project\'s local repository, so the services are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
   return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
-    engine: { planId, state: context.state, build: { planId: buildPlanId, state: context.buildState }, ...(sharedActions.length ? { shared: { planId: sharedPlanId, state: context.shared.state } } : {}), aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
+    engine: { planId, observerRepository: context.observerRepository, state: context.state, build: { planId: buildPlanId, state: context.buildState }, ...(sharedActions.length ? { shared: { planId: sharedPlanId, state: context.shared.state } } : {}), aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
 }
 
 export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: {
@@ -616,7 +643,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; aws?: { accountId: string; region: string; prefix: string } } };
+  const document = loaded.document as PlanRunDocument & { engine?: { observerRepository?: ObserverRepository; planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; aws?: { accountId: string; region: string; prefix: string } } };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
   const snapshotOnly = Boolean((reviewed as { teardown?: boolean } | undefined)?.teardown) && !params.spec.environments[environmentName];
@@ -639,6 +666,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
       return { kind: 'blocked', reason: 'The reviewed image build differs from the images required for these workloads. Run hv_plan again.' };
     }
   }
+  context.observerRepository = reviewed.observerRepository;
   clearEngineCiBinding(ctx, context.environment);
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
@@ -647,6 +675,10 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     ctx.repos.environments.updatePlatformBindings(context.environment.id, { aws: { ...awsBinding(context.environment), naming: 2 } });
   }
   const access = awsAccess(context);
+  const environmentSpec = params.spec.environments[environmentName]!;
+  const monitorWorkloads = Boolean(environmentSpec.runtimeObservation && Object.keys(environmentSpec.services).length);
+  const observerServices = monitorWorkloads ? Object.keys(environmentSpec.services) : undefined;
+  let observerApplyStarted = false;
   const result = await executor.execute({
     planRunId: params.planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
     handler: async (action) => {
@@ -732,18 +764,35 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
       const target = [reviewed.build, reviewed.shared].find((entry) => entry && segment.id === `opentofu:${entry.planId}`) ?? { planId: reviewed.planId, state: context.state };
+      if (target.planId === reviewed.planId) {
+        beginRuntimeObserverApply(ctx, context.environment, 'aws', observerServices);
+        observerApplyStarted = true;
+      }
       const outcome = await engine.apply({ backend: awsEngineBackend, auth: context.auth, state: target.state, planId: target.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses });
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
+  // A rejected or stale apply has not changed the cloud. Keep its prior observer evidence intact.
+  if (result.applyRunId && monitorWorkloads && !observerApplyStarted) beginRuntimeObserverApply(ctx, context.environment, 'aws', observerServices);
   // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
   // A teardown owns binding removal separately; never resurrect its identities.
   if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {
     const recorded = await recordEngineWorkloadBindings(ctx, engine, { environment: context.environment, backend: awsEngineBackend,
       auth: context.auth, state: context.state, provider: 'aws', projectId: context.connection.accountId, environmentId: context.connection.region,
+      desiredServices: result.success ? Object.keys(environmentSpec.services) : undefined,
       project: (state) => projectAwsWorkloadBindings(state, params.spec.environments[environmentName]!.services, { accountId: context.connection.accountId, region: context.connection.region }) });
     if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
+  }
+  if (result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown && monitorWorkloads) {
+    try {
+      await recordRuntimeObserver(ctx, engine, { provider: 'aws', context, spec: params.spec, environmentName });
+    } catch {
+      return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: 'The observer identity or its workloads could not be verified and exported. Run hv_plan and hv_apply again once the workloads exist.' } };
+    }
+  }
+  if (result.success && result.applyRunId && (!monitorWorkloads || (document.engine as { teardown?: boolean }).teardown)) {
+    clearRuntimeObserver(ctx, context.environment);
   }
   await recordEngineCiBindings(ctx, engine, { provider: 'aws', context, spec: params.spec, environmentName,
     succeeded: Boolean(result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) });

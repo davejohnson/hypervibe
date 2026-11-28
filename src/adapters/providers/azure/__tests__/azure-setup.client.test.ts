@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { chooseAzureLocation } from '../../../../application/azure-connect.js';
 import {
-  AZURE_APP_ROLES, AZURE_RESOURCE_PROVIDERS, AZURE_ROLES, appRoleAssignmentCondition, applyAzureSetup, azureCiSetupReady, deployRoleGrants, githubSubjects, planAzureSetup,
+  AZURE_APP_ROLES, AZURE_RESOURCE_PROVIDERS, AZURE_ROLES, appRoleAssignmentCondition, applyAzureSetup, azureCiSetupReady, azureMonitoringSetupReady, deployRoleGrants, githubSubjects, planAzureSetup,
   roleAssignmentName, type AzureSetupPlan,
 } from '../azure-setup.client.js';
 import type { AzureSignInSession } from '../azure-entra.client.js';
@@ -49,6 +49,17 @@ describe('Azure setup access', () => {
     widened = false; incomplete = true; expect(await azureCiSetupReady(connection, azure.fetchImpl)).toBe(false);
     expect(azure.calls.filter((c) => !c.url.startsWith('https://login.')).every((c) => c.method === 'GET')).toBe(true);
   });
+  it('checks both native monitoring registrations with the group-scoped deploy identity', async () => {
+    const connection = { tenantId: TENANT, subscriptionId: SUB, clientId: TENANT, deployPrincipalId: TENANT, clientSecret: 'local-secret-only', resourceGroup: 'hv-billforge', location: 'eastus2', clientSecretExpiresAt: '2027-01-01T00:00:00Z' };
+    let code = 200, registrationState = 'Registered';
+    const azure = fakeAzure([['GET', /\/providers\/Microsoft\.(Portal|Insights)\?/, () => json(code, { registrationState })]]);
+    expect(await azureMonitoringSetupReady(connection, azure.fetchImpl)).toBe(true);
+    registrationState = 'NotRegistered';
+    expect(await azureMonitoringSetupReady({ ...connection, monitoringResourceProviders: true }, azure.fetchImpl)).toBe(false);
+    code = 403;
+    expect(await azureMonitoringSetupReady(connection, azure.fetchImpl)).toBe(false);
+    expect(await azureMonitoringSetupReady({ ...connection, monitoringResourceProviders: true }, azure.fetchImpl)).toBe(true);
+  });
   it('grants roles on the project resource group only, and lets the deploy identity assign nothing but the app data roles to service principals', () => {
     const roles = deployRoleGrants().map((grant) => grant.role);
     expect(roles).not.toContain('8e3af657-a8ff-443c-a75c-2fe8c4bcb635'); // Owner
@@ -95,6 +106,22 @@ describe('Azure setup plan', () => {
     expect(azure.calls.filter((call) => call.method !== 'GET' && !call.url.startsWith('https://login.'))).toEqual([]);
   });
 
+  it('reviews dashboard and alert namespaces only for an environment requesting monitoring', async () => {
+    for (const mode of ['disabled', 'resources', 'workloads']) {
+      const azure = fakeAzure([
+        ['GET', /\/providers\/Microsoft\.[A-Za-z]+\?/, () => json(200, { registrationState: 'NotRegistered' })],
+        ['GET', /\/resourceGroups\/hv-billforge\?/, () => json(404, { error: { code: 'ResourceGroupNotFound' } })],
+        ['GET', /applications\(uniqueName='hypervibe-deploy-billforge'\)/, () => json(404)],
+      ]);
+      const result = await planAzureSetup(session(), { ...target, ...(mode === 'resources' ? { monitoringResourceProviders: true as const } : {}), ...(mode === 'workloads' ? { runtimeObservation: true as const } : {}) }, azure.fetchImpl);
+      expect(Boolean(result.monitoringResourceProviders)).toBe(mode !== 'disabled');
+      expect(Boolean(result.runtimeObservation)).toBe(mode === 'workloads');
+      for (const namespace of ['Microsoft.Portal', 'Microsoft.Insights']) {
+        expect(result.changes.find(c => c.id === 'resource-providers')?.change.includes(namespace)).toBe(mode !== 'disabled');
+      }
+    }
+  });
+
   it('never treats an unreadable answer as absent, and refuses a resource group Hypervibe did not create', async () => {
     const providers: Route = ['GET', /\/providers\/Microsoft\.[A-Za-z]+\?/, () => json(200, { registrationState: 'Registered' })];
     await expect(planAzureSetup(session(), target, fakeAzure([providers, ['GET', /\/resourceGroups\/hv-billforge\?/, () => json(500)]]).fetchImpl))
@@ -110,9 +137,11 @@ describe('Azure setup apply', () => {
     resourceGroup: 'hv-billforge', appName: 'hypervibe-deploy-billforge', vaultName: 'hv-billforge-abc123', repository: 'acme/billforge', environments: ['test'], changes: [], ready: false,
   };
 
-  it('creates the identity, waits for it to reach Resource Manager, scopes roles to the group and returns the secret once', async () => {
+  it.each([false, true])('applies exactly the reviewed provider registrations, scopes roles to the group and returns the secret once (monitoring %s)', async (enabled) => {
     let principalNotFound = 1;
+    let registering = true;
     const azure = fakeAzure([
+      ['GET', /\/providers\/Microsoft\.(Portal|Insights)\?/, () => { const initial = registering; registering = false; return json(200, { registrationState: initial ? 'Registering' : 'Registered' }); }],
       ['POST', /\/providers\/Microsoft\.[A-Za-z]+\/register\?/, () => json(200)],
       ['PUT', /\/resourceGroups\/hv-billforge\?/, () => json(201)],
       ['PUT', /\/vaults\/hv-billforge-abc123\?/, () => json(201)],
@@ -128,9 +157,10 @@ describe('Azure setup apply', () => {
       ['PUT', /\/roleDefinitions\//, () => json(201)],
       ['POST', /applications\/app-object\/addPassword$/, () => json(200, { secretText: 'the-secret', endDateTime: '2027-11-12T00:00:00Z' })],
     ]);
-    const applied = await applyAzureSetup(session(), plan, { createSecret: true, fetchImpl: azure.fetchImpl, retryDelayMs: 1 });
+    const applied = await applyAzureSetup(session(), { ...plan, ...(enabled ? { monitoringResourceProviders: true, runtimeObservation: true } : {}) }, { createSecret: true, fetchImpl: azure.fetchImpl, retryDelayMs: 1 });
     expect(applied).toEqual({ clientId: 'client-id', servicePrincipalId: 'sp-object', resourceGroup: 'hv-billforge', secret: { value: 'the-secret', expiresAt: '2027-11-12T00:00:00Z' } });
-    expect(azure.calls.filter((call) => call.url.includes('/register?'))).toHaveLength(AZURE_RESOURCE_PROVIDERS.length);
+    const registrations = azure.calls.filter(call => call.url.includes('/register?')).map(call => call.url.split('/providers/')[1]?.split('/')[0]);
+    expect(registrations).toEqual([...AZURE_RESOURCE_PROVIDERS, ...(enabled ? ['Microsoft.Portal', 'Microsoft.Insights'] : [])]);
     // The deploy identity cannot create custom roles: reviewed owner setup must install them first.
     const definitions = azure.calls.filter((call) => call.method === 'PUT' && call.url.includes('/roleDefinitions/'));
     expect(definitions).toHaveLength(2);

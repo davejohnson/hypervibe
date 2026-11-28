@@ -142,6 +142,7 @@ export function renderPlanReportContent(report: PlanReport, options: { localRevi
     actionRow(action, index, map.groupByAction.get(action)!, indexes, titles, accessCheck)).join('');
   const { warnings, costs, next, detail } = groupPlanNotices(report);
   const notices = notice('Blockers', report.blocked, 'blocked') + notice('Warnings', warnings, 'warning')
+    + notice('Scheduled runtime monitoring', report.runtimeObservationAccess ?? [], 'info')
     + notice('GitHub release access', report.ciReleaseAccess ?? [], 'info')
     + notice('Database cost and protection', costs, 'info') + notice('What happens next', next, 'info', detail);
   // One small line says where the plan acts, each place a link to its own console. On the local review page the heading

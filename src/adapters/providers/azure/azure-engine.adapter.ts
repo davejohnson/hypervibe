@@ -17,6 +17,7 @@ export const AzureEngineCredentialsSchema = z.object({
   tenantId: uuid,
   subscriptionId: uuid,
   clientId: uuid,
+  monitoringResourceProviders: z.literal(true).optional(),
   /** Object id of the deploy app's service principal (the database's Entra administrator). */
   deployPrincipalId: uuid,
   clientSecret: z.string().min(16),
@@ -117,6 +118,7 @@ providerRegistry.register({
     category: 'deployment',
     orchestration: { logs: { runtime: true } },
     credentialsSchema: AzureEngineCredentialsSchema,
+    credentials: { agentManagedKeys: ['monitoringResourceProviders'] },
     setupHelpUrl: 'https://portal.azure.com/',
     maturity: {
       lifecycle: {

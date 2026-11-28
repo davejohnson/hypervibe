@@ -43,6 +43,7 @@ export interface PlanReport {
   bucketCopy?: { storageName: string; sourceBucket: string; targetBucket: string; copyAccount: string };
   bootstrapConnection?: { scope: string; deploymentAccount: string };
   ciReleaseAccess?: string[];
+  runtimeObservationAccess?: string[];
   target?: string;
   cloudTarget?: ReportCloudTarget;
   billingAccount?: string;
@@ -157,6 +158,7 @@ export function makePlanReport(input: Omit<PlanReport, 'actions' | 'blocked' | '
       ? { setupPurpose: input.setupPurpose } : {}),
     ...(bucketCopy && { bucketCopy }),
     ...(input.bootstrapConnection && { bootstrapConnection: { scope: display(input.bootstrapConnection.scope), deploymentAccount: display(input.bootstrapConnection.deploymentAccount) } }),
+    ...(Array.isArray(input.runtimeObservationAccess) && { runtimeObservationAccess: strings(input.runtimeObservationAccess) }),
     ...(Array.isArray(input.ciReleaseAccess) && { ciReleaseAccess: strings(input.ciReleaseAccess) }),
     actions, blocked: [...blocked], warnings,
   };

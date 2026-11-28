@@ -51,7 +51,7 @@ export function trustedGitHubOwners(trust: string | undefined): string[] {
 }
 
 /** Services the app's own runtime roles may use (the permissions boundary). */
-export function appBoundaryDocument(): Record<string, unknown> {
+export function appBoundaryDocument(runtimeObservation = false): Record<string, unknown> {
   return {
     Version: '2012-10-17',
     Statement: [
@@ -72,6 +72,7 @@ export function appBoundaryDocument(): Record<string, unknown> {
         'ecs:DescribeExpressGatewayService', 'ecs:UpdateExpressGatewayService', 'ecs:DescribeServiceDeployments',
         'codebuild:BatchGetProjects', 'codebuild:StartBuild', 'codebuild:BatchGetBuilds', 'ecr:DescribeImages', 'ecs:DescribeTaskDefinition', 'ecs:RegisterTaskDefinition',
       ] },
+      ...(runtimeObservation ? [{ Sid: 'ObservationCeiling', Effect: 'Allow', Resource: '*', Action: ['ecs:ListTasks', 'ecs:DescribeTasks', 'logs:FilterLogEvents'] }] : []),
       { Sid: 'CiTaskRevisionTags', Effect: 'Allow', Action: ['ecs:TagResource'], Resource: 'arn:aws:ecs:*:*:task-definition/hv-*:*',
         Condition: { StringEquals: { 'ecs:CreateAction': 'RegisterTaskDefinition' } } },
       // The worker waker reads pending work with its own read-only database login.
@@ -154,6 +155,7 @@ export interface AwsSetupPlan {
   repository?: string;
   /** GitHub owners whose Actions may deploy; every repository of an owner is covered. */
   githubOwners: string[];
+  runtimeObservation?: boolean;
   /** Per-project deploy roles from earlier versions, removed once connections use the account role. */
   retiringRoles: string[];
   changes: AwsSetupChange[];
@@ -197,10 +199,12 @@ async function webInfrastructureRoleReady(iam: IAMClient): Promise<boolean | und
  * with the deploy role. A newer Hypervibe can need more access (one sign-in to
  * update); planning with older policies would build workloads that fail at runtime.
  */
-export async function awsAccessCurrent(credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string }, accountId: string): Promise<'current' | 'outdated' | { unknown: string }> {
+export async function awsAccessCurrent(credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string }, accountId: string, runtimeObservation = false): Promise<'current' | 'outdated' | { unknown: string }> {
   const iam = new IAMClient({ region: 'us-east-1', credentials });
   try {
-    const boundary = await policyMatches(iam, `arn:aws:iam::${accountId}:policy${AWS_PATH}${BOUNDARY}`, appBoundaryDocument());
+    const arn = `arn:aws:iam::${accountId}:policy${AWS_PATH}${BOUNDARY}`;
+    const boundary = await policyMatches(iam, arn, appBoundaryDocument(runtimeObservation))
+      || (!runtimeObservation && await policyMatches(iam, arn, appBoundaryDocument(true)));
     const deploy = await policyMatches(iam, `arn:aws:iam::${accountId}:policy${AWS_PATH}${DEPLOY_POLICY}`, deployPolicyDocument(accountId));
     return boundary && deploy ? 'current' : 'outdated';
   } catch (error) {
@@ -209,13 +213,15 @@ export async function awsAccessCurrent(credentials: { accessKeyId: string; secre
 }
 
 /** Read-only: what setup would create or update in this account. */
-export async function planAwsSetup(session: AwsSignInSession, params: { project: string; region: string; repository?: string }): Promise<AwsSetupPlan> {
+export async function planAwsSetup(session: AwsSignInSession, params: { project: string; region: string; repository?: string; runtimeObservation?: boolean }): Promise<AwsSetupPlan> {
   const iam = iamClient(session);
   const account = session.accountId;
   const role = ACCOUNT_DEPLOY_ROLE;
   const changes: AwsSetupChange[] = [];
-  const boundary = await policyMatches(iam, `arn:aws:iam::${account}:policy${AWS_PATH}${BOUNDARY}`, appBoundaryDocument());
-  changes.push({ id: 'boundary', state: boundary === undefined ? 'create' : boundary ? 'ok' : 'update', change: `Policy ${BOUNDARY}: the most any role Hypervibe creates for your app can do (no admin or IAM access)` });
+  const arn = `arn:aws:iam::${account}:policy${AWS_PATH}${BOUNDARY}`;
+  const runtimeObservation = params.runtimeObservation === true || await policyMatches(iam, arn, appBoundaryDocument(true)) === true;
+  const boundary = await policyMatches(iam, arn, appBoundaryDocument(runtimeObservation));
+  changes.push({ id: 'boundary', state: boundary === undefined ? 'create' : boundary ? 'ok' : 'update', change: `Policy ${BOUNDARY}: the most any role Hypervibe creates for your app can do (no admin or IAM access)${runtimeObservation ? "; includes reading CloudWatch logs and ECS task history for observer roles" : ""}` });
   const deploy = await policyMatches(iam, `arn:aws:iam::${account}:policy${AWS_PATH}${DEPLOY_POLICY}`, deployPolicyDocument(account));
   changes.push({ id: 'deploy-policy', state: deploy === undefined ? 'create' : deploy ? 'ok' : 'update', change: `Policy ${DEPLOY_POLICY}: run your app on Fargate, Aurora/RDS, S3 and schedules, and build its images on CodeBuild; create app roles only within ${BOUNDARY}` });
   const webRole = await webInfrastructureRoleReady(iam);
@@ -247,7 +253,7 @@ export async function planAwsSetup(session: AwsSignInSession, params: { project:
   const hasUser = await exists(() => iam.send(new GetUserCommand({ UserName: LOCAL_USER })));
   changes.push({ id: 'local-user', state: hasUser ? 'update' : 'create', change: `User ${LOCAL_USER} with one access key: lets this computer use the deploy role and nothing else; stored encrypted here and rotated by Hypervibe` });
   return {
-    accountId: account, region: params.region, signedInAs: session.identityArn, deployRole: role, ...(params.repository ? { repository: params.repository } : {}), githubOwners, retiringRoles,
+    accountId: account, region: params.region, signedInAs: session.identityArn, deployRole: role, ...(params.repository ? { repository: params.repository } : {}), githubOwners, ...(runtimeObservation ? { runtimeObservation } : {}), retiringRoles,
     changes, ready: changes.every((change) => change.state === 'ok'),
   };
 }
@@ -294,7 +300,7 @@ export async function applyAwsSetup(session: AwsSignInSession, plan: AwsSetupPla
   const iam = iamClient(session);
   const account = plan.accountId;
   const tags = [{ Key: 'managed-by', Value: 'hypervibe' }];
-  await putPolicy(iam, account, BOUNDARY, appBoundaryDocument(), 'Hypervibe: the most any app role may do');
+  await putPolicy(iam, account, BOUNDARY, appBoundaryDocument(plan.runtimeObservation), 'Hypervibe: the most any app role may do');
   const deployArn = await putPolicy(iam, account, DEPLOY_POLICY, deployPolicyDocument(account), 'Hypervibe: deploy and run apps');
   if (await exists(() => iam.send(new GetRoleCommand({ RoleName: AWS_WEB_INFRASTRUCTURE_ROLE })))) {
     await iam.send(new UpdateAssumeRolePolicyCommand({ RoleName: AWS_WEB_INFRASTRUCTURE_ROLE, PolicyDocument: JSON.stringify(WEB_INFRASTRUCTURE_TRUST) }));

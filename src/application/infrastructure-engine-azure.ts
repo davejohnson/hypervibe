@@ -1,4 +1,10 @@
+import { observeObserverRepository } from './observer-repository.js';
+import type { ObserverRepository } from '../domain/spec/runtime-observation.js';
 import { createHash } from 'node:crypto';
+import { reviewAzureSharedMonitoring } from '../adapters/providers/azure/tofu/azure-monitoring.config.js';
+import { runtimeMonitoringCoverage } from '../domain/plan/runtime-monitoring-coverage.js';
+import { runtimeObservationIntent } from '../domain/spec/runtime-observation.js';
+import { beginRuntimeObserverApply, clearRuntimeObserver, previousRuntimeObserverServices, recordRuntimeObserver } from './runtime-observer-bindings.js';
 import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
@@ -31,7 +37,7 @@ import {
   AzureTokens, azureDatabaseNames, azureKeyVaultSecretStore, deleteFailedAppEnvironment, emptyContainer, environmentDatabaseDrop, environmentDatabaseSetup, observeFailedAppEnvironment, purgeVaultSecrets, runAzureSetupSql, taggedResources,
   type AzureKeyVaultSecretStore,
 } from '../adapters/providers/azure/azure-ops.client.js';
-import { azureCiSetupReady, azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
+import { azureCiSetupReady, azureMonitoringSetupReady, azureDeployAppName } from '../adapters/providers/azure/azure-setup.client.js';
 import type { CommandContext } from './context.js';
 import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import type { EngineSecretStore } from './engine-secrets.js';
@@ -188,6 +194,7 @@ export function resolveAzureConnection(project: Project): { connection: AzureEng
 }
 
 export interface AzureEngineContext {
+  observerRepository?: ObserverRepository;
   project: Project;
   environmentName: string;
   connection: AzureEngineCredentials;
@@ -260,21 +267,27 @@ export function azureSharedLocation(spec: ProjectSpec, environments: string[], c
   return regions[0] ?? connection.location;
 }
 
+function azureEnvironmentPlanBlockers(blockers: string[]): string[] {
+  if (!blockers.some(line => /azurerm_storage_(container|account)\./.test(line))) return blockers;
+  return [...blockers, 'Removing or renaming Azure Blob storage can permanently delete files. Keep its existing name in the spec. To remove only its alerts, disable runtimeObservation and keep the storage declaration. Full environment teardown separately previews and confirms data removal.'];
+}
+
 /** The shared server and registry for this environment's group, sized for the environments that remain in the spec. */
-export function buildAzureSharedInput(spec: ProjectSpec, context: Pick<AzureEngineContext, 'connection' | 'shared' | 'project'>, environments: string[]): AzureSharedInput {
+export function buildAzureSharedInput(spec: ProjectSpec, context: Pick<AzureEngineContext, 'connection' | 'shared'> & { project: Pick<Project, 'name'> }, environments: string[]): AzureSharedInput {
   const database = environments.map((name) => spec.environments[name]?.database).find(Boolean);
+  const monitorStorage = environments.some(name => spec.environments[name]?.database && spec.environments[name]?.runtimeObservation);
   const location = azureSharedLocation(spec, environments, context.connection);
   if (typeof location === 'object') throw new Error(location.blocked);
   return {
     kind: 'shared', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
     location, prefix: context.shared.prefix, label: context.shared.label,
     deployPrincipalId: context.connection.deployPrincipalId, deployPrincipalName: azureDeployAppName(context.project.name),
-    ...(database ? { database: { version: database.version ?? 17 } } : {}),
+    ...(database ? { database: { version: database.version ?? 17, ...(monitorStorage ? { monitorStorage: true as const } : {}) } } : {}),
   };
 }
 
 /** One environment's configuration input. Workloads are created from `image` (the last build, or the commit this apply builds). */
-export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'connection' | 'prefix' | 'shared' | 'vault'> & Partial<Pick<AzureEngineContext, 'legacyNames'>> & { environment: Pick<Environment, 'id'> & Partial<Pick<Environment, 'platformBindings'>> },
+export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'observerRepository' | 'connection' | 'prefix' | 'shared' | 'vault'> & Partial<Pick<AzureEngineContext, 'legacyNames'>> & { environment: Pick<Environment, 'id'> & Partial<Pick<Environment, 'platformBindings'>> },
   extra: { secretKeys: string[]; image?: string }): AzureEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   const storageAccount = azureStorageAccountName({ subscriptionId: context.connection.subscriptionId, environmentId: context.environment.id, prefix: context.prefix });
@@ -292,9 +305,14 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
   };
   const command = (startCommand?: string) => startCommand ? { command: ['sh', '-c', startCommand] } : {};
   const secretServices = azureSecretServices(spec, environmentName);
+  const observation = runtimeObservationIntent(spec, environmentName);
+  const previousObserverServices = previousRuntimeObserverServices(context.environment.platformBindings, 'azure');
   return {
     kind: 'environment', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
+    ...(environmentSpec.runtimeObservation ? { monitoring: { project: observation?.repository ?? spec.project, ...(environmentSpec.database ? { postgresServerId: context.shared.serverId } : {}) } } : {}),
+    ...(observation && Object.keys(environmentSpec.services).length && context.observerRepository ? { observation: { ...observation, ...context.observerRepository, workspaceResourceId: `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/${context.shared.prefix}-logs` } } : {}),
+    ...(previousObserverServices ? { previousObserverServices } : {}),
     location: azureLocationFor(spec, environmentName, context.connection), prefix: context.prefix, environmentId: context.environment.id, environmentName,
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer, appsEnvironmentId: context.shared.appsEnvironmentId },
     ...(azureBinding(context.environment as Environment).buildRegistry ? { buildRegistry: azureBinding(context.environment as Environment).buildRegistry! } : {}),
@@ -482,8 +500,17 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const context = await resolveAzureEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
 
-  if (engineCiIntent(spec, environmentName)) {
-    const ready = await azureCiSetupReady(context.connection).catch(() => false);
+  const observerIntent = runtimeObservationIntent(spec, environmentName);
+  const needsCollector = Boolean(observerIntent && Object.keys(environmentSpec.services).length);
+  if (observerIntent && needsCollector) {
+    try { context.observerRepository = await observeObserverRepository(observerIntent); }
+    catch { return { blocked: ['Hypervibe could not verify the GitHub repository ID and default branch for the scheduled observer. Check gitRemoteUrl, the configured branch and the GitHub connection.'] }; }
+  }
+  if (environmentSpec.runtimeObservation && !(await azureMonitoringSetupReady(context.connection).catch(() => false))) {
+    return { blocked: ['Azure monitoring namespaces need reviewed setup. Run hv_launch to register Microsoft.Portal and Microsoft.Insights.'] };
+  }
+  if (engineCiIntent(spec, environmentName) || needsCollector) {
+    const ready = await azureCiSetupReady(context.connection, fetch, needsCollector).catch(() => false);
     if (!ready) return { blocked: ['Azure CI access needs reviewed setup. Run hv_launch (or hv_connections provider="azure" action="connect") to update access.'] };
   }
 
@@ -509,7 +536,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const sharedLocation = azureSharedLocation(spec, azureTestingEnvironments(spec), context.connection);
   if (typeof sharedLocation === 'object') return { blocked: [sharedLocation.blocked] };
   const sharedInput = buildAzureSharedInput(spec, context, azureTestingEnvironments(spec));
-  const sharedPlanned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureSharedConfiguration(sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
+  const sharedPlanned = await engine.plan({ backend: azureEngineBackend, ...reviewAzureSharedMonitoring(buildAzureSharedConfiguration(sharedInput), sharedInput), auth: context.auth, state: context.shared.state, planId: sharedPlanId });
   if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
   if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
   // A failed earlier attempt can leave the app environment in Azure but not in the engine's state.
@@ -560,19 +587,20 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   // 4. Everything else, in the environment's own state.
   // An optional key without a value is left out, so no workload references a Key Vault secret that does not exist.
   let input = buildAzureEngineInput(spec, environmentName, context, { secretKeys: keys.all.filter((key) => !secrets.unset?.includes(key)), ...(image ? { image } : {}) });
+  const retirementScope = { provider: 'azure' as const, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, prefix: context.prefix };
   let planId = crypto.randomUUID();
-  let planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId });
+  let planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId, retirementScope });
   if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
-  if (planned.blockers.length) return { blocked: planned.blockers };
+  if (planned.blockers.length) return { blocked: azureEnvironmentPlanBlockers(planned.blockers) };
   // An apply interrupted after Azure created a role assignment leaves it unrecorded; take it over instead of colliding.
   const leftovers = await leftoverRoleAssignments(context, input, planned.actions);
   if ('unknown' in leftovers) return { blocked: [leftovers.unknown] };
   if (Object.keys(leftovers.adopt).length) {
     input = { ...input, adoptRoleAssignments: leftovers.adopt };
     planId = crypto.randomUUID();
-    planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId });
+    planned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureEnvironmentConfiguration(input), auth: context.auth, state: context.state, planId, retirementScope });
     if (!planned.ok) return { blocked: [redactEngineOutput(planned.error, context.auth.redact)] };
-    if (planned.blockers.length) return { blocked: planned.blockers };
+    if (planned.blockers.length) return { blocked: azureEnvironmentPlanBlockers(planned.blockers) };
   }
   // A limited secret is a boundary only if the shared identity holds nothing that reaches it.
   if (Object.keys(input.secretServices ?? {}).length) {
@@ -585,6 +613,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const prerequisites = [...sharedChanging, ...changing(secretActions), ...changing(buildInfrastructureActions), ...changing(buildActions), ...changing(loginActions)];
   const actions = [...sharedActions, ...secretActions, ...buildInfrastructureActions, ...buildActions, ...loginActions, ...withDependencies(planned.actions, prerequisites)];
   const warnings = [
+    ...runtimeMonitoringCoverage(spec, environmentName, actions),
     `Azure ${azureLocationFor(spec, environmentName, context.connection)}, testing profile: workloads scale to zero. All testing environments share one private network (about $26/month) and one database server (about $24/month with its private endpoint), which the internet cannot reach.`,
     ...(environmentSpec.database?.automatedBackups ? ['Azure PostgreSQL automatically backs up the whole server. A new server starts with seven days of retention. An existing server keeps its retention and backup redundancy.'] : []),
     ...(planned.actions.some((action) => action.id === 'environment:base' && action.type !== 'noop') ? [`${environmentName}'s apps move into the project's shared private app environment: they are recreated, are briefly unavailable, and get new addresses.`] : []),
@@ -592,7 +621,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
     ...(Object.keys(input.secretServices ?? {}).length ? [`Limited secrets (${Object.entries(input.secretServices!).map(([key, services]) => `${key}: ${services.join(', ') || 'no service'}`).join('; ')}): each named service runs as its own identity, and the shared runtime identity is given no role on them. Hypervibe checked the shared identity's built-in role assignments in Azure and found none that reaches them; custom roles and roles held through a group are not checked. A value that other services held before this apply stays known to them; rotate it afterwards.`] : []),
     ...(!image && workloads ? ['Hypervibe could not find this project\'s local repository, so the workloads are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
-  return recordPlan(project, context, params, actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState }, shared: { planId: sharedPlanId, state: context.shared.state } });
+  return recordPlan(project, context, params, actions, warnings, { planId, observerRepository: context.observerRepository, build: { planId: buildPlanId, state: context.buildState }, shared: { planId: sharedPlanId, state: context.shared.state } });
 }
 
 /**
@@ -643,16 +672,21 @@ export async function planAzureTeardown(ctx: CommandContext, params: {
   const remaining = azureTestingEnvironments(spec).filter((name) => name !== environmentName);
   let sharedActions: PlanAction[] = [];
   let shared: Record<string, unknown> = {};
-  if (!remaining.length) {
+  const sharedInput = buildAzureSharedInput(spec, context, azureTestingEnvironments(spec));
+  const lastDatabaseMonitor = environmentSpec.database && environmentSpec.runtimeObservation && !remaining.some(name => spec.environments[name]?.database && spec.environments[name]?.runtimeObservation);
+  if (!remaining.length || lastDatabaseMonitor) {
     const sharedPlanId = crypto.randomUUID();
-    const sharedPlanned = await engine.plan({ backend: azureEngineBackend, configuration: buildAzureSharedConfiguration(buildAzureSharedInput(spec, context, [environmentName])),
-      auth: context.auth, state: context.shared.state, planId: sharedPlanId, destroy: true });
+    // Reconcile only the shared alert when siblings remain. Keep the entire server and reject any other changed resource.
+    if (remaining.length && sharedInput.database) delete sharedInput.database.monitorStorage;
+    const sharedPlanned = await engine.plan({ backend: azureEngineBackend,
+      ...reviewAzureSharedMonitoring(buildAzureSharedConfiguration(sharedInput), sharedInput, Boolean(remaining.length)),
+      auth: context.auth, state: context.shared.state, planId: sharedPlanId, ...(!remaining.length ? { destroy: true } : {}) });
     if (!sharedPlanned.ok) return { blocked: [redactEngineOutput(sharedPlanned.error, context.auth.redact)] };
     if (sharedPlanned.blockers.length) return { blocked: sharedPlanned.blockers };
     sharedActions = withDependencies(sharedPlanned.actions.filter((action) => action.type !== 'noop'), [...changing(environmentActions), ...changing(buildActions)]);
     // The engine cannot destroy an app environment it never recorded; a failed one is removed directly,
     // before the log workspace it points at (which the engine did record under the same step).
-    sharedActions = withRepairFirst(await azureFailedEnvironmentAction(context), sharedActions, [...changing(environmentActions), ...changing(buildActions)]);
+    if (!remaining.length) sharedActions = withRepairFirst(await azureFailedEnvironmentAction(context), sharedActions, [...changing(environmentActions), ...changing(buildActions)]);
     shared = { shared: { planId: sharedPlanId, state: context.shared.state } };
   }
   const dropActions: PlanAction[] = environmentSpec.database && remaining.length ? [{
@@ -791,7 +825,7 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  type Reviewed = { teardown?: boolean; planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; azure?: { subscriptionId: string; resourceGroup: string; prefix: string } };
+  type Reviewed = { observerRepository?: ObserverRepository; teardown?: boolean; planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; azure?: { subscriptionId: string; resourceGroup: string; prefix: string } };
   const document = loaded.document as PlanRunDocument & { engine?: Reviewed };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
@@ -802,9 +836,14 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
     || reviewed.azure.subscriptionId !== context.connection.subscriptionId || reviewed.azure.resourceGroup !== context.connection.resourceGroup || reviewed.azure.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different Azure subscription, resource group or environment. Re-run hv_plan.' };
   }
+  context.observerRepository = reviewed.observerRepository;
   clearEngineCiBinding(ctx, context.environment);
   const engine = await engineFor();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
+  const monitored = params.spec.environments[environmentName]?.runtimeObservation;
+  const services = Object.keys(params.spec.environments[environmentName]!.services);
+  const observerServices = monitored && services.length ? services : undefined;
+  let observerApplyStarted = false;
   const result = await executor.execute({
     planRunId: params.planId, currentSpecRevision: params.specRevision, confirmActions: params.confirmActions,
     handler: async (action) => {
@@ -820,6 +859,10 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
     segmentHandler: async (segment, members) => {
       const addresses = [...new Set(members.flatMap((member) => engineSegmentOf(member)?.addresses ?? []))];
       const target = reviewed.shared && segment.id === `opentofu:${reviewed.shared.planId}` ? reviewed.shared : reviewed.build && segment.id === `opentofu:${reviewed.build.planId}` ? reviewed.build : { planId: reviewed.planId, state: context.state };
+      if (target.planId === reviewed.planId) {
+        beginRuntimeObserverApply(ctx, context.environment, 'azure', observerServices);
+        observerApplyStarted = true;
+      }
       const outcome = await engine.apply({ backend: azureEngineBackend, auth: context.auth, state: target.state, planId: target.planId,
         segment: { ...segment, addresses }, approvedAddresses: addresses });
       if (!reviewed.teardown && reviewed.build?.planId === target.planId && (engineCiIntent(params.spec, environmentName) || azureBinding(context.environment).buildRegistry)) {
@@ -838,6 +881,8 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
+  // A rejected or stale apply has not changed the cloud. Keep its prior observer evidence intact.
+  if (result.applyRunId && observerServices && !observerApplyStarted) beginRuntimeObserverApply(ctx, context.environment, 'azure', observerServices);
   // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
   // A teardown owns binding removal separately; never resurrect its identities.
   if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {
@@ -845,8 +890,19 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
     const apps = sharedApps.ok && sharedApps.present && sharedApps.value.managedEnvironmentId?.toLowerCase() === context.shared.appsEnvironmentId.toLowerCase() ? sharedApps.value : {};
     const recorded = await recordEngineWorkloadBindings(ctx, engine, { environment: context.environment, backend: azureEngineBackend,
       auth: context.auth, state: context.state, provider: 'azure', projectId: context.connection.subscriptionId, environmentId: context.connection.resourceGroup,
+      desiredServices: result.success ? services : undefined,
       project: (state) => projectAzureWorkloadBindings(state, params.spec.environments[environmentName]!.services, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, location: azureLocationFor(params.spec, environmentName, context.connection) }, apps) });
     if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
+  }
+  if (result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown && observerServices) {
+    try {
+      await recordRuntimeObserver(ctx, engine, { provider: 'azure', context, spec: params.spec, environmentName, region: azureLocationFor(params.spec, environmentName, context.connection) });
+    } catch {
+      return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: 'The observer identity or its workloads could not be verified and exported. Run hv_plan and hv_apply again once the workloads exist.' } };
+    }
+  }
+  if (result.success && result.applyRunId && (!observerServices || (document.engine as { teardown?: boolean }).teardown)) {
+    clearRuntimeObserver(ctx, context.environment);
   }
   await recordEngineCiBindings(ctx, engine, { provider: 'azure', context, spec: params.spec, environmentName,
     location: azureLocationFor(params.spec, environmentName, context.connection),

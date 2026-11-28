@@ -96,6 +96,7 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@smithy/credential-provider-imds": "4.5.2",
     "better-sqlite3": "^13.0.3",
+    "cron-parser": "5.10.0",
     "google-auth-library": "^11.0.2",
     "graphql": "^16.9.0",
     "graphql-request": "^7.0.0",

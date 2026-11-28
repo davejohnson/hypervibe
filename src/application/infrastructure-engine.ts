@@ -1,3 +1,4 @@
+import { engineBucketName } from '../domain/services/resource-names.js';
 import { dnsZoneScopeForDomain } from '../domain/services/domain-scope.js';
 import { classifyWakerReadError, type WakerReadFailure } from './waker-read-error.js';
 import { checkHmacCreateAccess, publishNewHmacKey, retireStorageHmacKey } from '../adapters/providers/gcp/gcp-hmac-key.js';
@@ -25,6 +26,8 @@ import {
 import { createStorageHmacKey, deleteBucketObject, listBucketObjects, readBucket, readPubsubTopic, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, describeStorageAutoTieringChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan, forgetTornDownEnvironment } from './engine-shared.js';
+import { runtimeMonitoringCoverage } from '../domain/plan/runtime-monitoring-coverage.js';
+import { applyGcpRuntimeObserver, planGcpRuntimeObserver, gcpObserverNeedsRevocation } from './gcp-runtime-observer.js';
 import { googleBackupTeardownWarnings } from './gcp-bucket-backup-records.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -216,11 +219,7 @@ function retainedImportConflict(environmentName: string, retainedIds: Set<string
   if (reused) return `Secret name ${reused} belongs to a previous database alias import. Choose a separate name for the new runtime secret.`;
 }
 
-/** Globally unique, stable bucket name; bucket names can be reused after deletion. */
-export function engineBucketName(gcpProjectId: string, environmentName: string, storageName: string): string {
-  const hash = crypto.createHash('sha256').update(`${gcpProjectId}/${environmentName}/${storageName}`).digest('hex').slice(0, 8);
-  return `hv-${hash}-${environmentName}-${storageName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 63).replace(/-+$/, '');
-}
+export { engineBucketName } from '../domain/services/resource-names.js';
 
 export interface EngineContext {
   adapter: CloudRunAdapter;
@@ -1020,6 +1019,10 @@ export async function planGcpTeardown(ctx: CommandContext, params: {
   const name = params.environmentName;
   const declared = params.spec.environments[name];
   if (!declared) return { blocked: [`Environment ${name} is not in the spec.`] };
+  const receipt = ctx.repos.environments.findByProjectAndName(params.project.id, name)?.platformBindings;
+  if (declared.runtimeObservation || gcpObserverNeedsRevocation(params.project.id, name, receipt)) return {
+    blocked: [`Remove runtimeObservation from ${name} and apply its saved Google monitoring removal with hv_plan and hv_apply before tearing down the environment.`],
+  };
   if (environmentDomains(declared).length) {
     return { blocked: [`Remove ${name}'s custom domains from the spec and apply that first; teardown does not change DNS.`] };
   }
@@ -1029,6 +1032,8 @@ export async function planGcpTeardown(ctx: CommandContext, params: {
     [key, { ...secret, environments: secret.environments.filter((entry) => entry !== name) }])) as ProjectSpec['secrets'];
   return planGcpInfrastructureEngine(ctx, { ...params, spec: { ...params.spec, secrets, environments: { ...params.spec.environments, [name]: emptied } } }, { teardown: true });
 }
+
+const GCP_MONITORING_NEXT_STAGE = 'After the infrastructure settles, run hv_plan again and review the Google project monitoring changes for the applied resource identities. Apply its saved plan with hv_apply.';
 
 export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   project: Project;
@@ -1565,7 +1570,7 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
   const ordinary = [...moveFirst, ...retireImports, ...imageRepositoryActions, ...domainBefore, ...serviceActions, ...secretActions, ...credentialActions, ...placedActions, ...wakeGrantActions, ...cacheCredentialActions, ...s3CredentialActions, ...domainAfter, ...forgottenDomains, ...moveLast];
   // A database placed elsewhere is not an instance of this environment's to find gone: its own removal step, which the
   // cleanup waits for like every other change, is the proof.
-  const actions = options.teardown ? gcpTeardownActions(ordinary, context, environmentName, placed ? { ...engineBinding, database: undefined } : engineBinding) : ordinary;
+  let actions = options.teardown ? gcpTeardownActions(ordinary, context, environmentName, placed ? { ...engineBinding, database: undefined } : engineBinding) : ordinary;
   describeFixedWorkerCountChanges(serviceActions, environmentSpec!, 'google_cloud_run_v2_worker_pool.scaling.0.manual_instance_count');
   describeStorageAutoTieringChanges(serviceActions, environmentSpec!, 'gcp');
   const warnings = [
@@ -1581,6 +1586,18 @@ export async function planGcpInfrastructureEngine(ctx: CommandContext, params: {
       : []),
     ...(placed?.warnings ?? []), ...(move?.warnings ?? []),
   ];
+  if (!options.teardown && (environmentSpec!.runtimeObservation || gcpObserverNeedsRevocation(project.id, environmentName, context.environment.platformBindings))) {
+    warnings.push(...runtimeMonitoringCoverage(spec, environmentName, actions));
+    const pending = ordinary.filter(action => action.type !== 'noop');
+    if (pending.some(action => action.metadata?.operation !== 'gcpDomainReady')) {
+      warnings.push(GCP_MONITORING_NEXT_STAGE);
+    } else {
+      const monitoring = await planGcpRuntimeObserver(ctx, params);
+      if (monitoring && 'blocked' in monitoring) return monitoring;
+      // Waiting for an issued certificate can take hours and does not change any monitoring target.
+      if (monitoring) actions = [...ordinary.filter(action => action.type === 'noop'), monitoring];
+    }
+  }
   if (options.teardown) {
     warnings.splice(0, warnings.length,
       `Removes Google Cloud environment ${environmentName} (project ${context.gcpProjectId}, ${context.region}). This cannot be undone.`,
@@ -1762,6 +1779,9 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const context = await resolveEngineContext(ctx, params.project, params.spec, environmentName);
   if ('blocked' in context) return { kind: 'blocked', reason: context.blocked };
   const reviewed = document.engine;
+  if (reviewed.teardown && (params.spec.environments[environmentName]?.runtimeObservation || gcpObserverNeedsRevocation(params.project.id, environmentName, context.environment.platformBindings))) {
+    return { kind: 'blocked', reason: 'Revoke runtime observer access with hv_plan and hv_apply before applying this environment teardown.' };
+  }
   const reviewedDatabase = gcpDatabaseLocation(reviewed.gcpProjectId, reviewed);
   if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || reviewed.gcpProjectId !== context.gcpProjectId || reviewed.region !== context.region) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different environment, GCP project or region. Re-run hv_plan.' };
@@ -1795,6 +1815,8 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
       const operation = action.metadata?.operation;
       const metadata = action.metadata as { gcpProjectId?: string } | undefined;
       if (metadata?.gcpProjectId !== context.gcpProjectId) return { success: false, status: 'blocked', message: 'Secret target changed; re-run hv_plan.' };
+      if (operation === 'gcpRuntimeObserverSetup') return applyToTarget(() => applyGcpRuntimeObserver(ctx,
+        { project: params.project, spec: params.spec, environmentName }, action, params.confirmActions));
       if (operation === 'gcpRetainDatabaseAliasImports') return applyToTarget(() => {
         const keys = action.metadata?.keys;
         const current = ctx.repos.environments.findById(context.environment.id);
@@ -1994,6 +2016,7 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const warnings = gcpSecretScopeNotes(ctx, params.project, params.spec, environmentName, { gcpProjectId: context.gcpProjectId,
     runtimeServiceAccountEmail: context.runtimeServiceAccountEmail,
     runtimeSecretGrantOrigins: (current.platformBindings as { engine?: EngineBinding }).engine?.runtimeSecretGrantOrigins });
+  if (document.warnings?.includes(GCP_MONITORING_NEXT_STAGE)) warnings.push(GCP_MONITORING_NEXT_STAGE);
   return { kind: 'executed', envName: environmentName, result, ...(warnings.length ? { warnings } : {}) };
 }
 

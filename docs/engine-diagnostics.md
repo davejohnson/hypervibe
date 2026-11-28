@@ -62,3 +62,74 @@ The tests live under `src/tools/__tests__/engine-diagnostics.test.ts` and
 `src/application/__tests__/engine-workload-bindings.test.ts`, included by ordinary
 `npm test` in `.github/workflows/hypervibe-acceptance.yml`. Shared provider-log,
 health, presentation and provider-roster checks cover the retained callers.
+
+## Scheduled runtime observation
+
+For an existing Cloud Run, AWS ECS or Azure Container Apps environment, set
+`environments.<environment>.runtimeObservation` through `hv_spec`. This example
+selects a repository whose default branch is `main`.
+
+```json
+"runtimeObservation": {
+  "branch": "main"
+}
+```
+
+Use a released Hypervibe package that includes `hypervibe ci observe`. Run
+`hv_launch` for that environment with `stopAfter="infrastructure"`. Review the
+access and infrastructure changes when prompted. Launch uses the existing
+applied workloads and can also surface other outstanding desired changes in
+the environment. Review the full plan before approving it. To apply an already
+prepared environment separately, use `hv_plan scope="infrastructure"`
+and approve the returned `hv_apply` actions. On Google Cloud, plan again after infrastructure changes settle to review monitoring against the applied resource identities. Commit the resulting
+`.hypervibe/spec.json`, `.hypervibe/bindings.json` and
+`.github/workflows/hypervibe-observe-<environment>.yml` to the verified default
+branch. The generated job runs a fixed package version on a GitHub-hosted
+runner. It obtains temporary cloud credentials using GitHub OIDC.
+
+| Cloud | Access reviewed during enrollment |
+| --- | --- |
+| AWS | A separate IAM role can read the environment’s CloudWatch log group and list or describe tasks in its ECS cluster. The role accepts the selected GitHub repository, branch and observer workflow name. Older account setups need an approved change to the maximum permissions of app roles. |
+| Azure | A separate managed identity trusts the selected repository’s default-branch OIDC subject. It has Reader access on the applied workloads and Container Apps environment. A Log Analytics Data Reader assignment restricts log access to the container console table and the named workload rows. The owner setup can need permission to assign those two roles. |
+| Google Cloud | A separate federated service account can read non-private log entries in the selected Google project. The collector filters to each applied workload. Execution access is confined to the bound Cloud Run jobs. |
+
+Once an environment is enrolled, its infrastructure plan reconciles monitoring as resources are added, changed or retired. A workload rename updates its dashboard targets and the applied scope used by the collector. Removing the final workload retires the workload observer and its generated workflow. The environment can stay enrolled with only data resources.
+
+| Cloud | Data-resource signals in the native dashboard and alerts |
+| --- | --- |
+| AWS | S3 server errors for each declared bucket and capacity utilization of the shared Aurora testing writer. |
+| Azure | Availability of the environment’s Blob storage account and storage utilization on the shared PostgreSQL Flexible Server. Each metric covers the named account or server. |
+| Google Cloud | Dedicated Cloud SQL instance CPU, Memorystore Redis memory use, Cloud Storage server errors and Pub/Sub subscription backlog age. For PostgreSQL databases on a shared Cloud SQL instance, the deadlock alert uses the tenant database name. |
+
+These alarms are visible in the cloud console. The GitHub collector and hosted daily review receive workload logs and scheduled-job results. Resource-only monitoring requires no scheduled runner. The plan calls out infrastructure without a dedicated signal. Data-retention rules still apply when removing resources. In particular, removing a bucket or container from an AWS or Azure spec can block the plan until the data retirement is reviewed.
+
+The default five-minute schedule requests 288 polls per environment each day. Set `runtimeObservation.intervalMinutes` to 10, 15 or 30 to reduce polling. A 15-minute interval requests 96 polls per day. GitHub
+can delay a scheduled run. Each poll uses Actions runner time, artifact storage
+and cloud reads. Native dashboards and alert rules can add charges under the
+account’s pricing and allowances. Review the resources in the saved plan.
+[GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions),
+[AWS CloudWatch pricing](https://aws.amazon.com/cloudwatch/pricing/),
+[Google Cloud Observability pricing](https://cloud.google.com/products/observability/pricing)
+and [Azure Monitor pricing](https://azure.microsoft.com/en-us/pricing/details/monitor/).
+
+A successful run publishes `hypervibe-runtime-observation` with one redacted
+`<environment>.json` report. Its separate `hypervibe-runtime-cursor` artifact
+records progress per source. Check the report’s source statuses for coverage.
+A provider failure can leave a source unread even when the report uploaded
+successfully. The next poll overlaps the previous window, retries incomplete
+sources and reports gaps beyond the available history. ECS retains stopped
+tasks briefly. Azure retains a bounded execution history for each job.
+Busy log intervals are split into smaller reads, with new evidence checked first. The artifact records coverage gaps if a single timestamp or a sustained error burst exceeds the collection limits. Jobs with incomplete execution history stay unverified.
+An Azure job can fail with zero restarts when retries are disabled. The native
+restart alarm covers restarts. Use the observer’s execution-history result
+to detect that terminal failure. The collector reads error-level logs and
+scheduled job outcomes, and compares
+declared schedules with observed starts after a grace period. Deployment
+events and endpoint health checks are outside this collector’s coverage.
+
+For hosted daily reviews, set `runtimeObservation.hostedReview` to `true` on an environment already imported into the hosted project. The generated workflow sends redacted findings and terminal job results to `https://hypervibe.dev/api/v1/runtime-observations` using a separate GitHub OIDC audience. GitHub retains the report artifact for seven days. Repository readers can download it, including readers of a public repository. Each poll saves its report and cloud checkpoint before attempting hosted delivery, so a hosted outage does not interrupt collection or missed-job checks. GitHub Actions warns when delivery fails. The next poll retries up to 12 prior opted-in reports from the same environment and provider, oldest first, starting after the last acknowledged batch. At five-minute intervals this covers about one hour of consecutive polls. If a report has expired or the backlog exceeds 12 polls, the workflow warns about the resulting hosted coverage gap. The ordinary report artifact remains available for its seven-day retention period.
+
+To retire the observer, remove the environment’s `runtimeObservation` option
+with `hv_spec`, then run the same infrastructure review and apply. Commit the
+updated bindings and removal of the generated workflow. The shared AWS and
+Azure owner permissions stay available for other enrolled environments.

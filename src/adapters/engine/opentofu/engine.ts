@@ -1,9 +1,11 @@
+import { environmentRetirementMappings, type AppliedDeclarations } from './environment-retirement.js';
 import fs from 'fs';
 import path from 'path';
 import type {
   EngineActionSegment,
   EngineAuthentication,
   EngineConfiguration,
+  EngineRetirementScope,
   EngineSegmentResult,
   EngineStateIdentity,
   InfrastructureEngineBackend,
@@ -30,6 +32,7 @@ export interface OpenTofuEngineOptions {
   binary: string;
   cipher: EngineSecretCipher;
   dataDir?: string;
+  appliedDeclarations?: AppliedDeclarations;
   /** Shared provider download cache; contains only checksum-verified public plugins. */
   pluginCacheDir?: string;
   timeoutMs?: number;
@@ -281,6 +284,7 @@ export class OpenTofuEngine {
     state: EngineStateIdentity;
     planId: string;
     destroy?: boolean;
+    retirementScope?: EngineRetirementScope;
     /** Inspect the complete private plan in memory before any review artifact is saved. */
     verifyPlannedChanges?: (shownPlan: unknown) => boolean;
   }): Promise<EnginePlanResult | EngineStepFailure> {
@@ -311,11 +315,16 @@ export class OpenTofuEngine {
       const parsed = parseEnginePlan(shown.stdout);
 
       const paths = engineStatePaths(params.state, this.options.dataDir);
+      const recovered = params.retirementScope && this.options.appliedDeclarations && !params.destroy
+        ? environmentRetirementMappings({ configuration: params.configuration, state: params.state, scope: params.retirementScope,
+          plans: paths.plans, shown: shown.stdout, applied: this.options.appliedDeclarations })
+        : {};
+      const configuration = { ...params.configuration, resources: { ...recovered, ...params.configuration.resources } };
       const planFile = path.join(paths.plans, `${params.planId}.tfplan`);
       fs.copyFileSync(path.join(prepared.directory, 'saved.tfplan'), planFile);
       fs.chmodSync(planFile, PRIVATE_FILE_MODE);
       fs.writeFileSync(path.join(paths.plans, `${params.planId}.config.json`),
-        JSON.stringify(params.configuration), { mode: PRIVATE_FILE_MODE });
+        JSON.stringify(configuration), { mode: PRIVATE_FILE_MODE });
 
       const segment = {
         id: `opentofu:${params.planId}`,
@@ -329,7 +338,7 @@ export class OpenTofuEngine {
       const translation = translateEnginePlan({
         provider: params.backend.provider,
         parsed,
-        configuration: params.configuration,
+        configuration,
         segment,
       });
       return { ok: true, segmentId: segment.id, planFile, segment, ...translation };

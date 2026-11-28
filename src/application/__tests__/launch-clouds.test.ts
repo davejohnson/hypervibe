@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as awsSetup from '../../adapters/providers/aws/aws-setup.client.js';
+import * as infrastructure from '../infrastructure-engine.js';
 
 const gcpBootstrap = vi.fn();
 const connectAzure = vi.fn();
@@ -23,6 +25,17 @@ const launch = (provider: 'aws' | 'azure', name = 'dev', extra: Record<string, u
 
 describe('hv_launch on AWS and Azure', () => {
   beforeEach(() => { for (const mock of [gcpBootstrap, connectAzure, resolveAzureConnection, connectAws, resolveAwsEngineContext]) mock.mockReset(); });
+
+  it('plans AWS resource-only monitoring on an existing connection without requiring the GitHub workload role', async () => {
+    resolveAwsEngineContext.mockResolvedValue({ credentials: {}, connection: { accountId: '123456789012' } });
+    const access = vi.spyOn(awsSetup, 'awsAccessCurrent').mockResolvedValue({ unknown: 'Should not need workload OIDC.' });
+    const planner = vi.spyOn(infrastructure, 'planInfrastructureEngine').mockResolvedValue({ blocked: ['Reached native infrastructure planning.'] });
+    try {
+      const result = await launch('aws', 'dev', { services: {}, runtimeObservation: { branch: 'main' } });
+      expect(result).toMatchObject({ status: 'blocked', message: 'Reached native infrastructure planning.' });
+      expect(access).not.toHaveBeenCalled();
+    } finally { access.mockRestore(); planner.mockRestore(); }
+  });
 
   it('connects AWS through its own sign-in, never Google Cloud setup', async () => {
     resolveAwsEngineContext.mockResolvedValue({ blocked: 'no access' });
