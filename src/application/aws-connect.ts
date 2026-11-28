@@ -45,9 +45,10 @@ export async function connectAws(params: {
   const region = chooseAwsRegion(params.spec);
   const repo = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec?.gitRemoteUrl) ?? undefined;
   // Access is per account: a new project reuses it without signing in, unless it needs an update.
-  const reused = await reuseAccountAccess(params.project, repo);
+  const runtimeObservation = Object.values(params.spec?.environments ?? {}).some(env => env.hosting.provider === 'aws' && env.runtimeObservation);
+  const reused = await reuseAccountAccess(params.project, repo, runtimeObservation);
   if (reused) return reused;
-  const planFor = (session: AwsSignInSession) => planAwsSetup(session, { project: params.project.name, region, ...(repo ? { repository: repo } : {}) });
+  const planFor = (session: AwsSignInSession) => planAwsSetup(session, { project: params.project.name, region, ...(runtimeObservation ? { runtimeObservation } : {}), ...(repo ? { repository: repo } : {}) });
   let finished: AwsConnectResult | undefined;
   const signedIn = await signInToAws({
     region, ...(params.waitMs !== undefined ? { waitMs: params.waitMs } : {}), ...(params.openBrowser ? { openBrowser: params.openBrowser } : {}),
@@ -91,7 +92,7 @@ export function awsConnectionScope(project: Pick<Project, 'name'>, repo?: string
  * change. Only when exactly one AWS account is connected (otherwise the person
  * picks by signing in to it) and its access is current for this Hypervibe.
  */
-async function reuseAccountAccess(project: Project, repo?: string): Promise<AwsConnectResult | undefined> {
+async function reuseAccountAccess(project: Project, repo?: string, runtimeObservation = false): Promise<AwsConnectResult | undefined> {
   const secretStore = getSecretStore();
   const repository = new ConnectionRepository();
   const saved = repository.findAllByProvider('aws').filter((entry) => entry.status === 'verified').flatMap((connection) => {
@@ -105,7 +106,7 @@ async function reuseAccountAccess(project: Project, repo?: string): Promise<AwsC
   const credentials: AwsEngineCredentials = { ...base, roleArn: `arn:aws:iam::${accountId}:role/hypervibe/${ACCOUNT_DEPLOY_ROLE}` };
   let auth;
   try { auth = await awsEngineAuthentication(credentials); } catch { return undefined; }
-  const access = await awsAccessCurrent({ accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! }, accountId);
+  const access = await awsAccessCurrent({ accessKeyId: auth.env.AWS_ACCESS_KEY_ID!, secretAccessKey: auth.env.AWS_SECRET_ACCESS_KEY!, sessionToken: auth.env.AWS_SESSION_TOKEN! }, accountId, runtimeObservation);
   if (access !== 'current') return undefined;
   const scope = awsConnectionScope(project, repo);
   // Save this project's access, and move any project still on a per-project role.

@@ -166,7 +166,7 @@ function setupReviews(directory: string, scope: Scope, history: ReviewHistory, w
           planId:id, project:value.project, scope:'Google Cloud project setup', target:scope.gcpProjectId,
           cloudTarget:{provider:'gcp',projectId:scope.gcpProjectId}, approval:'whole-plan',
           createdAt:typeof value.createdAt === 'string' ? value.createdAt : undefined,
-          setupPurpose:value.setupPurpose, bucketCopy:value.bucketCopy, warnings:value.warnings, blocked:value.blocked, ciReleaseAccess:value.ciReleaseAccess,
+          setupPurpose:value.setupPurpose, bucketCopy:value.bucketCopy, warnings:value.warnings, blocked:value.blocked, ciReleaseAccess:value.ciReleaseAccess, runtimeObservationAccess:value.runtimeObservationAccess,
           billingAccount:typeof value.billingAccount === 'string' && /^[A-Z0-9]{6}-[A-Z0-9]{6}-[A-Z0-9]{6}$/.test(value.billingAccount) ? value.billingAccount : undefined,
           bootstrapConnection:typeof connection.scope === 'string' && typeof connection.deploymentAccount === 'string'
             ? {scope:connection.scope,deploymentAccount:connection.deploymentAccount} : undefined,
@@ -208,6 +208,7 @@ function setupReviews(directory: string, scope: Scope, history: ReviewHistory, w
         item.status = 'Awaiting approval';
         item.approval = {digest:item.originalDigest!};
       } else item.details.push('This saved setup has no confirmed execution outcome in the local journal.');
+      if (report.runtimeObservationAccess) item.details.push(...report.runtimeObservationAccess);
       if (report.ciReleaseAccess) item.details.push(...report.ciReleaseAccess);
       if (item.approval && saved && undisclosedCiRelease(saved,scope.gcpProjectId)) {
         delete item.approval;

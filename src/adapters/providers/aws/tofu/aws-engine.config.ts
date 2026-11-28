@@ -1,8 +1,11 @@
+import { addAwsMonitoring } from './aws-monitoring.config.js';
+import type { ObserverFederation } from '../../../../domain/spec/runtime-observation.js';
 import { awsImageBuildspec } from '../aws-buildspec.js';
 import { awsDatabaseQuerySecretName } from '../aws-database-query-secret.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 import { addTasks } from './aws-engine.tasks.js';
 import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
+import { addAwsObserverConfiguration } from './aws-observer.config.js';
 import { addAwsCiConfiguration } from './aws-engine-ci.config.js';
 import { awsControlRoleName, awsRuntimeIdentity, awsTaskRoleArns } from './aws-engine.identity.js';
 
@@ -14,6 +17,7 @@ import { awsControlRoleName, awsRuntimeIdentity, awsTaskRoleArns } from './aws-e
  */
 export interface AwsEngineInput {
   ci?: EngineCiIntent;
+  observation?: ObserverFederation;
   webCommands?: boolean;
   accountId: string;
   region: string;
@@ -318,6 +322,8 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     resources['aws_secretsmanager_secret.database_query'] = { actionId: 'database-query:credential', kind: 'secret', name: 'database query access', billable: true, requiresConfirm: true };
   }
   addAwsCiConfiguration(input, files, resources);
+  addAwsObserverConfiguration(input, files, resources);
+  addAwsMonitoring(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
     runtime_role_arn: { value: '${aws_iam_role.runtime.arn}' },

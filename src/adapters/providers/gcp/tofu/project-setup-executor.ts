@@ -67,6 +67,7 @@ export interface GcpProjectSetupParams {
   reviewAfterVerification?: boolean;
   bootstrapConnection?: PlanReport['bootstrapConnection'];
   ciReleaseAccess?: PlanReport['ciReleaseAccess'];
+  runtimeObservationAccess?: PlanReport['runtimeObservationAccess'];
 }
 export interface GcpProjectSetupResult {
   success: boolean;
@@ -90,6 +91,7 @@ export interface SetupPreview {
   createdAt?: string; projectName?: string;
   bootstrapConnection?: PlanReport['bootstrapConnection'];
   ciReleaseAccess?: PlanReport['ciReleaseAccess'];
+  runtimeObservationAccess?: PlanReport['runtimeObservationAccess'];
   requiresPlanId?: true;
   observedUnlinkedProject?: ObservedUnlinkedProject;
   observedLinkedProject?: ObservedLinkedProject;
@@ -397,6 +399,10 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
       const preview = readJson<SetupPreview | undefined>(previewFile, undefined);
       if (!preview) return fail('Preview this exact Google Cloud setup before confirming it. No infrastructure was changed.');
       originalReviewDigest = reviewDigest('setup', params.projectId, params.gcpProjectId, preview.planId, preview);
+      if (params.contribution.id.startsWith('observer_') && (!params.gcpSetupPlanId || !params.runtimeObservationAccess?.length
+        || !preview.runtimeObservationAccess?.length || digest(params.runtimeObservationAccess) !== digest(preview.runtimeObservationAccess))) {
+        return fail('Review this exact runtime observer identity, grants and monitoring resources before applying them.');
+      }
       if (params.requireBrowserApproval || bucketReview) {
         if (params.contribution.id === 'ci-release' && (!params.ciReleaseAccess?.length || !preview.ciReleaseAccess?.length
           || digest(params.ciReleaseAccess) !== digest(preview.ciReleaseAccess))) {
@@ -432,6 +438,7 @@ export async function executeGcpProjectSetup(backend: InfrastructureEngineBacken
     } else {
       saved = { planId: `setup-${randomUUID()}`, reviewContributionId: params.contribution.id, createdAt: new Date().toISOString(), projectName: params.projectName,
         ...(bootstrap && params.bootstrapConnection && { bootstrapConnection: params.bootstrapConnection }),
+        ...(params.contribution.id.startsWith('observer_') && params.runtimeObservationAccess && { runtimeObservationAccess: params.runtimeObservationAccess }),
         ...(params.contribution.id === 'ci-release' && params.ciReleaseAccess && { ciReleaseAccess: params.ciReleaseAccess }),
         intent, baseline: digest(existing), manifest, configuration, planned: undefined as unknown as EnginePlanResult };
     }

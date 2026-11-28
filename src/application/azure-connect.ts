@@ -73,6 +73,7 @@ export async function connectAzure(params: {
   };
   const planFor = (session: AzureSignInSession, subscription: AzureSubscription) =>
     planAzureSetup(session, { subscription, project: params.project.name, location, environments, ...(repository ? { repository } : {}),
+      ...(Object.values(params.spec?.environments ?? {}).some(env => env.hosting.provider === 'azure' && env.runtimeObservation) ? { runtimeObservation: true } : {}),
       ...(Object.values(params.spec?.environments ?? {}).some(env => env.hosting.provider === 'azure' &&
         Object.values(env.storage ?? {}).some(storage => storage.automatedBackups)) ? { bucketBackupReader: true } : {}) });
 

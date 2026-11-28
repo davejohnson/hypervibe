@@ -178,3 +178,24 @@ Apple mutations. A successful overall run or matching build number cannot prove
 that provenance. Preserve app-scoped concurrency and the current
 [API/mobile contract](../api-mobile-releases.md); optional mobile capabilities do
 not become prerequisites for a server deployment.
+
+## Scheduled Cloud Run observations
+
+An environment with `runtimeObservation.branch` uses a dedicated Google
+service account and Workload Identity Federation pool. The trust condition
+binds the numeric GitHub repository ID, repository name, exact collector
+workflow file, verified default branch, GitHub-hosted runner, event, and
+first run attempt. The collector assumes the account without a stored key.
+Google grants `logging.logEntries.list` at project scope, so this identity
+can read non-private log entries across that Google project. The collector
+queries logs for the applied Cloud Run workloads only. Each bound scheduled
+job grants `run.executions.list` on that job.
+
+Use `hv_launch` with `stopAfter: "infrastructure"` for the project-shared
+access review and runtime dashboard without an application release. Review
+the selected identities, grants, dashboard and alert policies before
+approving the saved setup plan. Commit the exported observer binding and
+generated workflow to the default branch. On removal of the spec option,
+use the same command to revoke the grants and remove the monitoring
+resources. Hypervibe disables and retains the account, pool and provider
+so Google’s soft-deleted-name retention period does not delay reactivation.

@@ -178,6 +178,23 @@ any writes made since the switch before proposing a return to the source, and
 never call traffic restoration a data rollback. Verify provider and application
 results for this move; offline tests are not proof of live compatibility.
 
+## Observe an existing environment on a schedule
+
+When the user requests ongoing cloud runtime observation, set
+`runtimeObservation: { "branch": "<default branch>" }` on the selected
+Cloud Run, AWS ECS or Azure Container Apps environment through `hv_spec`.
+Use `hv_launch stopAfter="infrastructure"` to review access, plan and apply
+the observer and native monitoring resources. GitHub runs a separate
+observer every five minutes by default. Set `intervalMinutes` to 10, 15 or 30 for a lower polling frequency. Explain the runner usage, retained artifacts
+and potential cloud monitoring charges when reviewing costs.
+Commit the resulting spec, applied bindings and generated
+`.github/workflows/hypervibe-observe-<environment>.yml` to the default
+branch. Verify a subsequent scheduled report’s log and job coverage.
+Provider read failures or delayed runs can leave a monitoring gap.
+To retire it, remove the option, apply the reviewed removal and commit the
+binding and workflow changes. Use a released runner that includes the
+observer command before enrolling an application.
+
 ## Diagnose, inspect, and adopt
 
 Use `hv_status`, `hv_health`, `hv_logs`, `hv_ci_status`, or the appropriate current

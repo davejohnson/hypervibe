@@ -27,7 +27,7 @@ const text = (value: unknown): string => { if (typeof value !== 'string' || !val
 const match = (actual: unknown, expected: string): string => { if (actual !== expected) throw new Error('Native CI target differs from its reviewed scope.'); return expected; };
 
 /** Only a single, managed, untainted resource at each exact engine address establishes ownership. */
-function resources(state: unknown): (address: string) => Record<string, unknown> {
+export function managedCiResources(state: unknown): (address: string) => Record<string, unknown> {
   const document = record(state); const root = record(record(document.values).root_module);
   if (typeof document.format_version !== 'string' || !Array.isArray(root.resources)) throw new Error('CI state is unavailable.');
   const rows = root.resources.map(record);
@@ -54,7 +54,7 @@ export function clearEngineCiBinding(ctx: CommandContext, environment: Environme
 }
 
 /** IAM treats statement order, action/resource order and singleton arrays equivalently. */
-function normalizedPolicy(value: unknown, key = ''): string {
+export function normalizedPolicy(value: unknown, key = ''): string {
   if (['Action', 'NotAction', 'Resource', 'NotResource'].includes(key) && typeof value === 'string') value = [value];
   if (Array.isArray(value)) return `[${value.map(item => normalizedPolicy(item)).sort().join(',')}]`;
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([name, child]) => `${JSON.stringify(name)}:${normalizedPolicy(child, name)}`).join(',')}}`;
@@ -66,7 +66,7 @@ type Params = { spec: ProjectSpec; environmentName: string; succeeded: boolean }
 );
 
 function awsEnvironment(state: unknown, params: Extract<Params, { provider: 'aws' }>, intent: EngineCiIntent) {
-  const { context, spec, environmentName } = params; const get = resources(state);
+  const { context, spec, environmentName } = params; const get = managedCiResources(state);
   const role = get('aws_iam_role.ci'); owned(role, context.environment.id, true);
   const roleName = `${context.prefix}-ci`;
   const roleArn = match(role.arn, `arn:aws:iam::${context.connection.accountId}:role/hypervibe/app/${roleName}`);
@@ -101,7 +101,7 @@ function awsEnvironment(state: unknown, params: Extract<Params, { provider: 'aws
   return { services, roleArn };
 }
 function awsBuild(state: unknown, params: Extract<Params, { provider: 'aws' }>) {
-  const { context, spec, environmentName } = params; const get = resources(state); const { accountId, region } = context.connection;
+  const { context, spec, environmentName } = params; const get = managedCiResources(state); const { accountId, region } = context.connection;
   const repository = get('aws_ecr_repository.images'); const project = get('aws_codebuild_project.images'); const bucket = get('aws_s3_bucket.build_source'); const role = get('aws_iam_role.build');
   for (const resource of [repository, project, bucket, role]) owned(resource, context.environment.id, true);
   match(repository.arn, `arn:aws:ecr:${region}:${accountId}:repository/${context.prefix}`);
@@ -125,7 +125,7 @@ function awsBuild(state: unknown, params: Extract<Params, { provider: 'aws' }>) 
   return { accountId, buildProjectArn, sourceBucket, repositoryUrl, ...(packageParameter ? { packageParameter } : {}) };
 }
 function azureEnvironment(state: unknown, params: Extract<Params, { provider: 'azure' }>, intent: EngineCiIntent) {
-  const { context, spec, environmentName } = params; const get = resources(state); const { subscriptionId, resourceGroup, tenantId } = context.connection;
+  const { context, spec, environmentName } = params; const get = managedCiResources(state); const { subscriptionId, resourceGroup, tenantId } = context.connection;
   const group = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`;
   const identity = get('azurerm_user_assigned_identity.ci'); owned(identity, context.environment.id);
   const identityId = match(identity.id, `${group}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${context.prefix}-ci`);
@@ -152,7 +152,7 @@ function azureEnvironment(state: unknown, params: Extract<Params, { provider: 'a
   return { services, tenantId, clientId, subscriptionId, resourceGroup, buildScope: text(buildGrant.scope) };
 }
 function azureBuild(state: unknown, params: Extract<Params, { provider: 'azure' }>) {
-  const { context, spec, environmentName } = params; const get = resources(state);
+  const { context, spec, environmentName } = params; const get = managedCiResources(state);
   const registry = get('azurerm_container_registry.ci_images'); owned(registry, context.environment.id); match(registry.location, params.location);
   const projected = projectAzureCiRegistry(state, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, environmentId: context.environment.id });
   const registryId = projected.id; const name = text(registry.name);

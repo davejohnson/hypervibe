@@ -20,10 +20,12 @@ import { dnsZoneIdentity } from '../domain/services/dns-policy.service.js';
 import { applyDnsPlan } from './dns-hosting.js';
 import { grantCiReleaseAccess, previewCiReleaseAccess, renderReleaseWorkflow, writeReleaseWorkflow } from './infrastructure-engine-ci.js';
 import { getDefaultAdminAccessToken } from '../domain/services/cloud-prepare.execute.js';
+import { ensureGcpRuntimeObserver } from './gcp-runtime-observer.js';
 import { connectAzure } from './azure-connect.js';
 import { connectAws } from './aws-connect.js';
 import { awsProfileFor, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
 import { azureProfileFor, resolveAzureConnection } from './infrastructure-engine-azure.js';
+import { awsAccessCurrent } from '../adapters/providers/aws/aws-setup.client.js';
 import { azureCiSetupReady } from '../adapters/providers/azure/azure-setup.client.js';
 import { cloudEngineFor } from './cloud-engines.js';
 import { engineCiIntent } from '../domain/spec/engine-ci.js';
@@ -71,7 +73,7 @@ export type LaunchResult =
   | { status: 'live'; urls: Record<string, string>; releases: EngineReleaseResult[]; domain?: { name: string; status: 'serving' | 'certificate_pending' }; domains?: Array<{ name: string; status: 'serving' | 'certificate_pending' }>; infrastructureRounds: number;
       ciWorkflow?: { path: string; changed: boolean; branch: string } };
 
-export const GCP_REVIEWED_ACCESS = ['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release'] as const;
+export const GCP_REVIEWED_ACCESS = ['gcp-setup', 'gcp-region', 'storage', 'storage-s3', 'memorystore', 'queues', 'workers', 'ci-release', 'runtime-observer'] as const;
 export const LAUNCH_ACCESS_IDS = [...GCP_REVIEWED_ACCESS, 'azure-setup', 'aws-setup'] as const;
 export type LaunchAccessId = typeof LAUNCH_ACCESS_IDS[number];
 
@@ -344,6 +346,10 @@ async function runLaunch(ctx: CommandContext, params: {
   }
 
   if (rounds === limit) return { status: 'blocked', message: 'Further infrastructure stages remain unverified. Run hv_launch again to review the next stage.' };
+  if (environmentSpec.hosting.provider === 'cloudrun') {
+    const observation = await ensureGcpRuntimeObserver(ctx, params);
+    if (observation) return observation;
+  }
   if (params.stopAfter === 'infrastructure') return { status: 'ready', phase: 'infrastructure', infrastructureRounds: rounds };
 
   // 3. Release the current code and verify it.
@@ -525,8 +531,12 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
  */
 async function prepareAwsLaunch(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], approvedAccess: Set<string>): Promise<LaunchResult | undefined> {
   const existing = await resolveAwsEngineContext(ctx, params.project, params.environmentName, params.spec);
-  if (!('blocked' in existing)) return undefined;
-  if (existing.placement) return { status: 'blocked', message: existing.blocked };
+  if (!('blocked' in existing)) {
+    if (!params.spec.environments[params.environmentName]?.runtimeObservation) return undefined;
+    const readiness = await awsAccessCurrent(existing.credentials, existing.connection.accountId, true);
+    if (readiness === 'current') return undefined;
+    if (typeof readiness === 'object') return { status: 'blocked', message: readiness.unknown };
+  } else if (existing.placement) return { status: 'blocked', message: existing.blocked };
   const shownAccount = approvedAccess.has('aws-setup') ? params.awsAccountId : undefined;
   if (approvedAccess.has('aws-setup') && !shownAccount) return { status: 'blocked', message: 'Approving AWS setup needs the awsAccountId it was shown for.' };
   const connected = await connectAws({ project: params.project, spec: params.spec, ...(shownAccount ? { approveAccountId: shownAccount } : {}) });
@@ -548,8 +558,9 @@ async function prepareAwsLaunch(ctx: CommandContext, params: Parameters<typeof r
 async function prepareAzureLaunch(params: Parameters<typeof runLaunch>[1], approvedAccess: Set<string>): Promise<LaunchResult | undefined> {
   const access = resolveAzureConnection(params.project);
   if (!('blocked' in access)) {
-    if (params.spec.environments[params.environmentName]?.deploy?.strategy !== 'branch') return undefined;
-    try { if (await azureCiSetupReady(access.connection)) return undefined; }
+    const env = params.spec.environments[params.environmentName];
+    if (env?.deploy?.strategy !== 'branch' && !env?.runtimeObservation) return undefined;
+    try { if (await azureCiSetupReady(access.connection, fetch, Boolean(env?.runtimeObservation))) return undefined; }
     catch { return { status: 'blocked', message: 'Azure CI access could not be verified. Retry when Azure can be read; no access change was attempted.' }; }
   }
   const approved = approvedAccess.has('azure-setup');

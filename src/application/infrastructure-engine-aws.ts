@@ -1,4 +1,8 @@
+import { observeObserverRepository } from './observer-repository.js';
+import type { ObserverRepository } from '../domain/spec/runtime-observation.js';
 import { projectAwsDatabaseQuerySecret } from '../adapters/providers/aws/aws-database-query-secret.js';
+import { runtimeObservationIntent } from '../domain/spec/runtime-observation.js';
+import { clearRuntimeObserver, recordRuntimeObserver } from './runtime-observer-bindings.js';
 import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAwsWorkloadBindings } from '../adapters/providers/aws/aws-diagnostics.client.js';
@@ -79,6 +83,7 @@ export interface AwsEngineBinding {
 }
 
 export interface AwsEngineContext {
+  observerRepository?: ObserverRepository;
   connection: AwsEngineCredentials;
   auth: EngineAuthentication;
   environment: Environment;
@@ -225,7 +230,7 @@ export function awsResourceName(prefix: string, service: string): string {
   return `${prefix}-${service}`.slice(0, 60);
 }
 
-export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'connection' | 'prefix' | 'parameterPath' | 'environment' | 'shared' | 'database'>, extra: {
+export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AwsEngineContext, 'observerRepository' | 'connection' | 'prefix' | 'parameterPath' | 'environment' | 'shared' | 'database'>, extra: {
   secretKeys: string[];
   /** The image the plan builds first, when the environment has none yet. */
   image?: string;
@@ -252,6 +257,7 @@ export function buildAwsEngineInput(spec: ProjectSpec, environmentName: string, 
   };
   return {
     accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix,
+    ...(context.observerRepository ? { observation: { ...runtimeObservationIntent(spec, environmentName)!, ...context.observerRepository } } : {}),
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
     environmentId: context.environment.id, parameterPath: context.parameterPath,
     ...(environmentSpec.database ? { database: { clusterArn: context.shared.clusterArn, name: context.database.name } } : {}),
@@ -468,7 +474,12 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
   if (problems.length) return { blocked: problems };
   const context = await resolveAwsEngineContext(ctx, project, environmentName, spec);
   if ('blocked' in context) return { blocked: [context.blocked] };
-  const setup = await awsAccessCurrent(context.credentials, context.connection.accountId);
+  const observerIntent = runtimeObservationIntent(spec, environmentName);
+  if (observerIntent) {
+    try { context.observerRepository = await observeObserverRepository(observerIntent); }
+    catch { return { blocked: ['Hypervibe could not verify the GitHub repository ID and default branch for the scheduled observer. Check gitRemoteUrl, the configured branch and the GitHub connection.'] }; }
+  }
+  const setup = await awsAccessCurrent(context.credentials, context.connection.accountId, Boolean(environmentSpec.runtimeObservation));
   if (setup === 'outdated') {
     return { blocked: ['This version of Hypervibe needs a small update to its AWS access (one sign-in, then approve on the page): run hv_connections provider="aws" action="connect".'] };
   }
@@ -607,7 +618,7 @@ export async function planAwsInfrastructureEngine(ctx: CommandContext, params: {
     ...(!binding.imageUri && !commit && workloads ? ['Hypervibe could not find this project\'s local repository, so the services are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
   return recordEnginePlan({ projectId: project.id, environmentId: context.environment.id, environmentName, specRevision: params.specRevision, actions, warnings,
-    engine: { planId, state: context.state, build: { planId: buildPlanId, state: context.buildState }, ...(sharedActions.length ? { shared: { planId: sharedPlanId, state: context.shared.state } } : {}), aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
+    engine: { planId, observerRepository: context.observerRepository, state: context.state, build: { planId: buildPlanId, state: context.buildState }, ...(sharedActions.length ? { shared: { planId: sharedPlanId, state: context.shared.state } } : {}), aws: { accountId: context.connection.accountId, region: context.connection.region, prefix: context.prefix } } });
 }
 
 export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: {
@@ -616,7 +627,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  const document = loaded.document as PlanRunDocument & { engine?: { planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; aws?: { accountId: string; region: string; prefix: string } } };
+  const document = loaded.document as PlanRunDocument & { engine?: { observerRepository?: ObserverRepository; planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; aws?: { accountId: string; region: string; prefix: string } } };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
   const snapshotOnly = Boolean((reviewed as { teardown?: boolean } | undefined)?.teardown) && !params.spec.environments[environmentName];
@@ -639,6 +650,7 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
       return { kind: 'blocked', reason: 'The reviewed image build differs from the images required for these workloads. Run hv_plan again.' };
     }
   }
+  context.observerRepository = reviewed.observerRepository;
   clearEngineCiBinding(ctx, context.environment);
   const engine = await openTofuEngine();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
@@ -737,6 +749,8 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
+  // A rejected or stale apply has not changed the cloud. Keep its prior observer evidence intact.
+  if (result.applyRunId && params.spec.environments[environmentName]?.runtimeObservation) clearRuntimeObserver(ctx, context.environment);
   // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
   // A teardown owns binding removal separately; never resurrect its identities.
   if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {
@@ -744,6 +758,16 @@ export async function applyAwsInfrastructureEngine(ctx: CommandContext, params: 
       auth: context.auth, state: context.state, provider: 'aws', projectId: context.connection.accountId, environmentId: context.connection.region,
       project: (state) => projectAwsWorkloadBindings(state, params.spec.environments[environmentName]!.services, { accountId: context.connection.accountId, region: context.connection.region }) });
     if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
+  }
+  if (result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown && params.spec.environments[environmentName]?.runtimeObservation) {
+    try {
+      await recordRuntimeObserver(ctx, engine, { provider: 'aws', context, spec: params.spec, environmentName });
+    } catch {
+      return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: 'The observer identity or its workloads could not be verified and exported. Run hv_plan and hv_apply again once the workloads exist.' } };
+    }
+  }
+  if (result.success && result.applyRunId && (!params.spec.environments[environmentName]?.runtimeObservation || (document.engine as { teardown?: boolean }).teardown)) {
+    clearRuntimeObserver(ctx, context.environment);
   }
   await recordEngineCiBindings(ctx, engine, { provider: 'aws', context, spec: params.spec, environmentName,
     succeeded: Boolean(result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) });

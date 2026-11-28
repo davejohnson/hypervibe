@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GitHubAdapter } from '../github.adapter.js';
 
@@ -61,6 +62,18 @@ describe('GitHub release artifact transport', () => {
     bytes[45] ^= 0xff;
     fixture(bytes.toString('base64'));
     await expect(adapter().readJsonArtifact('owner', 'repo', 12, 'release.json')).rejects.toThrow('Invalid release artifact');
+  });
+  it('allows observation reports larger than a release receipt and rejects expansion over eight MiB', async () => {
+    // Python zipfile, one prod.json containing one MiB of whitespace followed by a JSON value.
+    const bytes = readFileSync(new URL('../../../../../test/fixtures/observation-report.zip', import.meta.url));
+    fixture(bytes.toString('base64'));
+    await expect(adapter().readJsonArtifact('owner', 'repo', 12, 'prod.json')).rejects.toThrow('Invalid release artifact');
+    fixture(bytes.toString('base64'));
+    await expect(adapter().readJsonArtifact('owner', 'repo', 12, 'prod.json', 'runtime-report')).resolves.toEqual({ version: 1 });
+    const central = bytes.readUInt32LE(bytes.length - 6);
+    bytes.writeUInt32LE(8 * 1024 * 1024 + 1, central + 24);
+    fixture(bytes.toString('base64'));
+    await expect(adapter().readJsonArtifact('owner', 'repo', 12, 'prod.json', 'runtime-report')).rejects.toThrow('Invalid release artifact');
   });
   it('bounds streamed archive size even without a content length', async () => {
     vi.spyOn(globalThis, 'fetch')

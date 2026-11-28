@@ -1,7 +1,10 @@
+import { addAzureMonitoring } from './azure-monitoring.config.js';
+import type { ObserverFederation } from '../../../../domain/spec/runtime-observation.js';
 import { azureCiRegistry, azureSelectedBuildRegistry, type AzureBuildRegistry } from '../azure-ci-registry.js';
 import { azureBuildTaskContent, azureBuildTaskName } from '../azure-build-task.js';
 import crypto from 'crypto';
 import type { EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
+import { addAzureObserverConfiguration } from './azure-observer.config.js';
 import { addAzureCiConfiguration } from './azure-engine-ci.config.js';
 import type { EngineConfiguration, EngineResourceMapping } from '../../../../domain/ports/infrastructure-engine.port.js';
 
@@ -51,6 +54,8 @@ export const AZURE_NETWORK = { space: '10.61.0.0/16', apps: '10.61.0.0/23', endp
 
 export interface AzureEngineInput extends AzurePlacement {
   ci?: EngineCiIntent;
+  observation?: ObserverFederation & { workspaceResourceId: string };
+  previousObserverServices?: string[];
   kind?: 'environment';
   /** Environment id stamped on owned resources so adoption can prove ownership. */
   environmentId: string;
@@ -522,6 +527,8 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   }
   if (Object.keys(jobs).length) files['jobs.tf.json'] = { resource: { azurerm_container_app_job: jobs } };
   addAzureCiConfiguration(input, files, resources);
+  addAzureObserverConfiguration(input, files, resources);
+  addAzureMonitoring(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
     runtime_identity_client_id: { value: '${azurerm_user_assigned_identity.runtime.client_id}' },

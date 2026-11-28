@@ -14,6 +14,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
     {
       project: projectField,
       env: envField,
+      stopAfter: z.literal('infrastructure').optional().describe('Stop after applying infrastructure and runtime observer access, before building or releasing application code.'),
       browserAccess: z.enum(GCP_REVIEWED_ACCESS).optional().describe('Use the browser approval for this exact accessId and gcpSetupPlanId from needs_access.'),
       gcpSetupPlanId: z.string().min(1).optional().describe('Exact saved Google Cloud setup plan ID. Use browserAccess to continue a browser-approved setup for its specific accessId.'),
       billingAccountName: z.string().regex(/^billingAccounts\/[A-Z0-9-]+$/).optional()
@@ -28,7 +29,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       confirmActions: z.array(z.string().min(1)).optional()
         .describe('Exact confirmActions from a needs_confirmation result, passed only after the user approved them.'),
     },
-    wrapCommandHandler(async ({ project: projectRef, env, billingAccountName, gcpSetupPlanId, browserAccess, azureSubscriptionId, awsAccountId, planId, confirmActions, approveAccess }) => {
+    wrapCommandHandler(async ({ project: projectRef, env, stopAfter, billingAccountName, gcpSetupPlanId, browserAccess, azureSubscriptionId, awsAccountId, planId, confirmActions, approveAccess }) => {
       if (browserAccess && (!gcpSetupPlanId || approveAccess?.length)) return commandError('VALIDATION', 'Pass the exact gcpSetupPlanId with browserAccess, omitting approveAccess.');
       if (gcpSetupPlanId && (!browserAccess || browserAccess === 'gcp-setup') && !billingAccountName) {
         return commandError('VALIDATION', 'Use gcpSetupPlanId with the billing account selected for this saved setup.');
@@ -38,6 +39,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
       if (!specResult) return commandError('NOT_FOUND', `Project "${project.name}" has no spec.`, { next: ['hv_spec'] });
       const environmentName = env?.trim() || Object.keys(specResult.spec.environments)[0] || 'staging';
       const result = await launchEnvironment(ctx, {
+        ...(stopAfter && { stopAfter }),
         project, spec: specResult.spec, specRevision: specResult.revision, environmentName,
         ...(localRepositoryFor(project, specResult.source) ? { sourceDirectory: localRepositoryFor(project, specResult.source)! } : {}),
         ...(gcpSetupPlanId ? { gcpSetupPlanId } : {}),
@@ -61,7 +63,7 @@ export function registerHvLaunchTools(commands: CommandRegistrar, ctx: CommandCo
             next: ['hv_launch'],
           });
         case 'ready':
-          return commandSuccess(result, { next: ['hv_launch'] });
+          return commandSuccess(result, { hint: 'The requested infrastructure phase is complete.' });
         case 'needs_connection':
           return commandSuccess(result, {
             hint: 'A connect page is open in the user\'s browser. Share the link in case it did not open, then call hv_launch again once they finish.',

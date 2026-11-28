@@ -25,6 +25,7 @@ import {
 import { createStorageHmacKey, deleteBucketObject, listBucketObjects, readBucket, readPubsubTopic, readRedisAuthString, readRedisInstance, sqlAdmin } from '../adapters/providers/gcp/gcp-data.client.js';
 export type { WorkloadKind } from '../adapters/providers/gcp/gcp-cloud-run.client.js';
 import { ENGINE_PLAN_SCOPE, describeFixedWorkerCountChanges, describeStorageAutoTieringChanges, missingOutsideKeysMessage, openTofuEngine, recordEnginePlan, forgetTornDownEnvironment } from './engine-shared.js';
+import { gcpObserverNeedsRevocation } from './gcp-runtime-observer.js';
 import { googleBackupTeardownWarnings } from './gcp-bucket-backup-records.js';
 export { ENGINE_PLAN_SCOPE, missingOutsideKeysMessage } from './engine-shared.js';
 import { SpecStore } from '../domain/spec/spec.store.js';
@@ -1020,6 +1021,10 @@ export async function planGcpTeardown(ctx: CommandContext, params: {
   const name = params.environmentName;
   const declared = params.spec.environments[name];
   if (!declared) return { blocked: [`Environment ${name} is not in the spec.`] };
+  const receipt = ctx.repos.environments.findByProjectAndName(params.project.id, name)?.platformBindings;
+  if (declared.runtimeObservation || gcpObserverNeedsRevocation(params.project.id, name, receipt)) return {
+    blocked: [`Remove runtimeObservation from ${name} and finish its Google access removal with hv_launch stopAfter="infrastructure" before tearing down the environment.`],
+  };
   if (environmentDomains(declared).length) {
     return { blocked: [`Remove ${name}'s custom domains from the spec and apply that first; teardown does not change DNS.`] };
   }
@@ -1762,6 +1767,9 @@ export async function applyGcpInfrastructureEngine(ctx: CommandContext, params: 
   const context = await resolveEngineContext(ctx, params.project, params.spec, environmentName);
   if ('blocked' in context) return { kind: 'blocked', reason: context.blocked };
   const reviewed = document.engine;
+  if (reviewed.teardown && (params.spec.environments[environmentName]?.runtimeObservation || gcpObserverNeedsRevocation(params.project.id, environmentName, context.environment.platformBindings))) {
+    return { kind: 'blocked', reason: 'Revoke the runtime observer access with hv_launch before applying this environment teardown.' };
+  }
   const reviewedDatabase = gcpDatabaseLocation(reviewed.gcpProjectId, reviewed);
   if (JSON.stringify(reviewed.state) !== JSON.stringify(context.state) || reviewed.gcpProjectId !== context.gcpProjectId || reviewed.region !== context.region) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different environment, GCP project or region. Re-run hv_plan.' };

@@ -1,4 +1,8 @@
+import { observeObserverRepository } from './observer-repository.js';
+import type { ObserverRepository } from '../domain/spec/runtime-observation.js';
 import { createHash } from 'node:crypto';
+import { runtimeObservationIntent, runtimeObserverSchema } from '../domain/spec/runtime-observation.js';
+import { clearRuntimeObserver, recordRuntimeObserver } from './runtime-observer-bindings.js';
 import { clearEngineCiBinding, recordEngineCiBindings } from './engine-ci-bindings.js';
 import { recordEngineWorkloadBindings } from './engine-workload-bindings.js';
 import { projectAzureSharedApps, projectAzureWorkloadBindings } from '../adapters/providers/azure/azure-diagnostics.client.js';
@@ -188,6 +192,7 @@ export function resolveAzureConnection(project: Project): { connection: AzureEng
 }
 
 export interface AzureEngineContext {
+  observerRepository?: ObserverRepository;
   project: Project;
   environmentName: string;
   connection: AzureEngineCredentials;
@@ -274,7 +279,7 @@ export function buildAzureSharedInput(spec: ProjectSpec, context: Pick<AzureEngi
 }
 
 /** One environment's configuration input. Workloads are created from `image` (the last build, or the commit this apply builds). */
-export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'connection' | 'prefix' | 'shared' | 'vault'> & Partial<Pick<AzureEngineContext, 'legacyNames'>> & { environment: Pick<Environment, 'id'> & Partial<Pick<Environment, 'platformBindings'>> },
+export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string, context: Pick<AzureEngineContext, 'observerRepository' | 'connection' | 'prefix' | 'shared' | 'vault'> & Partial<Pick<AzureEngineContext, 'legacyNames'>> & { environment: Pick<Environment, 'id'> & Partial<Pick<Environment, 'platformBindings'>> },
   extra: { secretKeys: string[]; image?: string }): AzureEngineInput {
   const environmentSpec = spec.environments[environmentName]!;
   const storageAccount = azureStorageAccountName({ subscriptionId: context.connection.subscriptionId, environmentId: context.environment.id, prefix: context.prefix });
@@ -292,9 +297,17 @@ export function buildAzureEngineInput(spec: ProjectSpec, environmentName: string
   };
   const command = (startCommand?: string) => startCommand ? { command: ['sh', '-c', startCommand] } : {};
   const secretServices = azureSecretServices(spec, environmentName);
+  const observation = runtimeObservationIntent(spec, environmentName);
+  const platform = context.environment.platformBindings;
+  const previous = runtimeObserverSchema.safeParse(platform?.runtimeObserver);
+  // Workload bindings survive interrupted applies which must clear their observer marker.
+  const historicalServices = platform?.services && typeof platform.services === 'object' ? Object.keys(platform.services) : [];
+  const previousObserverServices = [...new Set([...historicalServices, ...(previous.success ? Object.keys(previous.data.services) : [])])];
   return {
     kind: 'environment', tenantId: context.connection.tenantId, subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup,
     ...(engineCiIntent(spec, environmentName) ? { ci: engineCiIntent(spec, environmentName) } : {}),
+    ...(observation && context.observerRepository ? { observation: { ...observation, ...context.observerRepository, workspaceResourceId: `/subscriptions/${context.connection.subscriptionId}/resourceGroups/${context.connection.resourceGroup}/providers/Microsoft.OperationalInsights/workspaces/${context.shared.prefix}-logs` } } : {}),
+    ...(previousObserverServices.length ? { previousObserverServices } : {}),
     location: azureLocationFor(spec, environmentName, context.connection), prefix: context.prefix, environmentId: context.environment.id, environmentName,
     shared: { registryId: context.shared.registryId, registryLoginServer: context.shared.registryLoginServer, appsEnvironmentId: context.shared.appsEnvironmentId },
     ...(azureBinding(context.environment as Environment).buildRegistry ? { buildRegistry: azureBinding(context.environment as Environment).buildRegistry! } : {}),
@@ -482,8 +495,13 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
   const context = await resolveAzureEngineContext(ctx, project, environmentName);
   if ('blocked' in context) return { blocked: [context.blocked] };
 
-  if (engineCiIntent(spec, environmentName)) {
-    const ready = await azureCiSetupReady(context.connection).catch(() => false);
+  const observerIntent = runtimeObservationIntent(spec, environmentName);
+  if (observerIntent) {
+    try { context.observerRepository = await observeObserverRepository(observerIntent); }
+    catch { return { blocked: ['Hypervibe could not verify the GitHub repository ID and default branch for the scheduled observer. Check gitRemoteUrl, the configured branch and the GitHub connection.'] }; }
+  }
+  if (engineCiIntent(spec, environmentName) || environmentSpec.runtimeObservation) {
+    const ready = await azureCiSetupReady(context.connection, fetch, Boolean(environmentSpec.runtimeObservation)).catch(() => false);
     if (!ready) return { blocked: ['Azure CI access needs reviewed setup. Run hv_launch (or hv_connections provider="azure" action="connect") to update access.'] };
   }
 
@@ -592,7 +610,7 @@ export async function planAzureInfrastructureEngine(ctx: CommandContext, params:
     ...(Object.keys(input.secretServices ?? {}).length ? [`Limited secrets (${Object.entries(input.secretServices!).map(([key, services]) => `${key}: ${services.join(', ') || 'no service'}`).join('; ')}): each named service runs as its own identity, and the shared runtime identity is given no role on them. Hypervibe checked the shared identity's built-in role assignments in Azure and found none that reaches them; custom roles and roles held through a group are not checked. A value that other services held before this apply stays known to them; rotate it afterwards.`] : []),
     ...(!image && workloads ? ['Hypervibe could not find this project\'s local repository, so the workloads are created after the first image build: run hv_deploy after this apply, then plan again.'] : []),
   ];
-  return recordPlan(project, context, params, actions, warnings, { planId, build: { planId: buildPlanId, state: context.buildState }, shared: { planId: sharedPlanId, state: context.shared.state } });
+  return recordPlan(project, context, params, actions, warnings, { planId, observerRepository: context.observerRepository, build: { planId: buildPlanId, state: context.buildState }, shared: { planId: sharedPlanId, state: context.shared.state } });
 }
 
 /**
@@ -791,7 +809,7 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
   const executor = new ConvergeExecutor();
   const loaded = executor.loadPlan(params.planId);
   if ('error' in loaded) return { kind: 'blocked', reason: loaded.error };
-  type Reviewed = { teardown?: boolean; planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; azure?: { subscriptionId: string; resourceGroup: string; prefix: string } };
+  type Reviewed = { observerRepository?: ObserverRepository; teardown?: boolean; planId: string; state: EngineStateIdentity; build?: { planId: string; state: EngineStateIdentity }; shared?: { planId: string; state: EngineStateIdentity }; azure?: { subscriptionId: string; resourceGroup: string; prefix: string } };
   const document = loaded.document as PlanRunDocument & { engine?: Reviewed };
   const environmentName = document.environmentName;
   const reviewed = document.engine;
@@ -802,6 +820,7 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
     || reviewed.azure.subscriptionId !== context.connection.subscriptionId || reviewed.azure.resourceGroup !== context.connection.resourceGroup || reviewed.azure.prefix !== context.prefix) {
     return { kind: 'blocked', reason: 'The reviewed plan targets a different Azure subscription, resource group or environment. Re-run hv_plan.' };
   }
+  context.observerRepository = reviewed.observerRepository;
   clearEngineCiBinding(ctx, context.environment);
   const engine = await engineFor();
   if ('blocked' in engine) return { kind: 'blocked', reason: engine.blocked };
@@ -838,6 +857,8 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
       return { ...outcome, diagnostics: outcome.diagnostics.map((line) => redactEngineOutput(line, context.auth.redact)) };
     },
   });
+  // A rejected or stale apply has not changed the cloud. Keep its prior observer evidence intact.
+  if (result.applyRunId && params.spec.environments[environmentName]?.runtimeObservation) clearRuntimeObserver(ctx, context.environment);
   // This also repairs pre-diagnostics bindings on an ordinary no-op apply.
   // A teardown owns binding removal separately; never resurrect its identities.
   if (result.applyRunId && !(document.engine as { teardown?: boolean }).teardown) {
@@ -847,6 +868,16 @@ export async function applyAzureInfrastructureEngine(ctx: CommandContext, params
       auth: context.auth, state: context.state, provider: 'azure', projectId: context.connection.subscriptionId, environmentId: context.connection.resourceGroup,
       project: (state) => projectAzureWorkloadBindings(state, params.spec.environments[environmentName]!.services, { subscriptionId: context.connection.subscriptionId, resourceGroup: context.connection.resourceGroup, location: azureLocationFor(params.spec, environmentName, context.connection) }, apps) });
     if (!recorded.ok) return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: recorded.error } };
+  }
+  if (result.success && result.applyRunId && !(document.engine as { teardown?: boolean }).teardown && params.spec.environments[environmentName]?.runtimeObservation) {
+    try {
+      await recordRuntimeObserver(ctx, engine, { provider: 'azure', context, spec: params.spec, environmentName, region: azureLocationFor(params.spec, environmentName, context.connection) });
+    } catch {
+      return { kind: 'executed', envName: environmentName, result: { ...result, success: false, error: 'The observer identity or its workloads could not be verified and exported. Run hv_plan and hv_apply again once the workloads exist.' } };
+    }
+  }
+  if (result.success && result.applyRunId && (!params.spec.environments[environmentName]?.runtimeObservation || (document.engine as { teardown?: boolean }).teardown)) {
+    clearRuntimeObserver(ctx, context.environment);
   }
   await recordEngineCiBindings(ctx, engine, { provider: 'azure', context, spec: params.spec, environmentName,
     location: azureLocationFor(params.spec, environmentName, context.connection),

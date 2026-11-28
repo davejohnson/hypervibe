@@ -4,9 +4,9 @@ export const RELEASE_ARTIFACT_LIMIT = 1_048_576;
 export const RELEASE_ARTIFACT_ARCHIVE_LIMIT = RELEASE_ARTIFACT_LIMIT + 65_536;
 
 /** Read bounded release JSON files in memory; never extract provider files. */
-export function readReleaseArtifactFilesZip(bytes: Buffer): Record<string, string> {
+export function readReleaseArtifactFilesZip(bytes: Buffer, expandedLimit = RELEASE_ARTIFACT_LIMIT): Record<string, string> {
   try {
-    if (bytes.length > RELEASE_ARTIFACT_ARCHIVE_LIMIT) throw new Error();
+    if (bytes.length > expandedLimit + 65_536) throw new Error();
     // PKWARE APPNOTE 4.3.12/4.3.16. Small release artifacts never need ZIP64,
     // multiple disks, encryption, or executable files.
     let end = bytes.length - 22;
@@ -38,8 +38,8 @@ export function readReleaseArtifactFilesZip(bytes: Buffer): Record<string, strin
       const local = bytes.readUInt32LE(central + 42);
       const filename = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(central + 46, central + 46 + nameLength));
       totalExpanded += expanded;
-      if (flags & ~0x080e || ![0, 8].includes(method) || totalExpanded > RELEASE_ARTIFACT_LIMIT
-          || compressed > RELEASE_ARTIFACT_LIMIT || (mode & 0o170000) === 0o120000
+      if (flags & ~0x080e || ![0, 8].includes(method) || totalExpanded > expandedLimit
+          || compressed > expandedLimit || (mode & 0o170000) === 0o120000
           || bytes.readUInt16LE(central + 34) !== 0 || names.has(filename)
           || !(filename === 'contracts/' || /^(?:[a-z0-9-]+|contracts\/v[1-9][0-9]*)\.json$/.test(filename))
           || (filename === 'contracts/' && expanded !== 0)
@@ -52,7 +52,7 @@ export function readReleaseArtifactFilesZip(bytes: Buffer): Record<string, strin
           || dataEnd > centralStart || ranges.some(([start, end]) => local < end && dataEnd > start)) throw new Error();
       ranges.push([local, dataEnd]);
       const payload = bytes.subarray(dataStart, dataEnd);
-      const json = method === 8 ? inflateRawSync(payload, { maxOutputLength: RELEASE_ARTIFACT_LIMIT }) : payload;
+      const json = method === 8 ? inflateRawSync(payload, { maxOutputLength: expandedLimit }) : payload;
       let actualCrc = 0xffffffff;
       for (const value of json) {
         actualCrc ^= value;
