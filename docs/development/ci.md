@@ -181,8 +181,8 @@ not become prerequisites for a server deployment.
 
 ## Scheduled Cloud Run observations
 
-An environment with `runtimeObservation.branch` uses a dedicated Google
-service account and Workload Identity Federation pool. The trust condition
+An environment with Cloud Run workloads and `runtimeObservation.branch` uses
+a dedicated Google service account and Workload Identity Federation pool. The trust condition
 binds the numeric GitHub repository ID, repository name, exact collector
 workflow file, verified default branch, GitHub-hosted runner, event, and
 first run attempt. The collector assumes the account without a stored key.
@@ -191,11 +191,21 @@ can read non-private log entries across that Google project. The collector
 queries logs for the applied Cloud Run workloads only. Each bound scheduled
 job grants `run.executions.list` on that job.
 
-Use `hv_launch` with `stopAfter: "infrastructure"` for the project-shared
-access review and runtime dashboard without an application release. Review
-the selected identities, grants, dashboard and alert policies before
-approving the saved setup plan. Commit the exported observer binding and
-generated workflow to the default branch. On removal of the spec option,
-use the same command to revoke the grants and remove the monitoring
-resources. Hypervibe disables and retains the account, pool and provider
-so Google’s soft-deleted-name retention period does not delay reactivation.
+Use `hv_plan` and `hv_apply` to review and apply Google monitoring changes.
+When infrastructure changes first, run another plan after it settles. The
+monitoring plan uses the applied identities and shows the Google project
+administrator changes. `hv_launch` with `stopAfter: "infrastructure"` also
+walks through these stages. Review the selected grants, dashboard and alert
+policies, then approve the saved plan. Commit the exported workload observer
+binding and generated workflow to the default branch when prompted.
+
+Cloud Monitoring tracks dedicated Cloud SQL instance CPU, Redis memory
+utilization, Pub/Sub subscription backlog age and Cloud Storage server errors.
+On a shared Cloud SQL server, Hypervibe monitors deadlocks for the bound
+tenant database. Server-wide CPU is shared across tenants.
+A resource-only environment gets native monitoring without a GitHub identity.
+After the last workload is removed, the same review revokes collector access
+and retains applicable resource charts. Removing monitoring revokes the
+grants and removes the dashboard and alerts. Hypervibe disables and retains
+previously created accounts, pools and providers so the environment can resume
+monitoring during Google's soft-deleted-name retention period.

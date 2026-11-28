@@ -96,6 +96,15 @@ describe('scheduled runtime observer enrollment', () => {
     expect(execFileSync('bash', ['-euc', collect.run], { cwd: dir, env: { ...process.env, RUNNER_TEMP: dir, HV_ENVIRONMENT: collect.env.HV_ENVIRONMENT }, encoding: 'utf8' })).toBe('ci\nobserve\n--env\nprod\n');
     const artifacts = workflow.jobs.observe.steps.filter((s: { uses?: string }) => s.uses?.startsWith('actions/upload-artifact'));
     expect(artifacts.map((s: { with: { name: string } }) => s.with.name)).toEqual(['hypervibe-runtime-observation', 'hypervibe-runtime-cursor']);
+    const resourceOnly = { ...rawSpec, environments: { prod: { ...rawSpec.environments.prod, services: {} } } };
+    expect(projectSpecSchema.safeParse(resourceOnly).success).toBe(true);
+    expect(() => admitRuntimeObserver({ ...files, rawSpec: resourceOnly, environmentName: 'prod', repository: 'owner/app', ref: 'refs/heads/main', sha })).toThrow();
+    writeFileSync(specPath, JSON.stringify(resourceOnly));
+    writeRepoBindingsForEnvironment(project, { ...environment, platformBindings: { ...environment.platformBindings, runtimeObserver: null } }, dir);
+    expect(existsSync(workflowPath)).toBe(false);
+    writeFileSync(specPath, JSON.stringify(rawSpec));
+    writeRepoBindingsForEnvironment(project, environment, dir);
+    expect(existsSync(workflowPath)).toBe(true);
     const { runtimeObservation: _removed, ...disabled } = rawSpec.environments.prod;
     writeFileSync(specPath, JSON.stringify({ ...rawSpec, environments: { prod: disabled } }));
     writeRepoBindingsForEnvironment(project, { ...environment, platformBindings: { ...environment.platformBindings, runtimeObserver: null } }, dir);

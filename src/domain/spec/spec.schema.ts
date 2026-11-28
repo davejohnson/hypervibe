@@ -2281,9 +2281,9 @@ export const projectSpecSchema = z.object({
 }).strict().superRefine((spec, ctx) => {
   for (const [environmentName, env] of Object.entries(spec.environments)) {
     if (env.runtimeObservation && (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(environmentName)
-      || !['cloudrun', 'aws', 'azure'].includes(env.hosting.provider) || !Object.keys(env.services).length)) {
+      || !['cloudrun', 'aws', 'azure'].includes(env.hosting.provider))) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['environments', environmentName, 'runtimeObservation'],
-        message: 'A runtime observer requires a named workload on Cloud Run, ECS or Azure Container Apps and a lowercase environment name using letters, digits and hyphens.' });
+        message: 'Runtime monitoring requires Cloud Run, AWS or Azure and a lowercase environment name using letters, digits and hyphens.' });
     }
   }
   for (const [key, slot] of Object.entries(spec.secrets)) for (const [index, check] of (slot.credential?.verification ?? []).entries()) {

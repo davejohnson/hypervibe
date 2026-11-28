@@ -354,7 +354,7 @@ export const planRunDocumentSchema = z.object({
     return;
   }
   if (document.dns) ctx.addIssue({ code: 'custom', message: 'A DNS descriptor requires its isolated DNS engine stage.' });
-  const engineOperations = ['gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure', 'gcpRetainDatabaseAliasImports',
+  const engineOperations = ['gcpRuntimeObserverSetup', 'gcpSecretManagerEnsure', 'gcpSecretManagerDelete', 'engineImageRelease', 'gcpDatabaseCredentialEnsure', 'gcpRetainDatabaseAliasImports',
     'gcpDomainVerify', 'gcpDomainDns', 'gcpDomainReady', 'gcpDomainDnsRemove', 'gcpDomainForget', 'gcpCacheCredentialEnsure', 'gcpStorageS3KeyEnsure', 'gcpWorkerWakeGrant',
     'awsParameterEnsure', 'awsDatabaseLoginEnsure', 'awsBucketEmpty', 'awsTeardownCleanup', 'awsSnapshotDelete', 'awsImageBuild', 'awsDatabaseDrop',
     'azureSecretEnsure', 'azureDatabaseLoginEnsure', 'azureImageBuild', 'azureStorageEmpty', 'azureDatabaseDrop', 'azureTeardownCleanup', 'azureFailedAppEnvironment', 'gcpStorageEmpty', 'gcpTeardownCleanup', 'gcpSharedDatabase'];
@@ -365,6 +365,15 @@ export const planRunDocumentSchema = z.object({
       || document.actions.some((action) => action.type !== 'noop' && !engineSegmentOf(action)
         && !engineOperations.includes(String(action.metadata?.operation)))) {
       ctx.addIssue({ code: 'custom', message: 'Engine plans contain only reviewed engine changes and Hypervibe-owned secret actions.' });
+    }
+    const observer = document.actions.find(action => action.metadata?.operation === 'gcpRuntimeObserverSetup');
+    if (observer && (document.actions.filter(a => a.type !== 'noop').length !== 1 || observer.type !== 'update'
+      || observer.resource.kind !== 'environment' || observer.resource.name !== document.environmentName || observer.resource.provider !== 'gcp'
+      || !observer.verified || observer.requiresConfirm !== true || typeof observer.metadata?.setupPlanId !== 'string'
+      || !/^setup-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(observer.metadata.setupPlanId)
+      || observer.id !== 'gcp-monitoring:' + observer.metadata.setupPlanId || engineSegmentOf(observer)
+      || observer.metadata.gcpProjectId !== (engine as { gcpProjectId?: string })?.gcpProjectId)) {
+      ctx.addIssue({ code: 'custom', message: 'Project monitoring requires its exact isolated, owner-reviewed Google setup plan.' });
     }
     // Removing the app's shared database server is a plan of its own: exactly one of its two steps, and never inside an environment's plan.
     const serverSteps = document.actions.filter((action) => action.metadata?.operation === 'gcpSharedDatabase' && ['unprotect-server', 'remove-server'].includes(String(action.metadata.step)));

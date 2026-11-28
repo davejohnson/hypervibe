@@ -3,7 +3,7 @@ import type { EngineConfiguration } from '../../../../domain/ports/infrastructur
 import { assertEngineCiIntent, type EngineCiIntent } from '../../../../domain/spec/engine-ci.js';
 import type { RuntimeObserverBinding } from '../../../../domain/spec/runtime-observation.js';
 import { buildGcpPreparationConfiguration } from './gcp-setup.backend.js';
-import { buildGcpObservationDashboard } from './gcp-observer-dashboard.config.js';
+import { buildGcpObservationDashboard, type GcpMetricTarget } from './gcp-observer-dashboard.config.js';
 
 export type GoogleObserver = Extract<RuntimeObserverBinding, { provider: 'gcp' }>;
 export const observerKey = (projectId: string, environment: string) => 'observer_' + createHash('sha256').update(JSON.stringify([projectId, environment])).digest('hex').slice(0, 16);
@@ -17,7 +17,7 @@ export function googleObserverBinding(input: {
       serviceAccount: `${account}@${input.project}.iam.gserviceaccount.com` } };
 }
 
-export function buildGcpObserverConfiguration(binding: GoogleObserver, key: string, repositoryId: string): EngineConfiguration {
+export function buildGcpObserverConfiguration(binding: GoogleObserver, key: string, repositoryId: string, targets: GcpMetricTarget[] = []): EngineConfiguration {
   assertEngineCiIntent(binding);
   if (!/^observer_[a-f0-9]{16}$/.test(key) || !/^[1-9]\d*$/.test(repositoryId)) throw new Error('Invalid observer trust identity.');
   const { projectId: project, provider, serviceAccount } = binding.gcp;
@@ -66,7 +66,7 @@ export function buildGcpObserverConfiguration(binding: GoogleObserver, key: stri
     }
   }
   config.files[key.replaceAll('_', '-') + '.tf.json'] = { resource };
-  const dashboard = buildGcpObservationDashboard(binding, key);
+  const dashboard = buildGcpObservationDashboard(binding, key, targets);
   return { files: { ...config.files, ...dashboard.files }, resources: { ...config.resources, ...dashboard.resources } };
 }
 
@@ -74,14 +74,14 @@ export function buildGcpObserverConfiguration(binding: GoogleObserver, key: stri
 export function disableGcpObserverConfiguration(previous: EngineConfiguration, key: string): EngineConfiguration {
   const config = structuredClone(previous);
   const owned = config.files[key.replaceAll('_', '-') + '.tf.json'] as { resource: Record<string, Record<string, Record<string, unknown>>> } | undefined;
-  if (!owned?.resource.google_service_account?.[key]) throw new Error('The saved Google observer setup has no matching owned identity.');
-  for (const [type, entries] of Object.entries(owned.resource)) {
+  if (owned && !owned.resource.google_service_account?.[key]) throw new Error('The saved Google observer setup has no matching owned identity.');
+  for (const [type, entries] of Object.entries(owned?.resource ?? {})) {
     if (['google_iam_workload_identity_pool_provider', 'google_iam_workload_identity_pool', 'google_service_account'].includes(type)) {
       entries[key]!.disabled = true;
     } else if (type === 'google_project_iam_custom_role') continue;
     else if (['google_project_iam_member', 'google_service_account_iam_member', 'google_cloud_run_v2_job_iam_member'].includes(type)) {
       for (const label of Object.keys(entries)) delete config.resources[type + '.' + label];
-      delete owned.resource[type];
+      delete owned!.resource[type];
     } else throw new Error('The saved observer includes an unknown resource. Preserve its setup.');
   }
   const dashboardFile = `observer-dashboard-${key.replaceAll('_', '-')}.tf.json`;
@@ -96,15 +96,18 @@ export function disableGcpObserverConfiguration(previous: EngineConfiguration, k
 
 // Project-setup saves its desired manifest before native apply. Keep the mappings for removed, previously owned
 // resources so a partial removal can be reviewed and retried against the remaining Google state.
-export function retainObserverRemovals(config: EngineConfiguration, previous?: EngineConfiguration): string[] {
+export function retainObserverRemovals(config: EngineConfiguration, previous: EngineConfiguration | undefined, key: string): string[] {
   if (!previous) return [];
   const declared = new Set(Object.values(config.files).flatMap(document => {
     const resources = (document as { resource?: Record<string, Record<string, unknown>> }).resource ?? {};
     return Object.entries(resources).flatMap(([type, labels]) => Object.keys(labels).map(label => type + '.' + label));
   }));
+  if (!/^observer_[0-9a-f]{16}$/.test(key)) throw new Error('Invalid Google observer owner.');
+  const ownAddress = new RegExp('^(?:(?:google_service_account_iam_member|google_project_iam_member|google_monitoring_dashboard)\\.' + key
+    + '|(?:google_cloud_run_v2_job_iam_member|google_monitoring_alert_policy)\\.' + key + '_[0-9a-f]{16})$');
   const removed = Object.keys(previous.resources).filter(address => !declared.has(address));
   for (const address of removed) {
-    if (!/^(google_cloud_run_v2_job_iam_member|google_service_account_iam_member|google_project_iam_member|google_monitoring_alert_policy|google_monitoring_dashboard)\./.test(address)) {
+    if (!ownAddress.test(address)) {
       throw new Error('An unrecognized resource would be removed from Google observer setup. Preserve the existing state.');
     }
     config.resources[address] = previous.resources[address]!;

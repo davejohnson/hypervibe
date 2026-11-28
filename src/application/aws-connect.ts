@@ -45,7 +45,7 @@ export async function connectAws(params: {
   const region = chooseAwsRegion(params.spec);
   const repo = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec?.gitRemoteUrl) ?? undefined;
   // Access is per account: a new project reuses it without signing in, unless it needs an update.
-  const runtimeObservation = Object.values(params.spec?.environments ?? {}).some(env => env.hosting.provider === 'aws' && env.runtimeObservation);
+  const runtimeObservation = Object.values(params.spec?.environments ?? {}).some(env => env.hosting.provider === 'aws' && env.runtimeObservation && Object.keys(env.services).length > 0);
   const reused = await reuseAccountAccess(params.project, repo, runtimeObservation);
   if (reused) return reused;
   const planFor = (session: AwsSignInSession) => planAwsSetup(session, { project: params.project.name, region, ...(runtimeObservation ? { runtimeObservation } : {}), ...(repo ? { repository: repo } : {}) });

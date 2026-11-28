@@ -80,8 +80,8 @@ Use a released Hypervibe package that includes `hypervibe ci observe`. Run
 access and infrastructure changes when prompted. Launch uses the existing
 applied workloads and can also surface other outstanding desired changes in
 the environment. Review the full plan before approving it. To apply an already
-prepared AWS or Azure environment separately, use `hv_plan scope="infrastructure"`
-and approve the returned `hv_apply` actions. Commit the resulting
+prepared environment separately, use `hv_plan scope="infrastructure"`
+and approve the returned `hv_apply` actions. On Google Cloud, plan again after infrastructure changes settle to review monitoring against the applied resource identities. Commit the resulting
 `.hypervibe/spec.json`, `.hypervibe/bindings.json` and
 `.github/workflows/hypervibe-observe-<environment>.yml` to the verified default
 branch. The generated job runs a fixed package version on a GitHub-hosted
@@ -92,6 +92,16 @@ runner. It obtains temporary cloud credentials using GitHub OIDC.
 | AWS | A separate IAM role can read the environment’s CloudWatch log group and list or describe tasks in its ECS cluster. The role accepts the selected GitHub repository, branch and observer workflow name. Older account setups need an approved change to the maximum permissions of app roles. |
 | Azure | A separate managed identity trusts the selected repository’s default-branch OIDC subject. It has Reader access on the applied workloads and Container Apps environment. A Log Analytics Data Reader assignment restricts log access to the container console table and the named workload rows. The owner setup can need permission to assign those two roles. |
 | Google Cloud | A separate federated service account can read non-private log entries in the selected Google project. The collector filters to each applied workload. Execution access is confined to the bound Cloud Run jobs. |
+
+Once an environment is enrolled, its infrastructure plan reconciles monitoring as resources are added, changed or retired. A workload rename updates its dashboard targets and the applied scope used by the collector. Removing the final workload retires the workload observer and its generated workflow. The environment can stay enrolled with only data resources.
+
+| Cloud | Data-resource signals in the native dashboard and alerts |
+| --- | --- |
+| AWS | S3 server errors for each declared bucket and capacity utilization of the shared Aurora testing writer. |
+| Azure | Availability of the environment’s Blob storage account and storage utilization on the shared PostgreSQL Flexible Server. Each metric covers the named account or server. |
+| Google Cloud | Dedicated Cloud SQL instance CPU, Memorystore Redis memory use, Cloud Storage server errors and Pub/Sub subscription backlog age. For PostgreSQL databases on a shared Cloud SQL instance, the deadlock alert uses the tenant database name. |
+
+These alarms are visible in the cloud console. The GitHub collector and hosted daily review receive workload logs and scheduled-job results. Resource-only monitoring requires no scheduled runner. The plan calls out infrastructure without a dedicated signal. Data-retention rules still apply when removing resources. In particular, removing a bucket or container from an AWS or Azure spec can block the plan until the data retirement is reviewed.
 
 The default five-minute schedule requests 288 polls per environment each day. Set `runtimeObservation.intervalMinutes` to 10, 15 or 30 to reduce polling. A 15-minute interval requests 96 polls per day. GitHub
 can delay a scheduled run. Each poll uses Actions runner time, artifact storage

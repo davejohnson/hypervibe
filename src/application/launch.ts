@@ -26,7 +26,7 @@ import { connectAws } from './aws-connect.js';
 import { awsProfileFor, resolveAwsEngineContext } from './infrastructure-engine-aws.js';
 import { azureProfileFor, resolveAzureConnection } from './infrastructure-engine-azure.js';
 import { awsAccessCurrent } from '../adapters/providers/aws/aws-setup.client.js';
-import { azureCiSetupReady } from '../adapters/providers/azure/azure-setup.client.js';
+import { azureCiSetupReady, azureMonitoringSetupReady } from '../adapters/providers/azure/azure-setup.client.js';
 import { cloudEngineFor } from './cloud-engines.js';
 import { engineCiIntent } from '../domain/spec/engine-ci.js';
 import { parseEngineCiBinding } from '../domain/spec/engine-ci-binding.js';
@@ -276,6 +276,13 @@ async function runLaunch(ctx: CommandContext, params: {
 
   if (params.stopAfter === 'prepare') return { status: 'ready', phase: 'prepare', infrastructureRounds: 0 };
 
+  // Accept an existing native setup review opened before monitoring joined the normal infrastructure plan.
+  if (environmentSpec.hosting.provider === 'cloudrun' && params.gcpSetupPlanId
+    && (params.browserAccess === 'runtime-observer' || approvedAccess.has('runtime-observer'))) {
+    const observation = await ensureGcpRuntimeObserver(ctx, params);
+    if (observation) return observation;
+  }
+
   // 2. Infrastructure, in as many reviewed rounds as staging requires.
   let rounds = 0;
   const pendingCertificates = new Set<string>();
@@ -346,10 +353,6 @@ async function runLaunch(ctx: CommandContext, params: {
   }
 
   if (rounds === limit) return { status: 'blocked', message: 'Further infrastructure stages remain unverified. Run hv_launch again to review the next stage.' };
-  if (environmentSpec.hosting.provider === 'cloudrun') {
-    const observation = await ensureGcpRuntimeObserver(ctx, params);
-    if (observation) return observation;
-  }
   if (params.stopAfter === 'infrastructure') return { status: 'ready', phase: 'infrastructure', infrastructureRounds: rounds };
 
   // 3. Release the current code and verify it.
@@ -532,7 +535,8 @@ async function prepareGcpLaunch(ctx: CommandContext, params: Parameters<typeof r
 async function prepareAwsLaunch(ctx: CommandContext, params: Parameters<typeof runLaunch>[1], approvedAccess: Set<string>): Promise<LaunchResult | undefined> {
   const existing = await resolveAwsEngineContext(ctx, params.project, params.environmentName, params.spec);
   if (!('blocked' in existing)) {
-    if (!params.spec.environments[params.environmentName]?.runtimeObservation) return undefined;
+    const env = params.spec.environments[params.environmentName];
+    if (!env?.runtimeObservation || !Object.keys(env.services).length) return undefined;
     const readiness = await awsAccessCurrent(existing.credentials, existing.connection.accountId, true);
     if (readiness === 'current') return undefined;
     if (typeof readiness === 'object') return { status: 'blocked', message: readiness.unknown };
@@ -560,7 +564,11 @@ async function prepareAzureLaunch(params: Parameters<typeof runLaunch>[1], appro
   if (!('blocked' in access)) {
     const env = params.spec.environments[params.environmentName];
     if (env?.deploy?.strategy !== 'branch' && !env?.runtimeObservation) return undefined;
-    try { if (await azureCiSetupReady(access.connection, fetch, Boolean(env?.runtimeObservation))) return undefined; }
+    try {
+      const needsCollector = Boolean(env?.runtimeObservation && Object.keys(env.services).length);
+      const setupReady = !env?.runtimeObservation || await azureMonitoringSetupReady(access.connection);
+      if (setupReady && (env?.deploy?.strategy !== 'branch' && !needsCollector || await azureCiSetupReady(access.connection, fetch, needsCollector))) return undefined;
+    }
     catch { return { status: 'blocked', message: 'Azure CI access could not be verified. Retry when Azure can be read; no access change was attempted.' }; }
   }
   const approved = approvedAccess.has('azure-setup');

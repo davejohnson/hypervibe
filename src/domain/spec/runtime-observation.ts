@@ -35,8 +35,9 @@ export function runtimeObservationIntent(spec: ProjectSpec, environmentName: str
   if (!env?.runtimeObservation) return;
   if (!['cloudrun', 'aws', 'azure'].includes(env.hosting.provider)) throw new Error('Scheduled runtime observation requires Google Cloud Run, AWS ECS or Azure Container Apps.');
   const repository = parseGitHubRepoFromRemote(spec.gitRemoteUrl);
+  if (!repository && !Object.keys(env.services).length) return;
   if (!repository) throw new Error('Scheduled runtime observation requires this project’s GitHub repository in gitRemoteUrl.');
-  if (!Object.keys(env.services).length || Object.keys(env.services).some(name => !segment.safeParse(name).success)) throw new Error('The observer requires named workloads.');
+  if (Object.keys(env.services).some(name => !segment.safeParse(name).success)) throw new Error('The observer requires named workloads.');
   const intent = { repository, branch: env.runtimeObservation.branch, environmentName };
   assertEngineCiIntent(intent);
   return intent;
@@ -50,7 +51,7 @@ export function admitRuntimeObserver(input: { rawSpec: unknown; bindings: unknow
   const binding = runtimeObserverSchema.parse(platform?.runtimeObserver);
   const intent = runtimeObservationIntent(spec, input.environmentName);
   const env = spec.environments[input.environmentName]!;
-  if (!intent || envelope.project !== spec.project || binding.repository !== intent.repository || binding.repository !== input.repository
+  if (!intent || !Object.keys(env.services).length || envelope.project !== spec.project || binding.repository !== intent.repository || binding.repository !== input.repository
     || binding.environmentName !== input.environmentName || binding.branch !== intent.branch || input.ref !== 'refs/heads/' + intent.branch
     || !/^[a-f0-9]{40}$/.test(input.sha) || env.hosting.provider !== (binding.provider === 'gcp' ? 'cloudrun' : binding.provider)
     || Object.keys(binding.services).length !== Object.keys(env.services).length

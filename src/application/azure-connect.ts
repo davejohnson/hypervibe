@@ -58,6 +58,7 @@ export async function connectAzure(params: {
   const location = chooseAzureLocation(params.spec);
   const repository = parseGitHubRepoFromRemote(params.project.gitRemoteUrl ?? params.spec?.gitRemoteUrl) ?? undefined;
   const environments = azureEnvironments(params.spec);
+  const monitored = Object.values(params.spec?.environments ?? {}).filter(env => env.hosting.provider === 'azure' && env.runtimeObservation);
   const choose = async (session: AzureSignInSession): Promise<AzureSubscription | AzureConnectResult> => {
     const { subscriptions, unreachable } = await listAzureSubscriptions(session);
     if (params.subscriptionId) {
@@ -73,7 +74,8 @@ export async function connectAzure(params: {
   };
   const planFor = (session: AzureSignInSession, subscription: AzureSubscription) =>
     planAzureSetup(session, { subscription, project: params.project.name, location, environments, ...(repository ? { repository } : {}),
-      ...(Object.values(params.spec?.environments ?? {}).some(env => env.hosting.provider === 'azure' && env.runtimeObservation) ? { runtimeObservation: true } : {}),
+      ...(monitored.length ? { monitoringResourceProviders: true } : {}),
+      ...(monitored.some(env => Object.keys(env.services).length) ? { runtimeObservation: true } : {}),
       ...(Object.values(params.spec?.environments ?? {}).some(env => env.hosting.provider === 'azure' &&
         Object.values(env.storage ?? {}).some(storage => storage.automatedBackups)) ? { bucketBackupReader: true } : {}) });
 
@@ -128,6 +130,7 @@ async function finishSetup(project: Project, session: AzureSignInSession, plan: 
     : stored && stored.clientId === applied.clientId ? { clientSecret: stored.clientSecret, clientSecretExpiresAt: stored.clientSecretExpiresAt } : undefined;
   if (!secret) return { status: 'failed', message: 'Hypervibe could not create or find its Azure client secret. Run setup again.' };
   const saved = await saveConnection('azure', {
+    ...(plan.monitoringResourceProviders || stored?.monitoringResourceProviders ? { monitoringResourceProviders: true } : {}),
     tenantId: plan.tenantId, subscriptionId: plan.subscriptionId, clientId: applied.clientId, deployPrincipalId: applied.servicePrincipalId, ...secret, resourceGroup: plan.resourceGroup, location: plan.location,
   }, scope, { credentialsSource: 'azure-setup' });
   if (!saved.success) return { status: 'failed', message: 'Azure access was created, but Hypervibe could not save it on this computer. Run setup again; it reuses what exists.' };

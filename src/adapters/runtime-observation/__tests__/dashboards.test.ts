@@ -45,8 +45,8 @@ it('charts ECS services and bound job logs; failed-task rules match only termina
 it('uses the bound Azure resources in each tile and metric alert; the scheduled console alert excludes sibling environments sharing the workspace', () => {
   const r = native(buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, observation: azureObservation }));
   const dashboard = JSON.parse(r.azurerm_portal_dashboard.runtime.dashboard_properties);
-  const tiles = Object.values(dashboard.lenses['0'].parts).map((part: any) => part.metadata.inputs[0].value.metrics[0]);
-  expect(tiles).toEqual([{ name: 'Requests', resourceId: '${azurerm_container_app.web.id}' }, { name: 'Replicas', resourceId: '${azurerm_container_app.worker.id}' }, { name: 'Executions', resourceId: '${azurerm_container_app_job.nightly.id}' }]);
+  const tiles = Object.values(dashboard.lenses['0'].parts).flatMap((part: any) => part.metadata.inputs[0]?.value.metrics ?? []);
+  expect(tiles).toEqual([{ name: 'Requests', resourceId: '${azurerm_container_app.web.id}' }, { name: 'Replicas', resourceId: '${azurerm_container_app.worker.id}' }, { name: 'Executions', resourceId: '${azurerm_container_app_job.nightly.id}' }, { name: 'Availability', resourceId: '${azurerm_storage_account.files.id}' }]);
   const query = r.azurerm_monitor_scheduled_query_rules_alert_v2.runtime_errors;
   expect(query.scopes).toEqual([azureObservation.workspaceResourceId]);
   for (const scope of ['hv-billforge-shared-apps','hv-billforge-test-web','hv-billforge-test-worker','hv-billforge-test-nightly']) expect(query.criteria[0].query).toContain("'" + scope + "'");
@@ -80,7 +80,7 @@ it('leaves a never-enrolled AWS or Azure plan free of observer ownership mapping
 it('keeps an unchanged app free of monitoring resources and routes opt-in costs and opt-out deletes through exact plan review', () => {
   const gcp = buildGcpObserverConfiguration(google, key, observation.repositoryId);
   const disabledGcp = disableGcpObserverConfiguration(gcp, key);
-  retainObserverRemovals(disabledGcp, gcp);
+  retainObserverRemovals(disabledGcp, gcp, key);
   const cases: Array<[string, EngineConfiguration, EngineConfiguration, string]> = [
     ['aws', buildAwsConfiguration({ ...awsInput, observation }), buildAwsConfiguration({ ...awsInput, previousObserverServices: ['web', 'nightly'] }), file],
     ['azure', buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, observation: azureObservation }), buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, previousObserverServices: [...fullEnvironmentInput.services ?? [], ...fullEnvironmentInput.workers ?? [], ...fullEnvironmentInput.jobs ?? []].map(w => w.logicalName) }), file],

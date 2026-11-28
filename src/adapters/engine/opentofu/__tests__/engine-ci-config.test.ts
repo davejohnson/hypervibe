@@ -5,8 +5,8 @@ import path from 'path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildAwsConfiguration } from '../../../providers/aws/tofu/aws-engine.config.js';
 import { awsEngineBackend } from '../../../providers/aws/tofu/aws-engine.backend.js';
-import { buildAzureBuildConfiguration, buildAzureEnvironmentConfiguration } from '../../../providers/azure/tofu/azure-engine.config.js';
-import { fullEnvironmentInput } from '../../../providers/azure/tofu/__tests__/azure-fixtures.js';
+import { buildAzureBuildConfiguration, buildAzureEnvironmentConfiguration, buildAzureSharedConfiguration } from '../../../providers/azure/tofu/azure-engine.config.js';
+import { fullEnvironmentInput, fullSharedInput } from '../../../providers/azure/tofu/__tests__/azure-fixtures.js';
 import { azureEngineBackend } from '../../../providers/azure/tofu/azure-engine.backend.js';
 import { buildGcpObserverConfiguration, googleObserverBinding, observerKey } from '../../../providers/gcp/tofu/gcp-observer.config.js';
 import { gcpSetupBackend } from '../../../providers/gcp/tofu/gcp-setup.backend.js';
@@ -36,11 +36,14 @@ describe('CI identity graphs with pinned provider binaries', () => {
   it('validates Azure workload-scoped CI identity, federation and role assignments', async () => {
     expect(await engine.validate(azureEngineBackend, buildAzureEnvironmentConfiguration({ ...fullEnvironmentInput, ci, observation: { ...observation,
       workspaceResourceId: '/subscriptions/' + fullEnvironmentInput.subscriptionId + '/resourceGroups/' + fullEnvironmentInput.resourceGroup + '/providers/Microsoft.OperationalInsights/workspaces/shared-logs' } }))).toEqual({ ok: true });
+    expect(await engine.validate(azureEngineBackend, buildAzureSharedConfiguration({ ...fullSharedInput, database: { version: 17, monitorStorage: true } }))).toEqual({ ok: true });
     expect(await engine.validate(azureEngineBackend, buildAzureBuildConfiguration({ ...fullEnvironmentInput, ci, packageTokenKey: 'NPM_TOKEN' }))).toEqual({ ok: true });
     expect(await engine.validate(azureEngineBackend, buildAzureBuildConfiguration({ ...fullEnvironmentInput, ci }))).toEqual({ ok: true });
   }, 300_000);
   it('validates AWS OIDC role and release policy alongside web, worker and cron resources', async () => {
     const input = { accountId: '111122223333', region: 'us-west-2', prefix: 'hv-app-demo', environmentId: 'env1', parameterPath: '/hypervibe/env1/', ci, observation,
+      storage: [{ name: 'invoices', bucket: 'hv-app-demo-invoices-111122223333' }],
+      database: { name: 'staging', clusterArn: 'arn:aws:rds:us-west-2:111122223333:cluster:hv-app-shared-postgres' },
       services: [{ logicalName: 'web', resourceName: 'hv-app-demo-web', initialImageUri: '111122223333.dkr.ecr.us-west-2.amazonaws.com/app:commit', public: true }],
       workers: [{ logicalName: 'worker', resourceName: 'hv-app-demo-worker', initialImageUri: '111122223333.dkr.ecr.us-west-2.amazonaws.com/app:commit' }],
       jobs: [{ logicalName: 'cron', resourceName: 'hv-app-demo-cron', initialImageUri: '111122223333.dkr.ecr.us-west-2.amazonaws.com/app:commit', schedule: '0 1 * * *' }],
@@ -54,6 +57,8 @@ describe('CI identity graphs with pinned provider binaries', () => {
       serviceId: 'projects/demo-project/locations/us-central1/' + ({ web: 'services', worker: 'workerPools', cron: 'jobs' })[workloadKind] + '/demo-' + workloadKind,
     }]));
     const binding = googleObserverBinding({ key, project: 'demo-project', number: '123456789', environmentId: 'ENV1', intent: ci, services });
-    expect(await engine.validate(gcpSetupBackend, buildGcpObserverConfiguration(binding, key, observation.repositoryId))).toEqual({ ok: true });
+    expect(await engine.validate(gcpSetupBackend, buildGcpObserverConfiguration(binding, key, observation.repositoryId,
+      [...(['database', 'cache', 'storage', 'queue'] as const).map(kind => ({ kind, name: kind, native: 'demo-' + kind, region: 'us-central1' })),
+        { kind: 'database', name: 'tenant', native: 'demo-shared-pg', region: 'us-central1', tenantDatabase: 'demo_app' }]))).toEqual({ ok: true });
   }, 300_000);
 });

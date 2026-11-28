@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { chooseAzureLocation } from '../../../../application/azure-connect.js';
 import {
-  AZURE_APP_ROLES, AZURE_RESOURCE_PROVIDERS, AZURE_ROLES, appRoleAssignmentCondition, applyAzureSetup, azureCiSetupReady, deployRoleGrants, githubSubjects, planAzureSetup,
+  AZURE_APP_ROLES, AZURE_RESOURCE_PROVIDERS, AZURE_ROLES, appRoleAssignmentCondition, applyAzureSetup, azureCiSetupReady, azureMonitoringSetupReady, deployRoleGrants, githubSubjects, planAzureSetup,
   roleAssignmentName, type AzureSetupPlan,
 } from '../azure-setup.client.js';
 import type { AzureSignInSession } from '../azure-entra.client.js';
@@ -48,6 +48,17 @@ describe('Azure setup access', () => {
     widened = true; expect(await azureCiSetupReady(connection, azure.fetchImpl)).toBe(false);
     widened = false; incomplete = true; expect(await azureCiSetupReady(connection, azure.fetchImpl)).toBe(false);
     expect(azure.calls.filter((c) => !c.url.startsWith('https://login.')).every((c) => c.method === 'GET')).toBe(true);
+  });
+  it('checks both native monitoring registrations with the group-scoped deploy identity', async () => {
+    const connection = { tenantId: TENANT, subscriptionId: SUB, clientId: TENANT, deployPrincipalId: TENANT, clientSecret: 'local-secret-only', resourceGroup: 'hv-billforge', location: 'eastus2', clientSecretExpiresAt: '2027-01-01T00:00:00Z' };
+    let code = 200, registrationState = 'Registered';
+    const azure = fakeAzure([['GET', /\/providers\/Microsoft\.(Portal|Insights)\?/, () => json(code, { registrationState })]]);
+    expect(await azureMonitoringSetupReady(connection, azure.fetchImpl)).toBe(true);
+    registrationState = 'NotRegistered';
+    expect(await azureMonitoringSetupReady({ ...connection, monitoringResourceProviders: true }, azure.fetchImpl)).toBe(false);
+    code = 403;
+    expect(await azureMonitoringSetupReady(connection, azure.fetchImpl)).toBe(false);
+    expect(await azureMonitoringSetupReady({ ...connection, monitoringResourceProviders: true }, azure.fetchImpl)).toBe(true);
   });
   it('grants roles on the project resource group only, and lets the deploy identity assign nothing but the app data roles to service principals', () => {
     const roles = deployRoleGrants().map((grant) => grant.role);
@@ -96,16 +107,17 @@ describe('Azure setup plan', () => {
   });
 
   it('reviews dashboard and alert namespaces only for an environment requesting monitoring', async () => {
-    for (const enabled of [false, true]) {
+    for (const mode of ['disabled', 'resources', 'workloads']) {
       const azure = fakeAzure([
         ['GET', /\/providers\/Microsoft\.[A-Za-z]+\?/, () => json(200, { registrationState: 'NotRegistered' })],
         ['GET', /\/resourceGroups\/hv-billforge\?/, () => json(404, { error: { code: 'ResourceGroupNotFound' } })],
         ['GET', /applications\(uniqueName='hypervibe-deploy-billforge'\)/, () => json(404)],
       ]);
-      const result = await planAzureSetup(session(), { ...target, ...(enabled ? { runtimeObservation: true as const } : {}) }, azure.fetchImpl);
-      expect(Boolean(result.monitoringResourceProviders)).toBe(enabled);
+      const result = await planAzureSetup(session(), { ...target, ...(mode === 'resources' ? { monitoringResourceProviders: true as const } : {}), ...(mode === 'workloads' ? { runtimeObservation: true as const } : {}) }, azure.fetchImpl);
+      expect(Boolean(result.monitoringResourceProviders)).toBe(mode !== 'disabled');
+      expect(Boolean(result.runtimeObservation)).toBe(mode === 'workloads');
       for (const namespace of ['Microsoft.Portal', 'Microsoft.Insights']) {
-        expect(result.changes.find(c => c.id === 'resource-providers')?.change.includes(namespace)).toBe(enabled);
+        expect(result.changes.find(c => c.id === 'resource-providers')?.change.includes(namespace)).toBe(mode !== 'disabled');
       }
     }
   });
@@ -127,7 +139,9 @@ describe('Azure setup apply', () => {
 
   it.each([false, true])('applies exactly the reviewed provider registrations, scopes roles to the group and returns the secret once (monitoring %s)', async (enabled) => {
     let principalNotFound = 1;
+    let registering = true;
     const azure = fakeAzure([
+      ['GET', /\/providers\/Microsoft\.(Portal|Insights)\?/, () => { const initial = registering; registering = false; return json(200, { registrationState: initial ? 'Registering' : 'Registered' }); }],
       ['POST', /\/providers\/Microsoft\.[A-Za-z]+\/register\?/, () => json(200)],
       ['PUT', /\/resourceGroups\/hv-billforge\?/, () => json(201)],
       ['PUT', /\/vaults\/hv-billforge-abc123\?/, () => json(201)],

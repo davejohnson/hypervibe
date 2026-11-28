@@ -344,6 +344,14 @@ $0.01/hour, DNS zone $0.50/month); they were not re-read from the price API on
 Prices are list prices for `eastus2` from the
 [Azure Retail Prices API](https://prices.azure.com/api/retail/prices), read 2026-11-12.
 
+## Monitoring managed data resources
+
+An environment with `runtimeObservation` gets Azure-native monitoring even when it has no web service, worker or job. Blob containers share one storage account per environment. Its dashboard lists the declared containers, charts account availability and adds one reviewed Azure Monitor alert when the account average falls below 99% over 15 minutes. Azure publishes this metric at account scope. A container rename does not isolate its traffic in Azure Monitor. [Microsoft's Storage account metric definitions](https://learn.microsoft.com/en-us/azure/azure-monitor/reference/supported-metrics/microsoft-storage-storageaccounts-metrics).
+
+Testing environments with a database share a PostgreSQL Flexible Server. Each enrolled database environment charts server-wide storage usage. The shared infrastructure plan adds one alert when maximum storage usage reaches 85% in 15 minutes. It retains the alert while another enrolled database environment uses the server. These thresholds are Hypervibe defaults and Azure Monitor can charge for the alerts. [Microsoft's PostgreSQL Flexible Server metric definitions](https://learn.microsoft.com/en-us/azure/azure-monitor/reference/supported-metrics/microsoft-dbforpostgresql-flexibleservers-metrics).
+
+Removing `runtimeObservation` while retaining the storage and database declarations retires their native monitoring through reviewed plans. Omitting or renaming a Blob container cannot authorize deleting its contents or its account. The ordinary plan blocks that storage change. Keep the existing name to retain files. Full environment teardown previews the separate data-removal steps. The Azure engine currently provisions no managed queue or cache.
+
 ## Teardown
 
 `hv_plan scope="teardown"` removes a testing environment as one reviewed plan, with

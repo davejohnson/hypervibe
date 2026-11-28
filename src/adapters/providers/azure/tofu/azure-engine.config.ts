@@ -1,4 +1,4 @@
-import { addAzureMonitoring } from './azure-monitoring.config.js';
+import { addAzureMonitoring, addAzureSharedDatabaseMonitoring } from './azure-monitoring.config.js';
 import type { ObserverFederation } from '../../../../domain/spec/runtime-observation.js';
 import { azureCiRegistry, azureSelectedBuildRegistry, type AzureBuildRegistry } from '../azure-ci-registry.js';
 import { azureBuildTaskContent, azureBuildTaskName } from '../azure-build-task.js';
@@ -42,7 +42,7 @@ export interface AzureSharedInput extends AzurePlacement {
   deployPrincipalId: string;
   deployPrincipalName: string;
   /** PostgreSQL major version; omitted when no environment in the group has a database. */
-  database?: { version: number; skuName?: string; storageMb?: number };
+  database?: { version: number; skuName?: string; storageMb?: number; monitorStorage?: true };
 }
 
 export interface AzureSharedNames { server: string; registry: string }
@@ -55,6 +55,7 @@ export const AZURE_NETWORK = { space: '10.61.0.0/16', apps: '10.61.0.0/23', endp
 export interface AzureEngineInput extends AzurePlacement {
   ci?: EngineCiIntent;
   observation?: ObserverFederation & { workspaceResourceId: string };
+  monitoring?: { project: string; postgresServerId?: string };
   previousObserverServices?: string[];
   kind?: 'environment';
   /** Environment id stamped on owned resources so adoption can prove ownership. */
@@ -291,6 +292,7 @@ export function buildAzureSharedConfiguration(input: AzureSharedInput): EngineCo
       output: { database_host: { value: '${azurerm_postgresql_flexible_server.postgres.fqdn}' } },
     };
   }
+  if (input.database?.monitorStorage) addAzureSharedDatabaseMonitoring(input, files, resources);
   return { files, resources };
 }
 
@@ -529,8 +531,8 @@ export function buildAzureEnvironmentConfiguration(input: AzureEngineInput): Eng
   addAzureCiConfiguration(input, files, resources);
   if (input.observation || input.previousObserverServices) {
     addAzureObserverConfiguration(input, files, resources);
-    addAzureMonitoring(input, files, resources);
   }
+  if (input.monitoring || input.observation || input.previousObserverServices) addAzureMonitoring(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
     runtime_identity_client_id: { value: '${azurerm_user_assigned_identity.runtime.client_id}' },

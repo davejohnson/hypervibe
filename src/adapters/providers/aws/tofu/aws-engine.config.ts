@@ -18,6 +18,7 @@ import { awsControlRoleName, awsRuntimeIdentity, awsTaskRoleArns } from './aws-e
 export interface AwsEngineInput {
   ci?: EngineCiIntent;
   observation?: ObserverFederation;
+  nativeMonitoring?: boolean;
   previousObserverServices?: string[];
   webCommands?: boolean;
   accountId: string;
@@ -323,10 +324,8 @@ export function buildAwsConfiguration(input: AwsEngineInput): EngineConfiguratio
     resources['aws_secretsmanager_secret.database_query'] = { actionId: 'database-query:credential', kind: 'secret', name: 'database query access', billable: true, requiresConfirm: true };
   }
   addAwsCiConfiguration(input, files, resources);
-  if (input.observation || input.previousObserverServices) {
-    addAwsObserverConfiguration(input, files, resources);
-    addAwsMonitoring(input, files, resources);
-  }
+  if (input.observation || input.previousObserverServices) addAwsObserverConfiguration(input, files, resources);
+  if (input.nativeMonitoring || input.observation || input.previousObserverServices) addAwsMonitoring(input, files, resources);
 
   files['outputs.tf.json'] = { output: {
     runtime_role_arn: { value: '${aws_iam_role.runtime.arn}' },

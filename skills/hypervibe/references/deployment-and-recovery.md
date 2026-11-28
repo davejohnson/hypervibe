@@ -184,7 +184,7 @@ When the user requests ongoing cloud runtime observation, set
 `runtimeObservation: { "branch": "<default branch>" }` on the selected
 Cloud Run, AWS ECS or Azure Container Apps environment through `hv_spec`.
 Use `hv_launch stopAfter="infrastructure"` to review access, plan and apply
-the observer and native monitoring resources. GitHub runs a separate
+the observer and native monitoring resources. Plan again after a Google Cloud infrastructure change to review monitoring for its applied targets. An enrolled environment can keep its native storage, database, cache or queue monitoring after the final workload is retired. Show the plan’s coverage gaps and the cloud resource each alert measures. For environments with workloads, GitHub runs a separate
 observer every five minutes by default. Set `intervalMinutes` to 10, 15 or 30 for a lower polling frequency. Explain the runner usage, retained artifacts
 and potential cloud monitoring charges when reviewing costs.
 Commit the resulting spec, applied bindings and generated

@@ -32,7 +32,8 @@ const GITHUB_ISSUER = 'https://token.actions.githubusercontent.com';
 export const AZURE_RESOURCE_PROVIDERS = ['Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsoft.DBforPostgreSQL', 'Microsoft.KeyVault',
   'Microsoft.ManagedIdentity', 'Microsoft.Network', 'Microsoft.OperationalInsights', 'Microsoft.Storage'] as const;
 
-const requiredProviders = (monitoring?: boolean) => monitoring ? [...AZURE_RESOURCE_PROVIDERS, 'Microsoft.Portal', 'Microsoft.Insights'] : AZURE_RESOURCE_PROVIDERS;
+const monitoringProviders = ['Microsoft.Portal', 'Microsoft.Insights'];
+const requiredProviders = (monitoring?: boolean) => monitoring ? [...AZURE_RESOURCE_PROVIDERS, ...monitoringProviders] : AZURE_RESOURCE_PROVIDERS;
 
 /** Built-in role ids (identical in every tenant). */
 export const AZURE_ROLES = {
@@ -158,6 +159,7 @@ export interface AzureSetupPlan {
 }
 
 export interface AzureSetupTarget {
+  monitoringResourceProviders?: true;
   bucketBackupReader?: true;
   runtimeObservation?: true;
   subscription: AzureSubscription;
@@ -187,6 +189,17 @@ function sameCiRole(observed: unknown, expected: ReturnType<typeof azureCiRoleDe
     assignableScopes: [...properties.assignableScopes].map((scope) => scope.toLowerCase()).sort(),
     permissions: properties.permissions.map((p) => ({ actions: [...p.actions].sort(), notActions: [...(p.notActions ?? [])].sort(), dataActions: [...(p.dataActions ?? [])].sort(), notDataActions: [...(p.notDataActions ?? [])].sort() })) });
   try { return !!value && normalized({ roleName: value.roleName, description: value.description, type: value.type, permissions: value.permissions, assignableScopes: value.assignableScopes }) === normalized(expected); } catch { return false; }
+}
+
+export async function azureMonitoringSetupReady(connection: AzureEngineCredentials, fetchImpl: Fetch = fetch): Promise<boolean> {
+  const token = await azureDeployToken(connection, fetchImpl);
+  for (const namespace of monitoringProviders) {
+    const response = await rest(fetchImpl, token, 'GET', `${ARM}/subscriptions/${connection.subscriptionId}/providers/${namespace}?api-version=2021-04-01`);
+    // A group-scoped deploy principal may lack subscription-wide read access. Owner setup recorded registration.
+    if (response.status === 403 && connection.monitoringResourceProviders) continue;
+    if (response.status !== 200 || response.body.registrationState !== 'Registered') return false;
+  }
+  return true;
 }
 
 /** Read-only upgrade detection; a missing or unverifiable grant cannot authorize branch releases. */
@@ -229,7 +242,7 @@ export async function planAzureSetup(session: AzureSignInSession, target: AzureS
   const changes: AzureSetupChange[] = [];
 
   const unregistered: string[] = [];
-  for (const namespace of requiredProviders(target.runtimeObservation)) {
+  for (const namespace of requiredProviders(target.monitoringResourceProviders || target.runtimeObservation)) {
     const provider = ensure(await rest(fetchImpl, tokens.arm, 'GET', `${ARM}/subscriptions/${subscriptionId}/providers/${namespace}?api-version=2021-04-01`), `Reading ${namespace}`, [200]);
     if (provider.body.registrationState !== 'Registered') unregistered.push(namespace);
   }
@@ -308,7 +321,7 @@ export async function planAzureSetup(session: AzureSignInSession, target: AzureS
     change: `A client secret for ${appName}, valid one year: lets this computer deploy; stored encrypted here and never shown` });
   return {
     tenantId, subscriptionId, subscriptionName: target.subscription.displayName, location: target.location, signedInAs: session.username,
-    resourceGroup: group, appName, vaultName, ...(target.runtimeObservation ? { monitoringResourceProviders: true as const } : {}), ...(withReader ? { bucketBackupReader: true as const } : {}), ...(withObserver ? { runtimeObservation: true as const } : {}), ...(target.repository ? { repository: target.repository } : {}), environments: target.environments,
+    resourceGroup: group, appName, vaultName, ...(target.monitoringResourceProviders || target.runtimeObservation ? { monitoringResourceProviders: true as const } : {}), ...(withReader ? { bucketBackupReader: true as const } : {}), ...(withObserver ? { runtimeObservation: true as const } : {}), ...(target.repository ? { repository: target.repository } : {}), environments: target.environments,
     changes, ready: changes.every((change) => change.state === 'ok'),
   };
 }
@@ -333,6 +346,17 @@ export async function applyAzureSetup(session: AzureSignInSession, plan: AzureSe
   for (const namespace of requiredProviders(plan.monitoringResourceProviders)) {
     // Registration finishes in the background within minutes; plans check it before building.
     ensure(await rest(fetchImpl, tokens.arm, 'POST', `${ARM}/subscriptions/${subscriptionId}/providers/${namespace}/register?api-version=2021-04-01`), `Turning on ${namespace}`, [200, 202]);
+  }
+  if (plan.monitoringResourceProviders) {
+    for (const namespace of monitoringProviders) {
+      const url = `${ARM}/subscriptions/${subscriptionId}/providers/${namespace}?api-version=2021-04-01`;
+      for (let attempt = 0; ; attempt++) {
+        const response = ensure(await rest(fetchImpl, tokens.arm, 'GET', url), `Verifying ${namespace} registration`, [200]);
+        if (response.body.registrationState === 'Registered') break;
+        if (attempt >= 23) throw new Error(`Azure is still registering ${namespace}. Retry the same setup after registration completes.`);
+        await new Promise(done => setTimeout(done, delay));
+      }
+    }
   }
   const scope = groupScope(subscriptionId, plan.resourceGroup);
   ensure(await rest(fetchImpl, tokens.arm, 'PUT', `${ARM}${scope}?api-version=2021-04-01`, { location: plan.location, tags: { 'managed-by': 'hypervibe' } }),

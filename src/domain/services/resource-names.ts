@@ -37,3 +37,9 @@ export function resourceName(name: string, options: {
 export function environmentResourceName(name: string, environment: Environment): string {
   return resourceName(name, { scope: [environment.projectId, environment.name] });
 }
+
+/** Globally unique, stable bucket name; bucket names can be reused after deletion. */
+export function engineBucketName(gcpProjectId: string, environmentName: string, storageName: string): string {
+  const hash = createHash('sha256').update(`${gcpProjectId}/${environmentName}/${storageName}`).digest('hex').slice(0, 8);
+  return `hv-${hash}-${environmentName}-${storageName}`.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 63).replace(/-+$/, '');
+}

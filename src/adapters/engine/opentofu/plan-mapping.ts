@@ -166,6 +166,10 @@ export function translateEnginePlan(params: {
       .flatMap((change) => [...new Set(change.changedAttributePaths.map((path) => path.join('.') || '*'))].sort()
         .map((field) => ({ field: `${change.type}.${field}` })));
     const mutating = changes.filter((change) => change.action !== 'noop').map((change) => change.address);
+    const operations = changes.some(change => change.action === 'delete')
+      && changes.some(change => ['create', 'update', 'import', 'replace'].includes(change.action))
+      ? Object.fromEntries(changes.filter(change => change.action !== 'noop').map(change => [change.address, change.action]))
+      : undefined;
     actions.push({
       id: actionId,
       type,
@@ -176,12 +180,13 @@ export function translateEnginePlan(params: {
         : `OpenTofu will ${changes.filter((c) => c.action !== 'noop').map((c) => c.action === 'import'
           ? `adopt the explicitly selected existing ${c.address}` : `${c.action} ${c.address}`).join(', ')}.`,
       ...(diff.length ? { diff } : {}),
-      ...(mapping.dataBearing && destructive ? { dataBearing: true } : {}),
+      ...(changes.some(change => (change.action === 'delete' || change.action === 'replace')
+        && params.configuration.resources[change.address]?.dataBearing) ? { dataBearing: true } : {}),
       ...(costChange || (mapping.billable && (dominant.action === 'create' || dominant.action === 'replace')) ? { billable: true } : {}),
       // Replacing, deleting or adopting anything is never implied by approving the plan as a whole.
       ...(destructive || adopting || majorUpgrade || costChange || (type !== 'noop' && mapping.requiresConfirm) ? { requiresConfirm: true } : {}),
       ...(type === 'noop' ? {} : {
-        metadata: { engineSegment: { ...params.segment, addresses: mutating } satisfies EngineActionSegment, ...(adopting ? { engineAdopt: true } : {}), ...(majorUpgrade ? { engineMajorUpgrade: true } : {}) },
+        metadata: { engineSegment: { ...params.segment, addresses: mutating, ...(operations ? { operations } : {}) } satisfies EngineActionSegment, ...(adopting ? { engineAdopt: true } : {}), ...(majorUpgrade ? { engineMajorUpgrade: true } : {}) },
       }),
     });
   }

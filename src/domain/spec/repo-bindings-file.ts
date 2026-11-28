@@ -447,13 +447,14 @@ export function writeRepoBindingsForEnvironment(project: Project, environment: E
   const previousObserver = current.environments[environment.name]?.platformBindings.runtimeObserver;
   const observation = spec?.environments[environment.name]?.runtimeObservation;
   const binding = environment.platformBindings.runtimeObserver;
-  if (binding && spec && observation) {
+  const hasWorkloads = Object.keys(spec?.environments[environment.name]?.services ?? {}).length > 0;
+  if (binding && spec && observation && hasWorkloads) {
     const intent = runtimeObservationIntent(spec, environment.name)!;
     const saved = runtimeObserverSchema.parse(binding);
     if (saved.repository === intent.repository && saved.branch === intent.branch && saved.environmentName === environment.name) {
       reconcileRuntimeObservationWorkflow(root, environment.name, { ...intent, hostedReview: observation.hostedReview, intervalMinutes: observation.intervalMinutes });
     }
-  } else if (spec && (previousObserver || binding === null) && !observation && !binding) {
+  } else if (spec && (previousObserver || binding === null) && (!observation || !hasWorkloads) && !binding) {
     reconcileRuntimeObservationWorkflow(root, environment.name);
   }
   const platformBindings = presentStorageInstanceScopes(
