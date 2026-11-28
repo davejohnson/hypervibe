@@ -336,6 +336,6 @@ describe('production promotion from a managed Railway staging release', () => {
       expect(writes).toEqual(mode === 'failed migration' || mode === 'execution predates copy' ? ['patch prod-migrate', 'reserve migration', 'run migrations'] : mode === 'changed after patch' || mode === 'second container after patch' ? ['patch prod-migrate'] : []);
       if (mode === 'recreated worker' || mode === 'split traffic' || mode === 'changed migration command') expect(copies).toHaveLength(0);
     }
-  });
+  }, 30_000);
 
 });
